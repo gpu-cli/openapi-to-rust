@@ -1,0 +1,55 @@
+---
+source: openapi-generator/src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum ResponseStreamEvent {
+    #[serde(rename = "created")]
+    Created(ResponseCreatedEvent),
+    #[serde(rename = "completed")]
+    Completed(ResponseCompletedEvent),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseCreatedEvent {
+    pub id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ResponseCreatedEventType {
+    #[default]
+    #[serde(rename = "created")]
+    Created,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseCompletedEvent {
+    pub id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ResponseCompletedEventType {
+    #[default]
+    #[serde(rename = "completed")]
+    Completed,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BetaListResponseMessageBatch {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_id: Option<BetaListResponseMessageBatchLastId>,
+}
+///Last ID type
+pub type BetaListResponseMessageBatchLastId = String;
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum BetaTool20241022CacheControl {
+    #[default]
+    #[serde(rename = "ephemeral")]
+    Ephemeral,
+}

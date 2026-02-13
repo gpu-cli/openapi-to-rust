@@ -1,0 +1,29 @@
+---
+source: openapi-generator/tests/operation_extraction_test.rs
+expression: analysis.operations
+---
+getV0Servers:
+  operation_id: getV0Servers
+  method: GET
+  path: /v0/servers
+  request_body: ~
+  response_schemas:
+    "200": ServerList
+  parameters: []
+  supports_streaming: false
+  stream_parameter: ~
+getV0ServersServerId:
+  operation_id: getV0ServersServerId
+  method: GET
+  path: "/v0/servers/{serverId}"
+  request_body: ~
+  response_schemas:
+    "200": ServerResponse
+  parameters:
+    - name: serverId
+      location: path
+      required: true
+      schema_ref: ~
+      rust_type: String
+  supports_streaming: false
+  stream_parameter: ~

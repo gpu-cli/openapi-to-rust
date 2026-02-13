@@ -1,0 +1,60 @@
+---
+source: openapi-generator/src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Task {
+    ///Task priority
+    pub priority: TaskPriority,
+    ///Task status
+    pub status: TaskStatus,
+    ///Task type
+    #[serde(rename = "type")]
+    pub type_: TaskType,
+}
+///Task type
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum TaskType {
+    #[default]
+    #[serde(rename = "build")]
+    Build,
+    #[serde(rename = "test")]
+    Test,
+    #[serde(rename = "deploy")]
+    Deploy,
+}
+///Task status
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum TaskStatus {
+    #[default]
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "failed")]
+    Failed,
+}
+///Task priority
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum TaskPriority {
+    #[default]
+    #[serde(rename = "low")]
+    Low,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "high")]
+    High,
+    #[serde(rename = "critical")]
+    Critical,
+}

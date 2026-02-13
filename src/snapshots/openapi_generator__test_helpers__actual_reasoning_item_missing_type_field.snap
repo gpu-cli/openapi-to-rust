@@ -1,0 +1,54 @@
+---
+source: openapi-generator/src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+///A description of the chain of thought used by a reasoning model while generating a response.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReasoningItem {
+    ///The encrypted content of the reasoning item - populated when a response is generated with `reasoning.encrypted_content` in the `include` parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+    ///The unique identifier of the reasoning content.
+    pub id: String,
+    ///The status of the item. One of `in_progress`, `completed`, or `incomplete`. Populated when items are returned via API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ReasoningItemStatus>,
+    ///Reasoning text contents.
+    pub summary: Vec<ReasoningItemSummaryItem>,
+    ///The type of the object. Always `reasoning`.
+    #[serde(rename = "type")]
+    pub type_: ReasoningItemType,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReasoningItemSummaryItem {
+    ///A short summary of the reasoning used by the model when generating the response.
+    pub text: String,
+    ///The type of the object. Always `summary_text`.
+    #[serde(rename = "type")]
+    pub type_: ReasoningItemType,
+}
+///The type of the object. Always `reasoning`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ReasoningItemType {
+    #[default]
+    #[serde(rename = "reasoning")]
+    Reasoning,
+}
+///The status of the item. One of `in_progress`, `completed`, or `incomplete`. Populated when items are returned via API.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ReasoningItemStatus {
+    #[default]
+    #[serde(rename = "in_progress")]
+    InProgress,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "incomplete")]
+    Incomplete,
+}

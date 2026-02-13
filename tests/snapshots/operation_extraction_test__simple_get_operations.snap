@@ -1,0 +1,14 @@
+---
+source: openapi-generator/tests/operation_extraction_test.rs
+expression: analysis.operations
+---
+listItems:
+  operation_id: listItems
+  method: GET
+  path: /items
+  request_body: ~
+  response_schemas:
+    "200": ListItemsResponse
+  parameters: []
+  supports_streaming: false
+  stream_parameter: ~

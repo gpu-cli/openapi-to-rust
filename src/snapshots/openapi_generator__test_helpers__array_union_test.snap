@@ -1,0 +1,32 @@
+---
+source: openapi-generator/src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+pub type ToolList = Vec<Tool>;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum Tool {
+    #[serde(rename = "function")]
+    FunctionTool(FunctionTool),
+    #[serde(rename = "retrieval")]
+    RetrievalTool(RetrievalTool),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RetrievalTool {
+    pub query: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FunctionTool {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub name: String,
+}

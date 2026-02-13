@@ -1,0 +1,16 @@
+---
+source: openapi-generator/tests/operation_extraction_test.rs
+expression: analysis.operations
+---
+createItem:
+  operation_id: createItem
+  method: POST
+  path: /items
+  request_body:
+    kind: Json
+    schema_name: CreateItemRequest
+  response_schemas:
+    "201": Item
+  parameters: []
+  supports_streaming: false
+  stream_parameter: ~
