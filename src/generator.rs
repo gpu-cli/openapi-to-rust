@@ -2352,8 +2352,7 @@ impl CodeGenerator {
             #(#query_params)*
         };
 
-        let instrument_skip =
-            quote! { #[instrument(skip(self), name = "streaming_get_request")] };
+        let instrument_skip = quote! { #[instrument(skip(self), name = "streaming_get_request")] };
 
         Ok(quote! {
             #[async_trait]

@@ -1002,9 +1002,7 @@ impl SchemaAnalyzer {
             Schema::Reference { reference, .. } => {
                 let target = self
                     .extract_schema_name(reference)
-                    .ok_or_else(|| {
-                        GeneratorError::UnresolvedReference(reference.to_string())
-                    })?
+                    .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
                     .to_string();
                 dependencies.insert(target.clone());
                 SchemaType::Reference { target }
@@ -1304,9 +1302,7 @@ impl SchemaAnalyzer {
                     .unwrap_or_else(|| "UnknownRecursive".to_string())
             } else {
                 self.extract_schema_name(ref_str)
-                    .ok_or_else(|| {
-                        GeneratorError::UnresolvedReference(ref_str.to_string())
-                    })?
+                    .ok_or_else(|| GeneratorError::UnresolvedReference(ref_str.to_string()))?
                     .to_string()
             };
             dependencies.insert(target.clone());
@@ -2767,9 +2763,7 @@ impl SchemaAnalyzer {
                     // Array of referenced types
                     let target = self
                         .extract_schema_name(reference)
-                        .ok_or_else(|| {
-                            GeneratorError::UnresolvedReference(reference.to_string())
-                        })?
+                        .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
                         .to_string();
                     dependencies.insert(target.clone());
                     SchemaType::Reference { target }

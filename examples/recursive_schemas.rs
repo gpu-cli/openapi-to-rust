@@ -140,9 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             openapi_to_rust::analysis::SchemaType::Array { item_type } => {
                                 match item_type.as_ref() {
-                                    openapi_to_rust::analysis::SchemaType::Reference {
-                                        target,
-                                    } => {
+                                    openapi_to_rust::analysis::SchemaType::Reference { target } => {
                                         format!("{prop_name}: Vec<{target}>")
                                     }
                                     _ => format!("{prop_name}: {item_type:?}"),
