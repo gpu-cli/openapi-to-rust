@@ -1,5 +1,10 @@
 # openapi-generator
 
+[![CI](https://github.com/gpu-cli/openapi-generator/actions/workflows/ci.yml/badge.svg)](https://github.com/gpu-cli/openapi-generator/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/openapi-generator.svg)](https://crates.io/crates/openapi-generator)
+[![docs.rs](https://docs.rs/openapi-generator/badge.svg)](https://docs.rs/openapi-generator)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A Rust code generator that creates strongly-typed structs, HTTP clients, and SSE streaming clients from OpenAPI 3.1 specifications.
 
 We originally built this internally at [GPU CLI](https://gpu-cli.sh) to generate typed Rust clients for OpenAI, Anthropic, and other APIs. After battle-testing it against real-world specs with complex union types, discriminated enums, and streaming endpoints, we decided to open source it.
