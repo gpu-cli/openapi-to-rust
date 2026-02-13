@@ -1,5 +1,5 @@
 ---
-source: openapi-generator/tests/inline_response_schema_test.rs
+source: tests/inline_response_schema_test.rs
 expression: op.response_schemas
 ---
 {

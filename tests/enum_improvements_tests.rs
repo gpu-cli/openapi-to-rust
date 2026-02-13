@@ -5,7 +5,7 @@
 //! - OneOf discriminated unions in properties
 //! - Array union item naming
 
-use openapi_generator::test_helpers::*;
+use openapi_to_rust::test_helpers::*;
 use serde_json::json;
 
 #[test]

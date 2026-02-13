@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,10 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  - {}: {:?}",
             name,
             match &schema.schema_type {
-                openapi_generator::analysis::SchemaType::Object { properties, .. } => {
+                openapi_to_rust::analysis::SchemaType::Object { properties, .. } => {
                     let mut prop_types = Vec::new();
                     for (prop_name, prop_info) in properties {
-                        if let openapi_generator::analysis::SchemaType::Primitive { rust_type } =
+                        if let openapi_to_rust::analysis::SchemaType::Primitive { rust_type } =
                             &prop_info.schema_type
                         {
                             prop_types.push(format!("{prop_name}: {rust_type}"));

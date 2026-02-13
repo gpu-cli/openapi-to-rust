@@ -1,8 +1,8 @@
-# openapi-generator
+# openapi-to-rust
 
-[![CI](https://github.com/gpu-cli/openapi-generator/actions/workflows/ci.yml/badge.svg)](https://github.com/gpu-cli/openapi-generator/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/openapi-generator.svg)](https://crates.io/crates/openapi-generator)
-[![docs.rs](https://docs.rs/openapi-generator/badge.svg)](https://docs.rs/openapi-generator)
+[![CI](https://github.com/gpu-cli/openapi-to-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gpu-cli/openapi-to-rust/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/openapi-to-rust.svg)](https://crates.io/crates/openapi-to-rust)
+[![docs.rs](https://docs.rs/openapi-to-rust/badge.svg)](https://docs.rs/openapi-to-rust)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A Rust code generator that creates strongly-typed structs, HTTP clients, and SSE streaming clients from OpenAPI 3.1 specifications.
@@ -26,20 +26,20 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openapi-generator = "0.1"
+openapi-to-rust = "0.1"
 ```
 
 Or install the CLI:
 
 ```bash
-cargo install openapi-generator
+cargo install openapi-to-rust
 ```
 
 ## Quick Start
 
 ### CLI (TOML config)
 
-Create `openapi-generator.toml`:
+Create `openapi-to-rust.toml`:
 
 ```toml
 [generator]
@@ -65,13 +65,13 @@ header_name = "Authorization"
 Then generate:
 
 ```bash
-openapi-gen generate --config openapi-generator.toml
+openapi-to-rust generate --config openapi-to-rust.toml
 ```
 
 ### Library API
 
 ```rust
-use openapi_generator::{SchemaAnalyzer, CodeGenerator, GeneratorConfig};
+use openapi_to_rust::{SchemaAnalyzer, CodeGenerator, GeneratorConfig};
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -144,7 +144,7 @@ The generated HTTP client includes:
 First-class support for Server-Sent Events endpoints:
 
 ```rust
-use openapi_generator::streaming::*;
+use openapi_to_rust::streaming::*;
 
 let streaming_config = StreamingConfig {
     endpoints: vec![StreamingEndpoint {

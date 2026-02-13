@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,10 +107,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  - {}: {:?}",
             name,
             match &schema.schema_type {
-                openapi_generator::analysis::SchemaType::Union { variants } => {
+                openapi_to_rust::analysis::SchemaType::Union { variants } => {
                     format!("Union(variants: {})", variants.len())
                 }
-                openapi_generator::analysis::SchemaType::DiscriminatedUnion {
+                openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
                     discriminator_field,
                     variants,
                 } => {

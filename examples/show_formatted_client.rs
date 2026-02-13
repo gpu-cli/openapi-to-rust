@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig};
 use std::path::PathBuf;
 
 fn main() {
@@ -8,7 +8,7 @@ fn main() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,

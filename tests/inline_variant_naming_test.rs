@@ -1,6 +1,6 @@
 //! Test for improved inline variant naming in untagged unions
 
-use openapi_generator::test_helpers::*;
+use openapi_to_rust::test_helpers::*;
 use serde_json::json;
 
 #[test]

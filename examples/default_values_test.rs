@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -80,10 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             name,
             schema.default,
             match &schema.schema_type {
-                openapi_generator::analysis::SchemaType::StringEnum { values } => {
+                openapi_to_rust::analysis::SchemaType::StringEnum { values } => {
                     format!("StringEnum({})", values.join(", "))
                 }
-                openapi_generator::analysis::SchemaType::Object { properties, .. } => {
+                openapi_to_rust::analysis::SchemaType::Object { properties, .. } => {
                     let prop_info: Vec<String> = properties
                         .iter()
                         .map(|(prop_name, prop)| {

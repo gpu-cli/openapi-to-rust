@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig};
 use std::path::PathBuf;
 
 /// Helper to create a minimal generator config
@@ -97,7 +97,7 @@ fn test_constructor_with_retry() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,
@@ -242,7 +242,7 @@ fn test_retry_config_struct_when_enabled() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 5,
             initial_delay_ms: 1000,
             max_delay_ms: 30000,
@@ -324,7 +324,7 @@ fn test_middleware_stack_order() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,
@@ -372,7 +372,7 @@ fn test_both_retry_and_tracing_enabled() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,
@@ -413,7 +413,7 @@ fn test_generated_code_compiles() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,
@@ -445,7 +445,7 @@ fn test_default_retry_config_values() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,

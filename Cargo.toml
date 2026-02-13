@@ -1,13 +1,13 @@
 [package]
-name = "openapi-generator"
+name = "openapi-to-rust"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85.0"
 authors = ["James Lalonde"]
 license = "MIT"
 description = "Generate strongly-typed Rust structs, HTTP clients, and SSE streaming clients from OpenAPI 3.1 specifications"
-repository = "https://github.com/gpu-cli/openapi-generator"
-homepage = "https://github.com/gpu-cli/openapi-generator"
+repository = "https://github.com/gpu-cli/openapi-to-rust"
+homepage = "https://github.com/gpu-cli/openapi-to-rust"
 keywords = ["openapi", "codegen", "rust", "sse", "api-client"]
 categories = ["development-tools", "web-programming"]
 readme = "README.md"
@@ -43,8 +43,8 @@ insta = { version = "1.41", features = ["yaml"] }
 specta = ["dep:specta"]
 
 [[bin]]
-name = "openapi-gen"
-path = "src/bin/openapi-gen.rs"
+name = "openapi-to-rust"
+path = "src/bin/openapi-to-rust.rs"
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -3,7 +3,7 @@
 //! When an endpoint has an inline schema (not a $ref), the generator should still
 //! produce a usable response type, not just `()`.
 
-use openapi_generator::SchemaAnalyzer;
+use openapi_to_rust::SchemaAnalyzer;
 
 #[test]
 fn test_inline_array_response_analyzed() {

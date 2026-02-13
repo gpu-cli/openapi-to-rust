@@ -2,7 +2,7 @@
 //
 // This example demonstrates different TOML configurations for various use cases.
 
-use openapi_generator::config::ConfigFile;
+use openapi_to_rust::config::ConfigFile;
 use std::fs;
 use tempfile::TempDir;
 

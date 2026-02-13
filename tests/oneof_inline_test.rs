@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use openapi_generator::test_helpers::*;
+    use openapi_to_rust::test_helpers::*;
     use serde_json::json;
 
     #[test]
@@ -41,10 +41,10 @@ mod tests {
         }));
 
         // Generate code from the spec
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
 
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         println!("Generated types.rs:\n{types_content}");

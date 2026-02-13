@@ -3,7 +3,7 @@
 //! These tests verify that the complete pipeline from OpenAPI spec to
 //! working HTTP client code functions correctly.
 
-use openapi_generator::{CodeGenerator, GeneratorConfig, analysis::SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, analysis::SchemaAnalyzer};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -314,7 +314,7 @@ fn test_full_client_generation_with_retry() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,
@@ -628,7 +628,7 @@ fn test_generated_code_parses_as_valid_rust() {
         output_dir: PathBuf::from("test_output"),
         module_name: "test".to_string(),
         enable_async_client: true,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,
@@ -664,7 +664,7 @@ fn test_full_pipeline_with_all_features() {
         enable_async_client: true,
         enable_sse_client: false,
         enable_specta: false,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 5,
             initial_delay_ms: 1000,
             max_delay_ms: 30000,

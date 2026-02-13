@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  - {}: {:?} (nullable: {})",
             name,
             match &schema.schema_type {
-                openapi_generator::analysis::SchemaType::Object { properties, .. } => {
+                openapi_to_rust::analysis::SchemaType::Object { properties, .. } => {
                     let prop_info: Vec<String> = properties
                         .iter()
                         .map(|(prop_name, prop)| {

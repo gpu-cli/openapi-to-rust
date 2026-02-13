@@ -36,7 +36,7 @@ fn main() {
     });
 
     // Generate code
-    let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec).unwrap();
+    let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec).unwrap();
     let mut analysis = analyzer.analyze().unwrap();
 
     println!("Analysis result:");
@@ -46,7 +46,7 @@ fn main() {
         println!("  Dependencies: {:?}", schema.dependencies);
     }
 
-    let generator = openapi_generator::CodeGenerator::new(Default::default());
+    let generator = openapi_to_rust::CodeGenerator::new(Default::default());
     let generated = generator.generate(&mut analysis).unwrap();
 
     println!("\nGenerated code:\n{generated}");

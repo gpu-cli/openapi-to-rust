@@ -1,4 +1,4 @@
-use openapi_generator::openapi::Schema;
+use openapi_to_rust::openapi::Schema;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test parsing the Model schema directly

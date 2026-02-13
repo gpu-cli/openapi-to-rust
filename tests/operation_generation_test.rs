@@ -1,5 +1,5 @@
-use openapi_generator::analysis::{OperationInfo, RequestBodyContent, SchemaAnalysis};
-use openapi_generator::generator::{CodeGenerator, GeneratorConfig};
+use openapi_to_rust::analysis::{OperationInfo, RequestBodyContent, SchemaAnalysis};
+use openapi_to_rust::generator::{CodeGenerator, GeneratorConfig};
 use std::collections::BTreeMap;
 
 fn create_test_config() -> GeneratorConfig {
@@ -20,8 +20,8 @@ fn create_test_analysis_with_operations(operations: Vec<OperationInfo>) -> Schem
 
     SchemaAnalysis {
         schemas: BTreeMap::new(),
-        dependencies: openapi_generator::analysis::DependencyGraph::new(),
-        patterns: openapi_generator::analysis::DetectedPatterns {
+        dependencies: openapi_to_rust::analysis::DependencyGraph::new(),
+        patterns: openapi_to_rust::analysis::DetectedPatterns {
             tagged_enum_schemas: Default::default(),
             untagged_enum_schemas: Default::default(),
             type_mappings: Default::default(),

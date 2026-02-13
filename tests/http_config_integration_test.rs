@@ -1,4 +1,4 @@
-use openapi_generator::{AuthConfig, ConfigFile};
+use openapi_to_rust::{AuthConfig, ConfigFile};
 use std::io::Write;
 use tempfile::NamedTempFile;
 

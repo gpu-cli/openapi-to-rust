@@ -1,4 +1,4 @@
-use openapi_generator::http_error::{HttpError, HttpResult};
+use openapi_to_rust::http_error::{HttpError, HttpResult};
 
 #[test]
 fn test_http_error_creation() {
@@ -204,7 +204,7 @@ fn test_error_display() {
 
 #[test]
 fn test_generated_error_code() {
-    use openapi_generator::{CodeGenerator, GeneratorConfig, SchemaAnalysis};
+    use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalysis};
     use std::path::PathBuf;
 
     // Create a minimal generator config
@@ -222,8 +222,8 @@ fn test_generated_error_code() {
     use std::collections::BTreeMap;
     let mut analysis = SchemaAnalysis {
         schemas: BTreeMap::new(),
-        dependencies: openapi_generator::analysis::DependencyGraph::new(),
-        patterns: openapi_generator::analysis::DetectedPatterns {
+        dependencies: openapi_to_rust::analysis::DependencyGraph::new(),
+        patterns: openapi_to_rust::analysis::DetectedPatterns {
             tagged_enum_schemas: std::collections::HashSet::new(),
             untagged_enum_schemas: std::collections::HashSet::new(),
             type_mappings: BTreeMap::new(),

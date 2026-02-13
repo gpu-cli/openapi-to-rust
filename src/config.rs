@@ -6,14 +6,14 @@
 //! # Overview
 //!
 //! The TOML configuration system provides:
-//! - Declarative configuration in `openapi-generator.toml` files
+//! - Declarative configuration in `openapi-to-rust.toml` files
 //! - Comprehensive validation with helpful error messages
 //! - Support for all generator features (HTTP client, retry, tracing, Specta)
 //! - Conversion to internal [`GeneratorConfig`] for code generation
 //!
 //! # Quick Start
 //!
-//! Create an `openapi-generator.toml` file:
+//! Create an `openapi-to-rust.toml` file:
 //!
 //! ```toml
 //! [generator]
@@ -37,12 +37,12 @@
 //! Load and use the configuration:
 //!
 //! ```no_run
-//! use openapi_generator::config::ConfigFile;
+//! use openapi_to_rust::config::ConfigFile;
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Load configuration from TOML file
-//! let config_file = ConfigFile::load(Path::new("openapi-generator.toml"))?;
+//! let config_file = ConfigFile::load(Path::new("openapi-to-rust.toml"))?;
 //!
 //! // Convert to internal GeneratorConfig
 //! let generator_config = config_file.into_generator_config();
@@ -123,7 +123,7 @@
 //! The TOML configuration is fully optional. The existing Rust API continues to work:
 //!
 //! ```no_run
-//! use openapi_generator::{GeneratorConfig, CodeGenerator};
+//! use openapi_to_rust::{GeneratorConfig, CodeGenerator};
 //! use std::path::PathBuf;
 //!
 //! let config = GeneratorConfig {

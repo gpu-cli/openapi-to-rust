@@ -3,7 +3,7 @@
 //! These tests ensure that allOf patterns with a single reference
 //! resolve to direct type references instead of unnecessary compositions.
 
-use openapi_generator::test_helpers::*;
+use openapi_to_rust::test_helpers::*;
 use serde_json::json;
 
 #[test]

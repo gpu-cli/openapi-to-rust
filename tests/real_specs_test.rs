@@ -1,4 +1,4 @@
-use openapi_generator::GeneratorConfig;
+use openapi_to_rust::GeneratorConfig;
 
 /// Test to verify backward compatibility with the existing Rust API
 /// This ensures we haven't broken existing usage patterns

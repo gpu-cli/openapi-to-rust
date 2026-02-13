@@ -1,0 +1,41 @@
+---
+source: src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResponseEvent {
+    pub part: ReasoningPart,
+    ///The type of the event. Always `response.event.done`.
+    #[serde(rename = "type")]
+    pub type_: ResponseEventType,
+}
+///The type of the event. Always `response.event.done`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ResponseEventType {
+    #[default]
+    #[serde(rename = "response.event.done")]
+    ResponseEventDone,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReasoningPart {
+    pub text: String,
+    ///The type of the part. Always `summary_text`.
+    #[serde(rename = "type")]
+    pub type_: ReasoningPartType,
+}
+///The type of the part. Always `summary_text`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ReasoningPartType {
+    #[default]
+    #[serde(rename = "summary_text")]
+    SummaryText,
+}

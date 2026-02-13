@@ -7,7 +7,7 @@
 // 4. Using the generated HTTP client
 // 5. Error handling and retry logic
 
-use openapi_generator::{
+use openapi_to_rust::{
     CodeGenerator, GeneratorConfig, SchemaAnalyzer, config::ConfigFile, http_config::RetryConfig,
 };
 use std::path::{Path, PathBuf};
@@ -280,7 +280,7 @@ fn demonstrate_rust_api(
     println!("    - Found {} operations", analysis.operations.len());
 
     // Configure the generator
-    use openapi_generator::http_config::{AuthConfig, HttpClientConfig};
+    use openapi_to_rust::http_config::{AuthConfig, HttpClientConfig};
 
     let config = GeneratorConfig {
         spec_path: spec_path.clone(),

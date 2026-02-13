@@ -1,5 +1,5 @@
 ---
-source: openapi-generator/tests/operation_extraction_test.rs
+source: tests/operation_extraction_test.rs
 expression: analysis.operations
 ---
 createItem:

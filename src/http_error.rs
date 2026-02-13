@@ -30,7 +30,7 @@
 //! ## Basic Error Handling
 //!
 //! ```
-//! # use openapi_generator::http_error::HttpError;
+//! # use openapi_to_rust::http_error::HttpError;
 //! fn handle_api_error(error: HttpError) {
 //!     match error {
 //!         HttpError::Network(e) => {
@@ -60,7 +60,7 @@
 //! ## Retry Detection
 //!
 //! ```
-//! # use openapi_generator::http_error::HttpError;
+//! # use openapi_to_rust::http_error::HttpError;
 //! fn classify_error(error: &HttpError) {
 //!     if error.is_retryable() {
 //!         println!("Retryable error: {}", error);
@@ -78,7 +78,7 @@
 //! ## Creating Errors
 //!
 //! ```
-//! use openapi_generator::http_error::HttpError;
+//! use openapi_to_rust::http_error::HttpError;
 //!
 //! // Create HTTP error from status code
 //! let error = HttpError::from_status(404, "Resource not found", None);

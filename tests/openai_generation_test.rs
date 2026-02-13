@@ -120,9 +120,9 @@ mod tests {
             }
         });
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         println!("Generated OpenAI types:\n{types_content}");
@@ -273,9 +273,9 @@ mod tests {
             }
         });
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         // Check streaming types have nice names

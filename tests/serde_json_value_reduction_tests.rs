@@ -3,7 +3,7 @@
 //! These tests track and verify that we properly generate typed structures
 //! instead of falling back to serde_json::Value where possible.
 
-use openapi_generator::test_helpers::*;
+use openapi_to_rust::test_helpers::*;
 use serde_json::json;
 
 #[test]

@@ -1,4 +1,4 @@
-use openapi_generator::http_error::{HttpError, HttpResult};
+use openapi_to_rust::http_error::{HttpError, HttpResult};
 
 fn main() {
     println!("=== HTTP Error Handling Examples ===\n");

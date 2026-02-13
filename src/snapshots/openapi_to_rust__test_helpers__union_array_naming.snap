@@ -1,0 +1,70 @@
+---
+source: src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestToolResultBlock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<RequestToolResultBlockContent>,
+    pub tool_use_id: String,
+}
+pub type RequestToolResultBlockContentString = String;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum RequestToolResultBlockContentItemUnion {
+    #[serde(rename = "text")]
+    RequestTextBlock(RequestTextBlock),
+    #[serde(rename = "image")]
+    RequestImageBlock(RequestImageBlock),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestTextBlock {
+    pub text: String,
+}
+///Array variant in union
+pub type RequestToolResultBlockContentArray = Vec<
+    RequestToolResultBlockContentItemUnion,
+>;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum RequestToolResultBlockContent {
+    RequestToolResultBlockContentString(RequestToolResultBlockContentString),
+    RequestToolResultBlockContentArray(RequestToolResultBlockContentArray),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestImageBlock {
+    pub source: RequestImageBlockSource,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestImageBlockSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    MessageContentString(MessageContentString),
+    MessageContentStringArray(MessageContentStringArray),
+    MessageContentItemArray(MessageContentItemArray),
+}
+///Array variant in union
+pub type MessageContentItemArray = Vec<MessageContentItem>;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MessageContentItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+///Array variant in union
+pub type MessageContentStringArray = Vec<String>;
+pub type MessageContentString = String;

@@ -1,4 +1,4 @@
-use openapi_generator::ConfigFile;
+use openapi_to_rust::ConfigFile;
 use std::io::Write;
 use tempfile::NamedTempFile;
 

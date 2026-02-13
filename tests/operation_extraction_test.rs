@@ -1,4 +1,4 @@
-use openapi_generator::analysis::{RequestBodyContent, SchemaAnalyzer};
+use openapi_to_rust::analysis::{RequestBodyContent, SchemaAnalyzer};
 
 #[test]
 fn test_extract_simple_get() {

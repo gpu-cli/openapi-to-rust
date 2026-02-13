@@ -11,7 +11,7 @@
 //! cargo run --example generate_full_client
 //! ```
 
-use openapi_generator::{CodeGenerator, GeneratorConfig, analysis::SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, analysis::SchemaAnalyzer};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -241,7 +241,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         enable_async_client: true,
         enable_sse_client: false,
         enable_specta: false,
-        retry_config: Some(openapi_generator::http_config::RetryConfig {
+        retry_config: Some(openapi_to_rust::http_config::RetryConfig {
             max_retries: 3,
             initial_delay_ms: 500,
             max_delay_ms: 16000,

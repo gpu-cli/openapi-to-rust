@@ -1,4 +1,4 @@
-use openapi_generator::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  - {}: {:?}",
             name,
             match &schema.schema_type {
-                openapi_generator::analysis::SchemaType::DiscriminatedUnion {
+                openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
                     discriminator_field,
                     variants,
                 } => {
@@ -134,12 +134,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         variant_info.join(", ")
                     )
                 }
-                openapi_generator::analysis::SchemaType::Union { variants } => {
+                openapi_to_rust::analysis::SchemaType::Union { variants } => {
                     let variant_info: Vec<String> =
                         variants.iter().map(|v| v.target.to_string()).collect();
                     format!("Union(variants: [{}])", variant_info.join(", "))
                 }
-                openapi_generator::analysis::SchemaType::Object { properties, .. } => {
+                openapi_to_rust::analysis::SchemaType::Object { properties, .. } => {
                     format!("Object({} properties)", properties.len())
                 }
                 other => format!("{other:?}"),

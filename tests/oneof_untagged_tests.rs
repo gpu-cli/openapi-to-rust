@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use openapi_generator::test_helpers::*;
+    use openapi_to_rust::test_helpers::*;
     use serde_json::json;
 
     #[test]
@@ -40,9 +40,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         // Should generate untagged union
@@ -89,9 +89,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         assert!(
@@ -142,9 +142,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         println!("Object variants test output:\n{types_content}");
@@ -203,9 +203,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         assert!(
@@ -261,9 +261,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         // Should generate tagged union for discriminated oneOf
@@ -304,9 +304,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         println!("Deeply nested test output:\n{types_content}");
@@ -340,9 +340,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         // Could be handled as Option<String> or as a union with null variant
@@ -399,9 +399,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         // Should generate proper typed union, not serde_json::Value
@@ -453,9 +453,9 @@ mod tests {
             }
         }));
 
-        let mut analyzer = openapi_generator::SchemaAnalyzer::new(spec_json.clone()).unwrap();
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json.clone()).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
-        let generator = openapi_generator::CodeGenerator::new(Default::default());
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
         // Should generate array of union type

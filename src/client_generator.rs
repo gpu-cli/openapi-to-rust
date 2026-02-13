@@ -81,7 +81,7 @@
 //! ## Via Rust API
 //!
 //! ```no_run
-//! use openapi_generator::{GeneratorConfig, http_config::*};
+//! use openapi_to_rust::{GeneratorConfig, http_config::*};
 //! use std::path::PathBuf;
 //!
 //! let config = GeneratorConfig {

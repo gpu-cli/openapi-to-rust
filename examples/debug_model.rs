@@ -1,4 +1,4 @@
-use openapi_generator::SchemaAnalyzer;
+use openapi_to_rust::SchemaAnalyzer;
 use std::fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,4 +1,4 @@
-use openapi_generator::SchemaAnalyzer;
+use openapi_to_rust::SchemaAnalyzer;
 use std::fs;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Schema type: {:#?}", schema.schema_type);
 
         // Print the variants if it's a discriminated union
-        if let openapi_generator::analysis::SchemaType::DiscriminatedUnion {
+        if let openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
             discriminator_field,
             variants,
         } = &schema.schema_type
