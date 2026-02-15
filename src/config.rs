@@ -169,6 +169,10 @@ pub struct GeneratorSection {
     pub output_dir: PathBuf,
     #[validate(length(min = 1, message = "module_name cannot be empty"))]
     pub module_name: String,
+    /// Schema extension files to merge into the main spec before codegen.
+    /// Paths are relative to the working directory (same as spec_path).
+    #[serde(default)]
+    pub schema_extensions: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
@@ -533,7 +537,7 @@ impl ConfigFile {
             },
             streaming_config,
             nullable_field_overrides: self.nullable_overrides,
-            schema_extensions: vec![],
+            schema_extensions: self.generator.schema_extensions,
             http_client_config,
             retry_config,
             tracing_enabled,

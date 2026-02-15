@@ -78,9 +78,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::from_str(&spec_content)?
             };
 
-            // Analyze schemas
+            // Analyze schemas (with extensions if configured)
             println!("🔍 Analyzing schemas...");
-            let mut analyzer = SchemaAnalyzer::new(spec_value)?;
+            let mut analyzer = if generator_config.schema_extensions.is_empty() {
+                SchemaAnalyzer::new(spec_value)?
+            } else {
+                println!(
+                    "📎 Merging {} schema extension(s)",
+                    generator_config.schema_extensions.len()
+                );
+                SchemaAnalyzer::new_with_extensions(
+                    spec_value,
+                    &generator_config.schema_extensions,
+                )?
+            };
             let mut analysis = analyzer.analyze()?;
 
             println!("📊 Found {} schemas", analysis.schemas.len());

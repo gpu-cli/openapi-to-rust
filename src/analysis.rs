@@ -393,17 +393,26 @@ fn merge_json_objects_with_rules(
     match (main, extension) {
         // Both objects - merge properties
         (Value::Object(mut main_obj), Value::Object(ext_obj)) => {
-            // Special handling for schema objects with oneOf/anyOf variants
+            // Special handling for schema objects with oneOf/anyOf variants.
+            // Detect which keyword the MAIN spec uses so we preserve it after merging.
+            let main_union_keyword = if main_obj.contains_key("oneOf") {
+                Some("oneOf")
+            } else if main_obj.contains_key("anyOf") {
+                Some("anyOf")
+            } else {
+                None
+            };
             if let (Some(main_variants), Some(ext_variants)) = (
                 extract_schema_variants(&Value::Object(main_obj.clone())),
                 extract_schema_variants(&Value::Object(ext_obj.clone())),
             ) {
+                let union_key = main_union_keyword.unwrap_or("oneOf");
                 println!(
-                    "🔍 Merging union schemas: {} main variants, {} extension variants",
+                    "🔍 Merging union schemas ({union_key}): {} main variants, {} extension variants",
                     main_variants.len(),
                     ext_variants.len()
                 );
-                // Merge the variant arrays and use oneOf as the canonical key
+                // Merge the variant arrays, preserving the original union keyword
                 // First, collect main variants, but filter out any that will be replaced by extension
                 let mut merged_variants = Vec::new();
                 let extension_refs: Vec<String> = ext_variants
@@ -438,10 +447,10 @@ fn merge_json_objects_with_rules(
                     merged_variants.push(ext_variant);
                 }
 
-                // Remove old oneOf/anyOf keys and add the merged oneOf
+                // Remove old oneOf/anyOf keys and add merged variants under the original keyword
                 main_obj.remove("oneOf");
                 main_obj.remove("anyOf");
-                main_obj.insert("oneOf".to_string(), Value::Array(merged_variants));
+                main_obj.insert(union_key.to_string(), Value::Array(merged_variants));
 
                 // Merge other properties normally
                 for (key, ext_value) in ext_obj {
