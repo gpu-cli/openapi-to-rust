@@ -2353,7 +2353,12 @@ impl SchemaAnalyzer {
         }
 
         // For non-primitive types, analyze the inline schema and add it to our collection
+        // Set current_schema_name so nested inline properties (enums, unions, objects)
+        // get named with the correct parent context instead of inheriting a stale name
+        let previous_schema_name = self.current_schema_name.take();
+        self.current_schema_name = Some(type_name.to_string());
         let analyzed = self.analyze_schema_value(schema, type_name)?;
+        self.current_schema_name = previous_schema_name;
 
         // Add to resolved cache so it can be generated
         self.resolved_cache.insert(type_name.to_string(), analyzed);
