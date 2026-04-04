@@ -16,7 +16,8 @@ pub struct OpenApiSpec {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
     pub title: String,
-    pub version: String,
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

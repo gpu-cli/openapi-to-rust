@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use openapi_to_rust::{CodeGenerator, ConfigFile, SchemaAnalyzer};
+use openapi_to_rust::cli::{yaml_to_json_value, json_from_str_lossy};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -73,9 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 == Some(std::ffi::OsStr::new("yaml"))
                 || generator_config.spec_path.extension() == Some(std::ffi::OsStr::new("yml"))
             {
-                serde_yaml::from_str(&spec_content)?
+                yaml_to_json_value(&spec_content)?
             } else {
-                serde_json::from_str(&spec_content)?
+                json_from_str_lossy(&spec_content)?
             };
 
             // Analyze schemas (with extensions if configured)

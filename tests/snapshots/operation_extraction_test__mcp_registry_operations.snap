@@ -6,6 +6,8 @@ getV0Servers:
   operation_id: getV0Servers
   method: GET
   path: /v0/servers
+  summary: List MCP servers
+  description: ~
   request_body: ~
   response_schemas:
     "200": ServerList
@@ -16,6 +18,8 @@ getV0ServersServerId:
   operation_id: getV0ServersServerId
   method: GET
   path: "/v0/servers/{serverId}"
+  summary: Get MCP server details
+  description: ~
   request_body: ~
   response_schemas:
     "200": ServerResponse
@@ -25,5 +29,6 @@ getV0ServersServerId:
       required: true
       schema_ref: ~
       rust_type: String
+      description: ~
   supports_streaming: false
   stream_parameter: ~

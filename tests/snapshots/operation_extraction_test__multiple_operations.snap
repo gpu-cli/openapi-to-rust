@@ -6,6 +6,8 @@ deleteItem:
   operation_id: deleteItem
   method: DELETE
   path: "/items/{id}"
+  summary: ~
+  description: ~
   request_body: ~
   response_schemas: {}
   parameters:
@@ -14,12 +16,15 @@ deleteItem:
       required: true
       schema_ref: ~
       rust_type: String
+      description: ~
   supports_streaming: false
   stream_parameter: ~
 duplicateItem:
   operation_id: duplicateItem
   method: POST
   path: "/items/{id}"
+  summary: ~
+  description: ~
   request_body: ~
   response_schemas:
     "201": Item
@@ -29,12 +34,15 @@ duplicateItem:
       required: true
       schema_ref: ~
       rust_type: String
+      description: ~
   supports_streaming: false
   stream_parameter: ~
 getItem:
   operation_id: getItem
   method: GET
   path: "/items/{id}"
+  summary: ~
+  description: ~
   request_body: ~
   response_schemas:
     "200": Item
@@ -44,12 +52,15 @@ getItem:
       required: true
       schema_ref: ~
       rust_type: String
+      description: ~
   supports_streaming: false
   stream_parameter: ~
 updateItem:
   operation_id: updateItem
   method: PUT
   path: "/items/{id}"
+  summary: ~
+  description: ~
   request_body:
     kind: Json
     schema_name: UpdateItemRequest
@@ -61,5 +72,6 @@ updateItem:
       required: true
       schema_ref: ~
       rust_type: String
+      description: ~
   supports_streaming: false
   stream_parameter: ~

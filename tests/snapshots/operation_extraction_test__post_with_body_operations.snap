@@ -6,6 +6,8 @@ createItem:
   operation_id: createItem
   method: POST
   path: /items
+  summary: ~
+  description: ~
   request_body:
     kind: Json
     schema_name: CreateItemRequest

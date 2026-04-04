@@ -6,6 +6,8 @@ getItem:
   operation_id: getItem
   method: GET
   path: "/items/{itemId}"
+  summary: ~
+  description: ~
   request_body: ~
   response_schemas:
     "200": Item
@@ -15,5 +17,6 @@ getItem:
       required: true
       schema_ref: ~
       rust_type: String
+      description: ~
   supports_streaming: false
   stream_parameter: ~

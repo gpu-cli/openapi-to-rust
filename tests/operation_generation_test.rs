@@ -39,6 +39,8 @@ fn test_generate_get_operation() {
         operation_id: "getUser".to_string(),
         method: "GET".to_string(),
         path: "/users/{id}".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -73,6 +75,8 @@ fn test_generate_post_operation() {
         operation_id: "createUser".to_string(),
         method: "POST".to_string(),
         path: "/users".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "CreateUserRequest".to_string(),
         }),
@@ -112,6 +116,8 @@ fn test_generate_put_operation() {
         operation_id: "updateUser".to_string(),
         method: "PUT".to_string(),
         path: "/users/{id}".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "UpdateUserRequest".to_string(),
         }),
@@ -147,6 +153,8 @@ fn test_generate_delete_operation() {
         operation_id: "deleteUser".to_string(),
         method: "DELETE".to_string(),
         path: "/users/{id}".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -173,6 +181,8 @@ fn test_generate_patch_operation() {
         operation_id: "patchUser".to_string(),
         method: "PATCH".to_string(),
         path: "/users/{id}".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "PatchUserRequest".to_string(),
         }),
@@ -213,6 +223,8 @@ fn test_method_name_from_operation_id() {
             operation_id: operation_id.to_string(),
             method: "GET".to_string(),
             path: "/test".to_string(),
+            summary: None,
+            description: None,
             request_body: None,
             response_schemas: BTreeMap::new(),
             parameters: vec![],
@@ -242,6 +254,8 @@ fn test_method_with_response_type() {
         operation_id: "getData".to_string(),
         method: "GET".to_string(),
         path: "/data".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -270,6 +284,8 @@ fn test_method_without_response_type() {
         operation_id: "noResponse".to_string(),
         method: "POST".to_string(),
         path: "/no-response".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "Request".to_string(),
         }),
@@ -306,6 +322,8 @@ fn test_error_handling_generation() {
         operation_id: "testOp".to_string(),
         method: "GET".to_string(),
         path: "/test".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -338,6 +356,8 @@ fn test_url_construction() {
         operation_id: "simpleOp".to_string(),
         method: "GET".to_string(),
         path: "/users".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -358,6 +378,8 @@ fn test_url_construction() {
         operation_id: "paramOp".to_string(),
         method: "GET".to_string(),
         path: "/users/{id}".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -383,6 +405,8 @@ fn test_bearer_auth_injection() {
         operation_id: "authOp".to_string(),
         method: "GET".to_string(),
         path: "/secure".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -408,6 +432,8 @@ fn test_custom_headers_injection() {
         operation_id: "headerOp".to_string(),
         method: "POST".to_string(),
         path: "/headers".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "Request".to_string(),
         }),
@@ -436,6 +462,8 @@ fn test_multiple_operations() {
             operation_id: "getUsers".to_string(),
             method: "GET".to_string(),
             path: "/users".to_string(),
+            summary: None,
+            description: None,
             request_body: None,
             response_schemas: {
                 let mut map = BTreeMap::new();
@@ -450,7 +478,9 @@ fn test_multiple_operations() {
             operation_id: "createUser".to_string(),
             method: "POST".to_string(),
             path: "/users".to_string(),
-            request_body: Some(RequestBodyContent::Json {
+            summary: None,
+        description: None,
+        request_body: Some(RequestBodyContent::Json {
                 schema_name: "CreateUserRequest".to_string(),
             }),
             response_schemas: {
@@ -466,6 +496,8 @@ fn test_multiple_operations() {
             operation_id: "deleteUser".to_string(),
             method: "DELETE".to_string(),
             path: "/users/{id}".to_string(),
+            summary: None,
+            description: None,
             request_body: None,
             response_schemas: BTreeMap::new(),
             parameters: vec![],
@@ -498,6 +530,8 @@ fn test_doc_comment_generation() {
         operation_id: "testOperation".to_string(),
         method: "POST".to_string(),
         path: "/api/v1/test".to_string(),
+        summary: None,
+        description: None,
         request_body: None,
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -522,6 +556,8 @@ fn test_generate_form_urlencoded_operation() {
         operation_id: "createToken".to_string(),
         method: "POST".to_string(),
         path: "/token".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::FormUrlEncoded {
             schema_name: "TokenRequest".to_string(),
         }),
@@ -556,6 +592,8 @@ fn test_generate_multipart_operation() {
         operation_id: "uploadFile".to_string(),
         method: "POST".to_string(),
         path: "/upload".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::Multipart),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -582,6 +620,8 @@ fn test_generate_octet_stream_operation() {
         operation_id: "uploadData".to_string(),
         method: "POST".to_string(),
         path: "/data".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::OctetStream),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -610,6 +650,8 @@ fn test_generate_text_plain_operation() {
         operation_id: "echo".to_string(),
         method: "POST".to_string(),
         path: "/echo".to_string(),
+        summary: None,
+        description: None,
         request_body: Some(RequestBodyContent::TextPlain),
         response_schemas: BTreeMap::new(),
         parameters: vec![],

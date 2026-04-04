@@ -105,6 +105,10 @@ pub struct OperationInfo {
     pub method: String,
     /// Path template
     pub path: String,
+    /// Short summary from OpenAPI spec
+    pub summary: Option<String>,
+    /// Longer description from OpenAPI spec
+    pub description: Option<String>,
     /// Request body content type and schema (if any)
     pub request_body: Option<RequestBodyContent>,
     /// Response schemas by status code
@@ -151,6 +155,8 @@ pub struct ParameterInfo {
     pub schema_ref: Option<String>,
     /// Rust type for this parameter
     pub rust_type: String,
+    /// Description from OpenAPI spec
+    pub description: Option<String>,
 }
 
 impl Default for DependencyGraph {
@@ -951,9 +957,24 @@ impl SchemaAnalyzer {
 
     fn extract_schema_name<'a>(&self, ref_str: &'a str) -> Option<&'a str> {
         if ref_str == "#" {
-            None // Special case for self-reference
+            return None; // Special case for self-reference
+        }
+
+        let parts: Vec<&str> = ref_str.split('/').collect();
+
+        // Standard pattern: #/components/schemas/{SchemaName}[/deeper/path]
+        // parts[0]="#", parts[1]="components", parts[2]="schemas", parts[3]="SchemaName"
+        if parts.len() >= 4 && parts[0] == "#" && parts[2] == "schemas" {
+            return Some(parts[3]);
+        }
+
+        // Fallback for other ref patterns: use last segment,
+        // but only if it looks like a schema name (not a bare number)
+        let last = parts.last()?;
+        if last.is_empty() || last.chars().all(|c| c.is_ascii_digit()) {
+            None
         } else {
-            ref_str.split('/').next_back()
+            Some(last)
         }
     }
 
@@ -3428,6 +3449,8 @@ impl SchemaAnalyzer {
             operation_id: operation_id.to_string(),
             method: method.to_uppercase(),
             path: path.to_string(),
+            summary: operation.summary.clone(),
+            description: operation.description.clone(),
             request_body: None,
             response_schemas: BTreeMap::new(),
             parameters: Vec::new(),
@@ -3576,6 +3599,7 @@ impl SchemaAnalyzer {
             required,
             schema_ref,
             rust_type,
+            description: param.description.clone(),
         }))
     }
 }

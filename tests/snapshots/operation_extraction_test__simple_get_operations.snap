@@ -6,6 +6,8 @@ listItems:
   operation_id: listItems
   method: GET
   path: /items
+  summary: ~
+  description: ~
   request_body: ~
   response_schemas:
     "200": ListItemsResponse
