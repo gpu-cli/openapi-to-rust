@@ -34,8 +34,7 @@ pub struct ResponseProperties {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InputItem {
     pub content: String,
-    #[serde(rename = "type")]
-    pub type_: String,
+    pub r#type: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateModelResponseProperties {

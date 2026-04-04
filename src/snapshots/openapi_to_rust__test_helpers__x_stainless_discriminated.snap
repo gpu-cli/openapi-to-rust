@@ -45,8 +45,7 @@ pub enum ResponseReasoningSummaryPartAddedEventType {
 pub struct ReasoningPart {
     pub text: String,
     ///The type of the part. Always `summary_text`.
-    #[serde(rename = "type")]
-    pub type_: ReasoningPartType,
+    pub r#type: ReasoningPartType,
 }
 ///The type of the part. Always `summary_text`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]

@@ -59,7 +59,7 @@ fn test_generate_get_operation() {
     // Verify method name is snake_case
     assert!(result_str.contains("get_user"));
     // Verify HTTP method is GET
-    assert!(result_str.contains(". get (url)"));
+    assert!(result_str.contains(". get (request_url)"));
     // Verify response type
     assert!(result_str.contains("HttpResult < User >"));
     // Verify no request body parameter
@@ -97,7 +97,7 @@ fn test_generate_post_operation() {
     // Verify method name
     assert!(result_str.contains("create_user"));
     // Verify HTTP method is POST
-    assert!(result_str.contains(". post (url)"));
+    assert!(result_str.contains(". post (request_url)"));
     // Verify request parameter
     assert!(result_str.contains("request : CreateUserRequest"));
     // Verify request body serialization (middleware-compatible)
@@ -136,7 +136,7 @@ fn test_generate_put_operation() {
     let result_str = result.to_string();
 
     // Verify HTTP method is PUT
-    assert!(result_str.contains(". put (url)"));
+    assert!(result_str.contains(". put (request_url)"));
     // Verify request parameter
     assert!(result_str.contains("request : UpdateUserRequest"));
     // Verify request body serialization (middleware-compatible)
@@ -167,7 +167,7 @@ fn test_generate_delete_operation() {
     let result_str = result.to_string();
 
     // Verify HTTP method is DELETE
-    assert!(result_str.contains(". delete (url)"));
+    assert!(result_str.contains(". delete (request_url)"));
     // Verify no request body in the request (not looking at error handling)
     assert!(!result_str.contains(". json (& request)"));
 }
@@ -201,7 +201,7 @@ fn test_generate_patch_operation() {
     let result_str = result.to_string();
 
     // Verify HTTP method is PATCH
-    assert!(result_str.contains(". patch (url)"));
+    assert!(result_str.contains(". patch (request_url)"));
     // Verify request parameter
     assert!(result_str.contains("request : PatchUserRequest"));
 }
@@ -516,9 +516,9 @@ fn test_multiple_operations() {
     assert!(result_str.contains("delete_user"));
 
     // Verify each has correct HTTP method
-    assert!(result_str.contains(". get (url)"));
-    assert!(result_str.contains(". post (url)"));
-    assert!(result_str.contains(". delete (url)"));
+    assert!(result_str.contains(". get (request_url)"));
+    assert!(result_str.contains(". post (request_url)"));
+    assert!(result_str.contains(". delete (request_url)"));
 }
 
 #[test]

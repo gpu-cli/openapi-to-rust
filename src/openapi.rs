@@ -25,6 +25,7 @@ pub struct Info {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Components {
     pub schemas: Option<BTreeMap<String, Schema>>,
+    pub parameters: Option<BTreeMap<String, Parameter>>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

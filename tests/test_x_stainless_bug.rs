@@ -261,8 +261,7 @@ mod tests {
             "ReasoningItem struct should be generated"
         );
         assert!(
-            result.contains("pub type_: ReasoningItemMainType")
-                || result.contains("pub r#type: ReasoningItemMainType"),
+            result.contains("pub r#type: ReasoningItemMainType"),
             "ReasoningItem should have main type field"
         );
         assert!(

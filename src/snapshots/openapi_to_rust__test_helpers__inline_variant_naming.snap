@@ -24,8 +24,7 @@ pub type ContentBlockArray = Vec<ContentBlock>;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContentBlock {
     pub text: String,
-    #[serde(rename = "type")]
-    pub type_: String,
+    pub r#type: String,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]

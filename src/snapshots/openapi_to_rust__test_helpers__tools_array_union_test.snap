@@ -36,19 +36,19 @@ pub struct Tool {
     pub description: Option<String>,
     pub input_schema: InputSchema,
     pub name: String,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub type_: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InputSchema {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<serde_json::Value>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub type_: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BashTool {
     pub name: String,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    pub type_: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<serde_json::Value>,
 }

@@ -13,6 +13,5 @@ expression: "&generated_code"
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TypedEvent {
-    #[serde(rename = "type")]
-    pub type_: String,
+    pub r#type: String,
 }
