@@ -27,8 +27,7 @@ pub enum CreateResponseInput {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InputItem {
     pub content: String,
-    #[serde(rename = "type")]
-    pub type_: InputItemType,
+    pub r#type: InputItemType,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum InputItemType {

@@ -183,6 +183,12 @@ pub struct FeaturesSection {
     pub enable_async_client: bool,
     #[serde(default)]
     pub enable_specta: bool,
+    /// Generate a static operation registry with metadata for CLI/proxy routing
+    #[serde(default)]
+    pub enable_registry: bool,
+    /// Generate only the operation registry (skip types, client, streaming)
+    #[serde(default)]
+    pub registry_only: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
@@ -542,6 +548,8 @@ impl ConfigFile {
             retry_config,
             tracing_enabled,
             auth_config,
+            enable_registry: self.features.enable_registry,
+            registry_only: self.features.registry_only,
         }
     }
 }

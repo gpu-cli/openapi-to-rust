@@ -105,6 +105,10 @@ pub struct OperationInfo {
     pub method: String,
     /// Path template
     pub path: String,
+    /// Short summary from OpenAPI spec
+    pub summary: Option<String>,
+    /// Longer description from OpenAPI spec
+    pub description: Option<String>,
     /// Request body content type and schema (if any)
     pub request_body: Option<RequestBodyContent>,
     /// Response schemas by status code
@@ -151,6 +155,8 @@ pub struct ParameterInfo {
     pub schema_ref: Option<String>,
     /// Rust type for this parameter
     pub rust_type: String,
+    /// Description from OpenAPI spec
+    pub description: Option<String>,
 }
 
 impl Default for DependencyGraph {
@@ -524,6 +530,7 @@ pub struct SchemaAnalyzer {
     resolved_cache: BTreeMap<String, AnalyzedSchema>,
     openapi_spec: Value,
     current_schema_name: Option<String>,
+    component_parameters: BTreeMap<String, crate::openapi::Parameter>,
 }
 
 impl SchemaAnalyzer {
@@ -532,11 +539,19 @@ impl SchemaAnalyzer {
             serde_json::from_value(openapi_spec.clone()).map_err(GeneratorError::ParseError)?;
         let schemas = Self::extract_schemas(&spec)?;
 
+        let component_parameters = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.parameters.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
         Ok(Self {
             schemas,
             resolved_cache: BTreeMap::new(),
             openapi_spec,
             current_schema_name: None,
+            component_parameters,
         })
     }
 
@@ -951,9 +966,24 @@ impl SchemaAnalyzer {
 
     fn extract_schema_name<'a>(&self, ref_str: &'a str) -> Option<&'a str> {
         if ref_str == "#" {
-            None // Special case for self-reference
+            return None; // Special case for self-reference
+        }
+
+        let parts: Vec<&str> = ref_str.split('/').collect();
+
+        // Standard pattern: #/components/schemas/{SchemaName}[/deeper/path]
+        // parts[0]="#", parts[1]="components", parts[2]="schemas", parts[3]="SchemaName"
+        if parts.len() >= 4 && parts[0] == "#" && parts[2] == "schemas" {
+            return Some(parts[3]);
+        }
+
+        // Fallback for other ref patterns: use last segment,
+        // but only if it looks like a schema name (not a bare number)
+        let last = parts.last()?;
+        if last.is_empty() || last.chars().all(|c| c.is_ascii_digit()) {
+            None
         } else {
-            ref_str.split('/').next_back()
+            Some(last)
         }
     }
 
@@ -3367,6 +3397,7 @@ impl SchemaAnalyzer {
                         method,
                         path,
                         operation,
+                        path_item.parameters.as_ref(),
                         analysis,
                     )?;
                     analysis.operations.insert(operation_id, op_info);
@@ -3422,12 +3453,15 @@ impl SchemaAnalyzer {
         method: &str,
         path: &str,
         operation: &crate::openapi::Operation,
+        path_item_parameters: Option<&Vec<crate::openapi::Parameter>>,
         _analysis: &mut SchemaAnalysis,
     ) -> Result<OperationInfo> {
         let mut op_info = OperationInfo {
             operation_id: operation_id.to_string(),
             method: method.to_uppercase(),
             path: path.to_string(),
+            summary: operation.summary.clone(),
+            description: operation.description.clone(),
             request_body: None,
             response_schemas: BTreeMap::new(),
             parameters: Vec::new(),
@@ -3487,11 +3521,31 @@ impl SchemaAnalyzer {
             }
         }
 
-        // Extract parameters
+        // Extract parameters (operation-level first, then merge path-item-level)
         if let Some(parameters) = &operation.parameters {
             for param in parameters {
-                if let Some(param_info) = self.analyze_parameter(param)? {
+                let resolved = self.resolve_parameter(param);
+                if let Some(param_info) = self.analyze_parameter(&resolved)? {
                     op_info.parameters.push(param_info);
+                }
+            }
+        }
+
+        // Merge path-item-level parameters (operation params take precedence per OpenAPI spec)
+        if let Some(path_params) = path_item_parameters {
+            let existing_keys: std::collections::HashSet<(String, String)> = op_info
+                .parameters
+                .iter()
+                .map(|p| (p.name.clone(), p.location.clone()))
+                .collect();
+            for param in path_params {
+                let resolved = self.resolve_parameter(param);
+                if let Some(param_info) = self.analyze_parameter(&resolved)? {
+                    if !existing_keys
+                        .contains(&(param_info.name.clone(), param_info.location.clone()))
+                    {
+                        op_info.parameters.push(param_info);
+                    }
                 }
             }
         }
@@ -3543,6 +3597,22 @@ impl SchemaAnalyzer {
         Ok(synthetic_name)
     }
 
+    /// Resolve a parameter reference ($ref) to the actual parameter definition.
+    /// Returns the resolved parameter, or the original if it's not a reference.
+    fn resolve_parameter<'a>(
+        &'a self,
+        param: &'a crate::openapi::Parameter,
+    ) -> std::borrow::Cow<'a, crate::openapi::Parameter> {
+        if let Some(ref_str) = param.extra.get("$ref").and_then(|v| v.as_str()) {
+            if let Some(param_name) = ref_str.strip_prefix("#/components/parameters/") {
+                if let Some(resolved) = self.component_parameters.get(param_name) {
+                    return std::borrow::Cow::Borrowed(resolved);
+                }
+            }
+        }
+        std::borrow::Cow::Borrowed(param)
+    }
+
     /// Analyze a parameter
     fn analyze_parameter(
         &self,
@@ -3576,6 +3646,7 @@ impl SchemaAnalyzer {
             required,
             schema_ref,
             rust_type,
+            description: param.description.clone(),
         }))
     }
 }

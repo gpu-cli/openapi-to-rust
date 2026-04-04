@@ -566,23 +566,23 @@ fn test_all_http_methods_supported() {
 
     // Verify all HTTP methods are represented
     assert!(
-        client_code.contains(".get(url)"),
+        client_code.contains(".get(request_url)"),
         "Should have GET method calls"
     );
     assert!(
-        client_code.contains(".post(url)"),
+        client_code.contains(".post(request_url)"),
         "Should have POST method calls"
     );
     assert!(
-        client_code.contains(".put(url)"),
+        client_code.contains(".put(request_url)"),
         "Should have PUT method calls"
     );
     assert!(
-        client_code.contains(".delete(url)"),
+        client_code.contains(".delete(request_url)"),
         "Should have DELETE method calls"
     );
     assert!(
-        client_code.contains(".patch(url)"),
+        client_code.contains(".patch(request_url)"),
         "Should have PATCH method calls"
     );
 }

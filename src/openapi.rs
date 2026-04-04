@@ -16,7 +16,8 @@ pub struct OpenApiSpec {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
     pub title: String,
-    pub version: String,
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -24,6 +25,7 @@ pub struct Info {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Components {
     pub schemas: Option<BTreeMap<String, Schema>>,
+    pub parameters: Option<BTreeMap<String, Parameter>>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -513,6 +515,7 @@ pub struct MediaType {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use serde_json::json;

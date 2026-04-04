@@ -1,0 +1,5340 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "description": "Reference Documentation for Arcade Engine API",
+    "title": "Arcade API",
+    "contact": {
+      "name": "Arcade",
+      "url": "https://arcade.dev",
+      "email": "contact@arcade.dev"
+    },
+    "license": {
+      "name": "Proprietary",
+      "url": "https://arcade.dev/license"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/v1/admin/auth_providers": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "List a page of auth providers that are available to the caller",
+        "tags": ["Admin"],
+        "summary": "List auth providers",
+        "operationId": "auth-providers-list",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_AuthProviderResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Create a new auth provider",
+        "tags": ["Admin"],
+        "summary": "Create an auth provider",
+        "operationId": "auth-providers-create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.AuthProviderCreateRequest"
+              }
+            }
+          },
+          "description": "The auth provider to create",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.AuthProviderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/auth_providers/{id}": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Get the details of a specific auth provider",
+        "tags": ["Admin"],
+        "summary": "Get an auth provider",
+        "operationId": "auth-providers-get",
+        "parameters": [
+          {
+            "description": "The ID of the auth provider to get",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.AuthProviderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Delete a specific auth provider",
+        "tags": ["Admin"],
+        "summary": "Delete an auth provider",
+        "operationId": "auth-providers-delete",
+        "parameters": [
+          {
+            "description": "The ID of the auth provider to delete",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.AuthProviderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Patch an existing auth provider",
+        "tags": ["Admin"],
+        "summary": "Patch an auth provider",
+        "operationId": "auth-providers-update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.AuthProviderPatchRequest"
+              }
+            }
+          },
+          "description": "The auth provider to update",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.AuthProviderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/secrets": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "List all secrets that are visible to the caller",
+        "tags": ["Admin"],
+        "summary": "List secrets",
+        "operationId": "secrets-list",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_StoredSecretResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/secrets/{secret_id}": {
+      "delete": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Delete a secret by its ID",
+        "tags": ["Admin"],
+        "summary": "Delete secret",
+        "operationId": "secrets-delete",
+        "parameters": [
+          {
+            "description": "The ID of the secret to delete",
+            "name": "secret_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/secrets/{secret_key}": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Create or update a secret",
+        "tags": ["Admin"],
+        "summary": "Upsert secret",
+        "operationId": "secrets-upsert",
+        "parameters": [
+          {
+            "description": "The key of the secret to upsert",
+            "name": "secret_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.UpsertStoredSecretRequest"
+              }
+            }
+          },
+          "description": "The secret to upsert",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.StoredSecretResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/settings/session_verification": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Get the current session verification settings for the caller",
+        "tags": ["Admin"],
+        "summary": "Get session verification settings",
+        "operationId": "session-verification-settings-get",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.SessionVerificationSettingsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Update session verification settings for the caller",
+        "tags": ["Admin"],
+        "summary": "Update session verification settings",
+        "operationId": "session-verification-settings-update",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.UpdateSessionVerificationSettingsRequest"
+              }
+            }
+          },
+          "description": "The settings to update",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.SessionVerificationSettingsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/user_connections": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "List all auth connections",
+        "tags": ["Admin"],
+        "summary": "List auth connections",
+        "operationId": "auth-connections-list",
+        "parameters": [
+          {
+            "description": "Provider ID",
+            "name": "provider.id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "User ID",
+            "name": "user.id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Page offset",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_UserAuthProviderConnectionResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/user_connections/{id}": {
+      "delete": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Delete a user/auth provider connection",
+        "tags": ["Admin"],
+        "summary": "Delete auth connection",
+        "operationId": "auth-connections-delete",
+        "parameters": [
+          {
+            "description": "Connection ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/authorize": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Starts the authorization process for given authorization requirements",
+        "tags": ["Authorization"],
+        "summary": "Initiate Authorization",
+        "operationId": "initiate-authorization",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.AuthorizationInitiationRequest"
+              }
+            }
+          },
+          "description": "Authorization request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/auth.AuthorizationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/confirm_user": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Confirms a user's details during an authorization flow",
+        "tags": ["Authorization"],
+        "summary": "Confirm User Authorization",
+        "operationId": "confirm-user-auth-flow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.AuthorizationConfirmUserRequest"
+              }
+            }
+          },
+          "description": "User confirmation request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.AuthorizationConfirmUserResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/status": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Checks the status of an ongoing authorization process for a specific tool.\nIf 'wait' param is present, does not respond until either the auth status becomes completed or the timeout is reached.",
+        "tags": ["Authorization"],
+        "summary": "Check Authorization Status",
+        "operationId": "auth-status",
+        "parameters": [
+          {
+            "description": "Authorization ID",
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Timeout in seconds (max 59)",
+            "name": "wait",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/auth.AuthorizationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Interact with language models via OpenAI's chat completions API",
+        "tags": ["LLM"],
+        "summary": "Language model chat",
+        "operationId": "llm-chat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.ChatRequest"
+              }
+            }
+          },
+          "description": "Request Data",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.ChatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/config": {
+      "get": {
+        "description": "Get the Engine configuration",
+        "tags": ["Operations"],
+        "summary": "Get Engine config",
+        "operationId": "engine-config",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.EngineConfigResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/formatted_tools": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns a page of tools from the engine configuration, optionally filtered by toolkit, formatted for a specific provider",
+        "tags": ["Tools"],
+        "summary": "List Formatted Static Tools",
+        "operationId": "tools-list-formatted",
+        "parameters": [
+          {
+            "description": "Toolkit name",
+            "name": "toolkit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of items to return (default: 25, max: 100)",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Offset from the start of the list (default: 0)",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Provider format",
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "User ID",
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-any"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/formatted_tools/{name}": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns the formatted tool specification for a specific tool, given a provider",
+        "tags": ["Tools"],
+        "summary": "Get Formatted Tool Specification",
+        "operationId": "tool-spec-formatted",
+        "parameters": [
+          {
+            "description": "Tool name",
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Provider format",
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "User ID",
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "description": "Check if Arcade Engine is healthy",
+        "tags": ["Operations"],
+        "summary": "Engine health check",
+        "operationId": "arcade-health",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.HealthSchema"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mcp": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Model Context Protocol endpoint supporting Streamable HTTP transport",
+        "tags": ["MCP"],
+        "summary": "MCP Endpoint",
+        "operationId": "mcp-endpoint",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "204": {
+            "description": "No Content",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Model Context Protocol endpoint supporting Streamable HTTP transport",
+        "tags": ["MCP"],
+        "summary": "MCP Endpoint",
+        "operationId": "mcp-endpoint",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "204": {
+            "description": "No Content",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Model Context Protocol endpoint supporting Streamable HTTP transport",
+        "tags": ["MCP"],
+        "summary": "MCP Endpoint",
+        "operationId": "mcp-endpoint",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "204": {
+            "description": "No Content",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns all projects the caller has access to",
+        "tags": ["Project Management"],
+        "summary": "List Projects",
+        "operationId": "list-projects",
+        "parameters": [
+          {
+            "description": "Maximum number of items to return",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 25
+            }
+          },
+          {
+            "description": "Number of items to skip",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/projects/{project_id}": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns project details",
+        "tags": ["Project Management"],
+        "summary": "Get Project",
+        "operationId": "get-project",
+        "parameters": [
+          {
+            "description": "Project ID",
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scheduled_tools": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns a page of scheduled tool executions",
+        "tags": ["Tools"],
+        "summary": "List scheduled tool executions",
+        "operationId": "tool-scheduled-list",
+        "parameters": [
+          {
+            "description": "Number of items to return (default: 25, max: 100)",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Offset from the start of the list (default: 0)",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_ToolExecutionListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scheduled_tools/{id}": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns the details for a specific scheduled tool execution",
+        "tags": ["Tools"],
+        "summary": "Get scheduled tool execution details",
+        "operationId": "tool-scheduled-get",
+        "parameters": [
+          {
+            "description": "Scheduled execution ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.ToolExecutionDetailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/swagger": {
+      "get": {
+        "description": "Get the OpenAPI 3.0 specification in JSON format",
+        "tags": ["Operations"],
+        "summary": "Get OpenAPI Specification",
+        "operationId": "swagger",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tools": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns a page of tools from the engine configuration, optionally filtered by toolkit",
+        "tags": ["Tools"],
+        "summary": "List Static Tools",
+        "operationId": "tools-list-static",
+        "parameters": [
+          {
+            "description": "Toolkit name",
+            "name": "toolkit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of items to return (default: 25, max: 100)",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Offset from the start of the list (default: 0)",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Comma separated tool formats that will be included in the response.",
+            "name": "include_format",
+            "in": "query",
+            "style": "form",
+            "explode": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "enum": ["arcade", "openai", "anthropic"],
+                "type": "string"
+              }
+            }
+          },
+          {
+            "description": "User ID",
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_ToolResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tools/authorize": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Authorizes a user for a specific tool by name",
+        "tags": ["Tools"],
+        "summary": "Authorize Tool",
+        "operationId": "tool-authorize",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.AuthorizeToolRequest"
+              }
+            }
+          },
+          "description": "Tool authorization request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/auth.AuthorizationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tools/execute": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          },
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Executes a tool by name and arguments",
+        "tags": ["Tools"],
+        "summary": "Execute Tool",
+        "operationId": "tool-execute",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.ExecuteToolRequest"
+              }
+            }
+          },
+          "description": "Tool execution request",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.ExecuteToolResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tools/{name}": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns the arcade tool specification for a specific tool",
+        "tags": ["Tools"],
+        "summary": "Get Arcade Tool Specification",
+        "operationId": "tool-spec",
+        "parameters": [
+          {
+            "description": "Tool name",
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Comma separated tool formats that will be included in the response.",
+            "name": "include_format",
+            "in": "query",
+            "style": "form",
+            "explode": false,
+            "schema": {
+              "type": "array",
+              "items": {
+                "enum": ["arcade", "openai", "anthropic"],
+                "type": "string"
+              }
+            }
+          },
+          {
+            "description": "User ID",
+            "name": "user_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.ToolResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Media Type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "List all workers with their definitions",
+        "tags": ["Admin"],
+        "summary": "List all workers",
+        "operationId": "workers-list",
+        "parameters": [
+          {
+            "description": "Number of items to return (default: 25, max: 100)",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Offset from the start of the list (default: 0)",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_WorkerResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Create a worker",
+        "tags": ["Admin"],
+        "summary": "Create a worker",
+        "operationId": "workers-create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.CreateWorkerRequest"
+              }
+            }
+          },
+          "description": "Worker configuration to create",
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.WorkerResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/test": {
+      "post": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Test a worker connection before adding it to the system",
+        "tags": ["Admin"],
+        "summary": "Test a worker connection",
+        "operationId": "workers-test",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.WorkerTestRequest"
+              }
+            }
+          },
+          "description": "Minimal worker configuration to test",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.WorkerTestResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body or URI",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/{id}": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Get a worker by ID",
+        "tags": ["Admin"],
+        "summary": "Get a worker by ID",
+        "operationId": "workers-get",
+        "parameters": [
+          {
+            "description": "Worker ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.WorkerResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Delete a worker",
+        "tags": ["Admin"],
+        "summary": "Delete a worker",
+        "operationId": "workers-delete",
+        "parameters": [
+          {
+            "description": "Worker ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Update a worker",
+        "tags": ["Admin"],
+        "summary": "Update a worker",
+        "operationId": "workers-update",
+        "parameters": [
+          {
+            "description": "Worker ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/schemas.UpdateWorkerRequest"
+              }
+            }
+          },
+          "description": "Worker configuration to update",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.WorkerResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/{id}/authorize": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Authorize a worker",
+        "tags": ["Admin"],
+        "summary": "Authorize a worker",
+        "operationId": "workers-authorize",
+        "parameters": [
+          {
+            "description": "Worker ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.WorkerAuthorizeResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/{id}/health": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Get the health of a worker",
+        "tags": ["Admin"],
+        "summary": "Get the health of a worker",
+        "operationId": "workers-health",
+        "parameters": [
+          {
+            "description": "Worker ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.WorkerHealthResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workers/{id}/tools": {
+      "get": {
+        "security": [
+          {
+            "Bearer": []
+          }
+        ],
+        "description": "Returns a page of tools",
+        "tags": ["Admin"],
+        "summary": "List Tools",
+        "operationId": "tools-list",
+        "parameters": [
+          {
+            "description": "Worker ID",
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Number of items to return (default: 25, max: 100)",
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Offset from the start of the list (default: 0)",
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.OffsetPage-schemas_ToolResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/schemas.Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "externalDocs": {
+    "description": "Documentation",
+    "url": "https://docs.arcade.dev"
+  },
+  "servers": [
+    {
+      "url": "https://api.arcade.dev"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "Bearer": {
+        "description": "Enter your API key or API token in the format: Bearer <token>",
+        "type": "apiKey",
+        "name": "Authorization",
+        "in": "header"
+      }
+    },
+    "schemas": {
+      "auth.AuthorizationContext": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "user_info": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "auth.AuthorizationRequirement": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "one of ID or ProviderID must be set",
+            "type": "string"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/auth.OAuth2AuthorizationRequirement"
+          },
+          "provider_id": {
+            "description": "one of ID or ProviderID must be set",
+            "type": "string"
+          },
+          "provider_type": {
+            "type": "string"
+          }
+        }
+      },
+      "auth.AuthorizationResponse": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "$ref": "#/components/schemas/auth.AuthorizationContext"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "default": "pending",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/auth.AuthorizationStatus"
+              }
+            ]
+          },
+          "url": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "auth.AuthorizationStatus": {
+        "type": "string",
+        "enum": ["not_started", "pending", "completed", "failed"],
+        "x-enum-varnames": [
+          "StatusNotStarted",
+          "StatusPending",
+          "StatusCompleted",
+          "StatusFailed"
+        ]
+      },
+      "auth.OAuth2AuthorizationRequirement": {
+        "type": "object",
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "auth.Status": {
+        "type": "string",
+        "enum": ["active", "inactive"],
+        "x-enum-varnames": ["StatusActive", "StatusInactive"]
+      },
+      "identity.BindingType": {
+        "type": "string",
+        "enum": ["static", "tenant", "project", "account"],
+        "x-enum-varnames": [
+          "StaticBindingType",
+          "TenantBindingType",
+          "ProjectBindingType",
+          "AccountBindingType"
+        ]
+      },
+      "schemas.AuthProviderCreateRequest": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "external_id": {
+            "description": "The unique external ID for the auth provider",
+            "type": "string",
+            "maxLength": 50
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.OAuth2ConfigCreateRequest"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.AuthProviderPatchRequest": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.OAuth2ConfigPatchRequest"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.AuthProviderResponse": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/schemas.BindingResponse"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.OAuth2ConfigResponse"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.AuthorizationConfirmUserRequest": {
+        "type": "object",
+        "required": ["flow_id", "user_id"],
+        "properties": {
+          "flow_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.AuthorizationConfirmUserResponse": {
+        "type": "object",
+        "required": ["auth_id"],
+        "properties": {
+          "auth_id": {
+            "type": "string"
+          },
+          "next_uri": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.AuthorizationInitiationRequest": {
+        "type": "object",
+        "required": ["auth_requirement", "user_id"],
+        "properties": {
+          "auth_requirement": {
+            "$ref": "#/components/schemas/auth.AuthorizationRequirement"
+          },
+          "next_uri": {
+            "description": "Optional: if provided, the user will be redirected to this URI after authorization",
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.AuthorizationRequirement": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.OAuth2AuthorizationRequirement"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_type": {
+            "type": "string"
+          },
+          "status": {
+            "default": "disabled",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/auth.Status"
+              }
+            ]
+          },
+          "status_reason": {
+            "type": "string"
+          },
+          "token_status": {
+            "$ref": "#/components/schemas/auth.AuthorizationStatus"
+          }
+        }
+      },
+      "schemas.AuthorizeToolRequest": {
+        "type": "object",
+        "required": ["tool_name"],
+        "properties": {
+          "next_uri": {
+            "description": "Optional: if provided, the user will be redirected to this URI after authorization",
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_version": {
+            "description": "Optional: if not provided, any version is used",
+            "type": "string"
+          },
+          "user_id": {
+            "description": "Required only when calling with an API key",
+            "type": "string"
+          }
+        }
+      },
+      "schemas.BindingResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/identity.BindingType"
+          }
+        }
+      },
+      "schemas.BundleToolkitMetadata": {
+        "type": "object",
+        "properties": {
+          "bytes": {
+            "type": "string"
+          },
+          "entrypoint": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["toolkit", "mcp"]
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ChatMessage": {
+        "type": "object",
+        "required": ["content", "role"],
+        "properties": {
+          "content": {
+            "description": "The content of the message.",
+            "type": "string"
+          },
+          "name": {
+            "description": "tool Name",
+            "type": "string"
+          },
+          "role": {
+            "description": "The role of the author of this message. One of system, user, tool, or assistant.",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "description": "tool_call_id",
+            "type": "string"
+          },
+          "tool_calls": {
+            "description": "tool calls if any",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ModelToolCall"
+            }
+          }
+        }
+      },
+      "schemas.ChatRequest": {
+        "type": "object",
+        "properties": {
+          "frequency_penalty": {
+            "type": "number"
+          },
+          "logit_bias": {
+            "description": "LogitBias is must be a token id string (specified by their token ID in the tokenizer), not a word string.\nincorrect: `\"logit_bias\":{\"You\": 6}`, correct: `\"logit_bias\":{\"1639\": 6}`\nrefs: https://platform.openai.com/docs/api-reference/chat/create#chat/create-logit_bias",
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "logprobs": {
+            "description": "LogProbs indicates whether to return log probabilities of the output tokens or not.\nIf true, returns the log probabilities of each output token returned in the content of message.\nThis option is currently not available on the gpt-4-vision-preview model.",
+            "type": "boolean"
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ChatMessage"
+            }
+          },
+          "model": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer"
+          },
+          "parallel_tool_calls": {
+            "description": "Disable the default behavior of parallel tool calls by setting it: false.",
+            "type": "boolean"
+          },
+          "presence_penalty": {
+            "type": "number"
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/schemas.ResponseFormat"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "stop": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "stream_options": {
+            "description": "Options for streaming response. Only set this when you set stream: true.",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/schemas.StreamOptions"
+              }
+            ]
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "tool_choice": {
+            "description": "This can be either a string or an ToolChoice object."
+          },
+          "tools": {},
+          "top_logprobs": {
+            "description": "TopLogProbs is an integer between 0 and 5 specifying the number of most likely tokens to return at each\ntoken position, each with an associated log probability.\nlogprobs must be set to true if this parameter is used.",
+            "type": "integer"
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "user": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ChatResponse": {
+        "type": "object",
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.Choice"
+            }
+          },
+          "created": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "system_fingerprint": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/schemas.Usage"
+          }
+        }
+      },
+      "schemas.Choice": {
+        "type": "object",
+        "properties": {
+          "finish_reason": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer"
+          },
+          "logprobs": {},
+          "message": {
+            "$ref": "#/components/schemas/schemas.ChatMessage"
+          },
+          "tool_authorizations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/auth.AuthorizationResponse"
+            }
+          },
+          "tool_messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ChatMessage"
+            }
+          }
+        }
+      },
+      "schemas.CreateModelRequest": {
+        "type": "object",
+        "required": ["config", "id", "model_provider_type"],
+        "properties": {
+          "config": {},
+          "id": {
+            "type": "string"
+          },
+          "model_provider_type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.CreateWorkerRequest": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "http": {
+            "$ref": "#/components/schemas/schemas.HTTPWorkerConfigRequest"
+          },
+          "id": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerConfigCreateRequest"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.DashboardConfigResponse": {
+        "type": "object",
+        "properties": {
+          "authority": {
+            "type": "string"
+          },
+          "clientId": {
+            "type": "string"
+          },
+          "coordinatorUri": {
+            "type": "string"
+          },
+          "redirectUri": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.DeploymentLogsResponse": {
+        "type": "object",
+        "properties": {
+          "line": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.DeploymentStatusResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.DirectorConfigResponse": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxTools": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.EngineConfigResponse": {
+        "type": "object",
+        "properties": {
+          "dashboard": {
+            "$ref": "#/components/schemas/schemas.DashboardConfigResponse"
+          },
+          "directors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.DirectorConfigResponse"
+            }
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.EngineOAuth2ConfigResponse"
+          }
+        }
+      },
+      "schemas.EngineOAuth2ConfigResponse": {
+        "type": "object",
+        "properties": {
+          "callback_url_template": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.Error": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ExecuteToolRequest": {
+        "type": "object",
+        "required": ["tool_name"],
+        "properties": {
+          "include_error_stacktrace": {
+            "description": "Whether to include the error stacktrace in the response. If not provided, the error stacktrace is not included.",
+            "type": "boolean"
+          },
+          "input": {
+            "description": "JSON input to the tool, if any",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/tool.RawInputs"
+              }
+            ]
+          },
+          "run_at": {
+            "description": "The time at which the tool should be run (optional). If not provided, the tool is run immediately. Format ISO 8601: YYYY-MM-DDTHH:MM:SS",
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "tool_version": {
+            "description": "The tool version to use (optional). If not provided, any version is used",
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ExecuteToolResponse": {
+        "type": "object",
+        "properties": {
+          "duration": {
+            "type": "number"
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "execution_type": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "output": {
+            "$ref": "#/components/schemas/tool.ResponseOutput"
+          },
+          "run_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "success": {
+            "description": "Whether the request was successful.\nFor immediately-executed requests, this will be true if the tool call succeeded.\nFor scheduled requests, this will be true if the request was scheduled successfully.",
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.HTTPWorkerConfigRequest": {
+        "type": "object",
+        "required": ["retry", "secret", "timeout", "uri"],
+        "properties": {
+          "retry": {
+            "type": "integer",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "secret": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "timeout": {
+            "type": "integer",
+            "maximum": 4000,
+            "minimum": 1
+          },
+          "uri": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "schemas.HTTPWorkerConfigResponse": {
+        "type": "object",
+        "properties": {
+          "retry": {
+            "type": "integer"
+          },
+          "secret": {
+            "$ref": "#/components/schemas/schemas.SecretResponse"
+          },
+          "timeout": {
+            "type": "integer"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.HTTPWorkerConfigUpdate": {
+        "type": "object",
+        "properties": {
+          "retry": {
+            "type": "integer",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "secret": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "timeout": {
+            "type": "integer",
+            "maximum": 4000,
+            "minimum": 1
+          },
+          "uri": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "schemas.HTTPWorkerTestConfig": {
+        "type": "object",
+        "required": ["uri"],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "schemas.HealthSchema": {
+        "type": "object",
+        "properties": {
+          "healthy": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.Input": {
+        "type": "object",
+        "properties": {
+          "parameters": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/schemas.Parameter"
+            }
+          }
+        }
+      },
+      "schemas.MCPOAuth2ConfigCreateRequest": {
+        "type": "object",
+        "properties": {
+          "authorization_url": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "client_id": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "client_secret": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "external_id": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "schemas.MCPOAuth2ConfigResponse": {
+        "type": "object",
+        "properties": {
+          "authorization_url": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "$ref": "#/components/schemas/schemas.SecretResponse"
+          },
+          "redirect_uri": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.MCPOAuth2ConfigUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "authorization_url": {
+            "type": "string",
+            "maxLength": 256
+          },
+          "client_id": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "client_secret": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "schemas.MCPWorkerConfigCreateRequest": {
+        "type": "object",
+        "required": ["retry", "timeout", "uri"],
+        "properties": {
+          "headers": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerHeadersCreateRequest"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.MCPOAuth2ConfigCreateRequest"
+          },
+          "retry": {
+            "type": "integer",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "secrets": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerSecretsCreateRequest"
+          },
+          "timeout": {
+            "type": "integer",
+            "maximum": 4000,
+            "minimum": 1
+          },
+          "uri": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "schemas.MCPWorkerConfigPatchRequest": {
+        "type": "object",
+        "properties": {
+          "headers": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerHeadersCreateRequest"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.MCPOAuth2ConfigUpdateRequest"
+          },
+          "retry": {
+            "type": "integer",
+            "maximum": 10,
+            "minimum": 0
+          },
+          "secrets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "timeout": {
+            "type": "integer",
+            "maximum": 4000,
+            "minimum": 1
+          },
+          "uri": {
+            "type": "string",
+            "maxLength": 100
+          }
+        }
+      },
+      "schemas.MCPWorkerConfigResponse": {
+        "type": "object",
+        "properties": {
+          "headers": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerHeadersResponse"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.MCPOAuth2ConfigResponse"
+          },
+          "retry": {
+            "type": "integer"
+          },
+          "secrets": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/schemas.SecretResponse"
+            }
+          },
+          "timeout": {
+            "type": "integer"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.MCPWorkerHeadersCreateRequest": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "schemas.MCPWorkerHeadersResponse": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "schemas.MCPWorkerSecretsCreateRequest": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "schemas.MCPWorkerTestConfig": {
+        "type": "object",
+        "required": ["uri"],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "maxLength": 256
+          }
+        }
+      },
+      "schemas.ModelResponse": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/schemas.BindingResponse"
+          },
+          "config": {},
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ModelToolCall": {
+        "type": "object",
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/schemas.ToolFunctionCall"
+          },
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/schemas.ToolType"
+          }
+        }
+      },
+      "schemas.OAuth2AuthorizationRequirement": {
+        "type": "object",
+        "properties": {
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "schemas.OAuth2AuthorizationRequirementResponse": {
+        "type": "object",
+        "properties": {
+          "met": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.OAuth2ConfigCreateRequest": {
+        "type": "object",
+        "required": ["client_id"],
+        "properties": {
+          "authorize_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigCreateRequest"
+          },
+          "client_id": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "client_secret": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "pkce": {
+            "$ref": "#/components/schemas/schemas.PKCEConfigCreateRequest"
+          },
+          "refresh_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigCreateRequest"
+          },
+          "scope_delimiter": {
+            "type": "string",
+            "enum": [",", " "]
+          },
+          "token_introspection_request": {
+            "$ref": "#/components/schemas/schemas.TokenIntrospectionCreateRequest"
+          },
+          "token_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigCreateRequest"
+          },
+          "user_info_request": {
+            "$ref": "#/components/schemas/schemas.UserInfoRequestConfigCreateRequest"
+          }
+        }
+      },
+      "schemas.OAuth2ConfigPatchRequest": {
+        "type": "object",
+        "properties": {
+          "authorize_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigPatchRequest"
+          },
+          "client_id": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "client_secret": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "pkce": {
+            "$ref": "#/components/schemas/schemas.PKCEConfigPatchRequest"
+          },
+          "refresh_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigPatchRequest"
+          },
+          "scope_delimiter": {
+            "type": "string",
+            "enum": [",", " "]
+          },
+          "token_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigPatchRequest"
+          },
+          "user_info_request": {
+            "$ref": "#/components/schemas/schemas.UserInfoRequestConfigPatchRequest"
+          }
+        }
+      },
+      "schemas.OAuth2ConfigResponse": {
+        "type": "object",
+        "properties": {
+          "authorize_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigResponse"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "client_secret": {
+            "$ref": "#/components/schemas/schemas.SecretResponse"
+          },
+          "pkce": {
+            "$ref": "#/components/schemas/schemas.PKCEConfigResponse"
+          },
+          "redirect_uri": {
+            "description": "The redirect URI required for this provider.",
+            "type": "string"
+          },
+          "refresh_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigResponse"
+          },
+          "scope_delimiter": {
+            "type": "string"
+          },
+          "token_introspection_request": {
+            "$ref": "#/components/schemas/schemas.TokenIntrospectionRequestConfigResponse"
+          },
+          "token_request": {
+            "$ref": "#/components/schemas/schemas.OAuth2RequestConfigResponse"
+          },
+          "user_info_request": {
+            "$ref": "#/components/schemas/schemas.UserInfoRequestConfigResponse"
+          }
+        }
+      },
+      "schemas.OAuth2RequestConfigCreateRequest": {
+        "type": "object",
+        "required": ["endpoint"],
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "schemas.OAuth2RequestConfigPatchRequest": {
+        "type": "object",
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "schemas.OAuth2RequestConfigResponse": {
+        "type": "object",
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string"
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "expiration_format": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string"
+          },
+          "response_content_type": {
+            "type": "string"
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "schemas.OffsetPage-any": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {}
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_AuthProviderResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.AuthProviderResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_ModelResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ModelResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_ProjectResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ProjectResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_StoredSecretResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.StoredSecretResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_ToolExecutionListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ToolExecutionListResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_ToolResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ToolResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_UserAuthProviderConnectionResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.UserAuthProviderConnectionResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.OffsetPage-schemas_WorkerResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.WorkerResponse"
+            }
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "page_count": {
+            "type": "integer"
+          },
+          "total_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.Output": {
+        "type": "object",
+        "properties": {
+          "available_modes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": {
+            "type": "string"
+          },
+          "value_schema": {
+            "$ref": "#/components/schemas/schemas.ValueSchema"
+          }
+        }
+      },
+      "schemas.PKCEConfigCreateRequest": {
+        "type": "object",
+        "properties": {
+          "code_challenge_method": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.PKCEConfigPatchRequest": {
+        "type": "object",
+        "properties": {
+          "code_challenge_method": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.PKCEConfigResponse": {
+        "type": "object",
+        "properties": {
+          "code_challenge_method": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.PackageToolkitMetadata": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.Parameter": {
+        "type": "object",
+        "required": ["name", "value_schema"],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "inferrable": {
+            "type": "boolean",
+            "default": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "value_schema": {
+            "$ref": "#/components/schemas/schemas.ValueSchema"
+          }
+        }
+      },
+      "schemas.ProjectResponse": {
+        "type": "object",
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.Requirements": {
+        "type": "object",
+        "properties": {
+          "authorization": {
+            "$ref": "#/components/schemas/schemas.AuthorizationRequirement"
+          },
+          "met": {
+            "type": "boolean",
+            "default": false
+          },
+          "secrets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.SecretRequirement"
+            }
+          }
+        }
+      },
+      "schemas.ResponseFormat": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/schemas.ResponseFormatType"
+          }
+        }
+      },
+      "schemas.ResponseFormatType": {
+        "type": "string",
+        "enum": ["json_object", "text"],
+        "x-enum-varnames": ["ResponseFormatJSON", "ResponseFormatText"]
+      },
+      "schemas.SecretRequirement": {
+        "type": "object",
+        "required": ["key"],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "met": {
+            "type": "boolean",
+            "default": false
+          },
+          "status_reason": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.SecretResponse": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/identity.BindingType"
+          },
+          "editable": {
+            "type": "boolean"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ServerInfoResponse": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.SessionVerificationSettingsResponse": {
+        "type": "object",
+        "properties": {
+          "unsafe_skip_verification": {
+            "type": "boolean"
+          },
+          "unsafe_skip_verification_choice_allowed": {
+            "type": "boolean"
+          },
+          "verifier_url": {
+            "description": "not omitempty because we want to show null values",
+            "type": "string"
+          }
+        }
+      },
+      "schemas.StoredSecretResponse": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/schemas.BindingResponse"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "last_accessed_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.StreamOptions": {
+        "type": "object",
+        "properties": {
+          "include_usage": {
+            "description": "If set, an additional chunk will be streamed before the data: [DONE] message.\nThe usage field on this chunk shows the token usage statistics for the entire request,\nand the choices field will always be an empty array.\nAll other chunks will also include a usage field, but with a null value.",
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.TokenIntrospectionCreateRequest": {
+        "type": "object",
+        "required": ["endpoint", "triggers"],
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/schemas.TokenIntrospectionTriggersCreateRequest"
+          }
+        }
+      },
+      "schemas.TokenIntrospectionRequestConfigResponse": {
+        "type": "object",
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string"
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "expiration_format": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string"
+          },
+          "response_content_type": {
+            "type": "string"
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/schemas.TokenIntrospectionRequestTriggersResponse"
+          }
+        }
+      },
+      "schemas.TokenIntrospectionRequestTriggersResponse": {
+        "type": "object",
+        "properties": {
+          "on_token_grant": {
+            "type": "boolean"
+          },
+          "on_token_refresh": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.TokenIntrospectionTriggersCreateRequest": {
+        "type": "object",
+        "properties": {
+          "on_token_grant": {
+            "type": "boolean"
+          },
+          "on_token_refresh": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.ToolExecutionAttemptResponse": {
+        "type": "object",
+        "properties": {
+          "finished_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "output": {
+            "$ref": "#/components/schemas/tool.ResponseOutput"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "system_error_message": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ToolExecutionDetailResponse": {
+        "type": "object",
+        "properties": {
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.ToolExecutionAttemptResponse"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "execution_status": {
+            "type": "string"
+          },
+          "execution_type": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/tool.RawInputs"
+          },
+          "run_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "toolkit_name": {
+            "type": "string"
+          },
+          "toolkit_version": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ToolExecutionListResponse": {
+        "type": "object",
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "execution_status": {
+            "type": "string"
+          },
+          "execution_type": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "run_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": "string"
+          },
+          "toolkit_name": {
+            "type": "string"
+          },
+          "toolkit_version": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ToolFunctionCall": {
+        "type": "object",
+        "properties": {
+          "arguments": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.ToolResponse": {
+        "type": "object",
+        "required": [
+          "fully_qualified_name",
+          "input",
+          "name",
+          "qualified_name",
+          "toolkit"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "formatted_schema": {
+            "type": "object",
+            "additionalProperties": {}
+          },
+          "fully_qualified_name": {
+            "type": "string"
+          },
+          "input": {
+            "$ref": "#/components/schemas/schemas.Input"
+          },
+          "name": {
+            "type": "string"
+          },
+          "output": {
+            "$ref": "#/components/schemas/schemas.Output"
+          },
+          "qualified_name": {
+            "type": "string"
+          },
+          "requirements": {
+            "$ref": "#/components/schemas/schemas.Requirements"
+          },
+          "toolkit": {
+            "$ref": "#/components/schemas/schemas.ToolkitResponse"
+          }
+        }
+      },
+      "schemas.ToolType": {
+        "type": "string",
+        "enum": ["function"],
+        "x-enum-varnames": ["ToolTypeFunction"]
+      },
+      "schemas.ToolkitMetadata": {
+        "type": "object",
+        "properties": {
+          "bundles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.BundleToolkitMetadata"
+            }
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/schemas.PackageToolkitMetadata"
+            }
+          }
+        }
+      },
+      "schemas.ToolkitResponse": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.UpdateDeploymentRequest": {
+        "type": "object",
+        "required": ["toolkits"],
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "environment": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "secrets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "toolkits": {
+            "$ref": "#/components/schemas/schemas.ToolkitMetadata"
+          }
+        }
+      },
+      "schemas.UpdateModelConfigRequest": {
+        "type": "object",
+        "properties": {
+          "api_key": {
+            "$ref": "#/components/schemas/schemas.UpdateSecretRequest"
+          }
+        }
+      },
+      "schemas.UpdateModelRequest": {
+        "type": "object",
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/schemas.UpdateModelConfigRequest"
+          }
+        }
+      },
+      "schemas.UpdateSecretRequest": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.UpdateSessionVerificationSettingsRequest": {
+        "type": "object",
+        "properties": {
+          "unsafe_skip_verification": {
+            "type": "boolean"
+          },
+          "verifier_url": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.UpdateWorkerRequest": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "http": {
+            "$ref": "#/components/schemas/schemas.HTTPWorkerConfigUpdate"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerConfigPatchRequest"
+          }
+        }
+      },
+      "schemas.UpsertStoredSecretRequest": {
+        "type": "object",
+        "required": ["value"],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        }
+      },
+      "schemas.Usage": {
+        "type": "object",
+        "properties": {
+          "completion_tokens": {
+            "type": "integer"
+          },
+          "prompt_tokens": {
+            "type": "integer"
+          },
+          "total_tokens": {
+            "type": "integer"
+          }
+        }
+      },
+      "schemas.UserAuthProviderConnectionResponse": {
+        "type": "object",
+        "properties": {
+          "connection_id": {
+            "type": "string"
+          },
+          "connection_status": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider_description": {
+            "type": "string"
+          },
+          "provider_id": {
+            "type": "string"
+          },
+          "provider_type": {
+            "type": "string"
+          },
+          "provider_user_info": {},
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "user_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.UserInfoRequestConfigCreateRequest": {
+        "type": "object",
+        "required": ["endpoint", "triggers"],
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/schemas.UserInfoRequestTriggersCreateRequest"
+          }
+        }
+      },
+      "schemas.UserInfoRequestConfigPatchRequest": {
+        "type": "object",
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_content_type": {
+            "type": "string",
+            "enum": ["application/x-www-form-urlencoded", "application/json"]
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/schemas.UserInfoRequestTriggersPatchRequest"
+          }
+        }
+      },
+      "schemas.UserInfoRequestConfigResponse": {
+        "type": "object",
+        "properties": {
+          "auth_header_value_format": {
+            "type": "string"
+          },
+          "auth_method": {
+            "type": "string"
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "expiration_format": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "request_content_type": {
+            "type": "string"
+          },
+          "response_content_type": {
+            "type": "string"
+          },
+          "response_map": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "triggers": {
+            "$ref": "#/components/schemas/schemas.UserInfoRequestTriggersResponse"
+          }
+        }
+      },
+      "schemas.UserInfoRequestTriggersCreateRequest": {
+        "type": "object",
+        "properties": {
+          "on_token_grant": {
+            "type": "boolean"
+          },
+          "on_token_refresh": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.UserInfoRequestTriggersPatchRequest": {
+        "type": "object",
+        "properties": {
+          "on_token_grant": {
+            "type": "boolean"
+          },
+          "on_token_refresh": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.UserInfoRequestTriggersResponse": {
+        "type": "object",
+        "properties": {
+          "on_token_grant": {
+            "type": "boolean"
+          },
+          "on_token_refresh": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.ValueSchema": {
+        "type": "object",
+        "required": ["val_type"],
+        "properties": {
+          "enum": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "inner_val_type": {
+            "type": "string"
+          },
+          "val_type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.WorkerAuthorizationRequirementResponse": {
+        "type": "object",
+        "properties": {
+          "met": {
+            "type": "boolean"
+          },
+          "oauth2": {
+            "$ref": "#/components/schemas/schemas.OAuth2AuthorizationRequirementResponse"
+          }
+        }
+      },
+      "schemas.WorkerAuthorizeResponse": {
+        "type": "object",
+        "required": ["scopes", "status", "user_id", "worker_id"],
+        "properties": {
+          "next_uri": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "worker_id": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.WorkerHealthResponse": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "healthy": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.WorkerRequirementsResponse": {
+        "type": "object",
+        "properties": {
+          "authorization": {
+            "$ref": "#/components/schemas/schemas.WorkerAuthorizationRequirementResponse"
+          },
+          "met": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.WorkerResponse": {
+        "type": "object",
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/schemas.BindingResponse"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "http": {
+            "$ref": "#/components/schemas/schemas.HTTPWorkerConfigResponse"
+          },
+          "id": {
+            "type": "string"
+          },
+          "managed": {
+            "type": "boolean"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerConfigResponse"
+          },
+          "requirements": {
+            "$ref": "#/components/schemas/schemas.WorkerRequirementsResponse"
+          },
+          "type": {
+            "$ref": "#/components/schemas/schemas.WorkerType"
+          }
+        }
+      },
+      "schemas.WorkerTestRequest": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "http": {
+            "$ref": "#/components/schemas/schemas.HTTPWorkerTestConfig"
+          },
+          "mcp": {
+            "$ref": "#/components/schemas/schemas.MCPWorkerTestConfig"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "schemas.WorkerTestResponse": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "serverInfo": {
+            "$ref": "#/components/schemas/schemas.ServerInfoResponse"
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "schemas.WorkerType": {
+        "type": "string",
+        "enum": ["http", "mcp", "unknown"],
+        "x-enum-varnames": [
+          "WorkerTypeHTTP",
+          "WorkerTypeMCP",
+          "WorkerTypeUnknown"
+        ]
+      },
+      "tool.Error": {
+        "type": "object",
+        "required": ["can_retry", "kind", "message"],
+        "properties": {
+          "additional_prompt_content": {
+            "type": "string"
+          },
+          "can_retry": {
+            "type": "boolean"
+          },
+          "developer_message": {
+            "type": "string"
+          },
+          "extra": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "kind": {
+            "$ref": "#/components/schemas/tool.ErrorKind"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retry_after_ms": {
+            "type": "integer"
+          },
+          "stacktrace": {
+            "type": "string"
+          },
+          "status_code": {
+            "type": "integer"
+          }
+        }
+      },
+      "tool.ErrorKind": {
+        "type": "string",
+        "enum": [
+          "TOOLKIT_LOAD_FAILED",
+          "TOOL_DEFINITION_BAD_DEFINITION",
+          "TOOL_DEFINITION_BAD_INPUT_SCHEMA",
+          "TOOL_DEFINITION_BAD_OUTPUT_SCHEMA",
+          "TOOL_REQUIREMENTS_NOT_MET",
+          "TOOL_RUNTIME_BAD_INPUT_VALUE",
+          "TOOL_RUNTIME_BAD_OUTPUT_VALUE",
+          "TOOL_RUNTIME_RETRY",
+          "TOOL_RUNTIME_CONTEXT_REQUIRED",
+          "TOOL_RUNTIME_FATAL",
+          "UPSTREAM_RUNTIME_BAD_REQUEST",
+          "UPSTREAM_RUNTIME_AUTH_ERROR",
+          "UPSTREAM_RUNTIME_NOT_FOUND",
+          "UPSTREAM_RUNTIME_VALIDATION_ERROR",
+          "UPSTREAM_RUNTIME_RATE_LIMIT",
+          "UPSTREAM_RUNTIME_SERVER_ERROR",
+          "UPSTREAM_RUNTIME_UNMAPPED",
+          "UNKNOWN"
+        ],
+        "x-enum-varnames": [
+          "ErrorKindToolkitLoadFailed",
+          "ErrorKindToolDefinitionBadDefinition",
+          "ErrorKindToolDefinitionBadInputSchema",
+          "ErrorKindToolDefinitionBadOutputSchema",
+          "ErrorKindToolRequirementsNotMet",
+          "ErrorKindToolRuntimeBadInputValue",
+          "ErrorKindToolRuntimeBadOutputValue",
+          "ErrorKindToolRuntimeRetry",
+          "ErrorKindToolRuntimeContextRequired",
+          "ErrorKindToolRuntimeFatal",
+          "ErrorKindUpstreamRuntimeBadRequest",
+          "ErrorKindUpstreamRuntimeAuthError",
+          "ErrorKindUpstreamRuntimeNotFound",
+          "ErrorKindUpstreamRuntimeValidationError",
+          "ErrorKindUpstreamRuntimeRateLimit",
+          "ErrorKindUpstreamRuntimeServerError",
+          "ErrorKindUpstreamRuntimeUnmapped",
+          "ErrorKindUnknown"
+        ]
+      },
+      "tool.Log": {
+        "type": "object",
+        "required": ["level", "message"],
+        "properties": {
+          "level": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "subtype": {
+            "type": "string"
+          }
+        }
+      },
+      "tool.RawInputs": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "tool.ResponseOutput": {
+        "type": "object",
+        "properties": {
+          "authorization": {
+            "$ref": "#/components/schemas/auth.AuthorizationResponse"
+          },
+          "error": {
+            "$ref": "#/components/schemas/tool.Error"
+          },
+          "logs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/tool.Log"
+            }
+          },
+          "value": {}
+        }
+      }
+    }
+  }
+}

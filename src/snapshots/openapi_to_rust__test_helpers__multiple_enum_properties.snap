@@ -18,8 +18,7 @@ pub struct Task {
     ///Task status
     pub status: TaskStatus,
     ///Task type
-    #[serde(rename = "type")]
-    pub type_: TaskType,
+    pub r#type: TaskType,
 }
 ///Task type
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]

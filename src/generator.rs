@@ -45,6 +45,10 @@ pub struct GeneratorConfig {
     pub tracing_enabled: bool,
     /// Authentication configuration
     pub auth_config: Option<crate::http_config::AuthConfig>,
+    /// Enable operation registry generation (static metadata for CLI/proxy routing)
+    pub enable_registry: bool,
+    /// Generate only the operation registry (skip types, client, streaming)
+    pub registry_only: bool,
 }
 
 impl Default for GeneratorConfig {
@@ -64,6 +68,8 @@ impl Default for GeneratorConfig {
             retry_config: None,
             tracing_enabled: true,
             auth_config: None,
+            enable_registry: false,
+            registry_only: false,
         }
     }
 }
@@ -113,28 +119,40 @@ impl CodeGenerator {
     pub fn generate_all(&self, analysis: &mut SchemaAnalysis) -> Result<GenerationResult> {
         let mut files = Vec::new();
 
-        // Generate types file
-        let types_content = self.generate_types(analysis)?;
-        files.push(GeneratedFile {
-            path: "types.rs".into(),
-            content: types_content,
-        });
-
-        // Generate streaming client if configured
-        if let Some(ref streaming_config) = self.config.streaming_config {
-            let streaming_content = self.generate_streaming_client(streaming_config, analysis)?;
+        if !self.config.registry_only {
+            // Generate types file
+            let types_content = self.generate_types(analysis)?;
             files.push(GeneratedFile {
-                path: "streaming.rs".into(),
-                content: streaming_content,
+                path: "types.rs".into(),
+                content: types_content,
             });
+
+            // Generate streaming client if configured
+            if let Some(ref streaming_config) = self.config.streaming_config {
+                let streaming_content =
+                    self.generate_streaming_client(streaming_config, analysis)?;
+                files.push(GeneratedFile {
+                    path: "streaming.rs".into(),
+                    content: streaming_content,
+                });
+            }
+
+            // Generate HTTP client if enabled
+            if self.config.enable_async_client {
+                let http_content = self.generate_http_client(analysis)?;
+                files.push(GeneratedFile {
+                    path: "client.rs".into(),
+                    content: http_content,
+                });
+            }
         }
 
-        // Generate HTTP client if enabled
-        if self.config.enable_async_client {
-            let http_content = self.generate_http_client(analysis)?;
+        // Generate operation registry if enabled
+        if self.config.enable_registry || self.config.registry_only {
+            let registry_content = self.generate_registry(analysis)?;
             files.push(GeneratedFile {
-                path: "client.rs".into(),
-                content: http_content,
+                path: "registry.rs".into(),
+                content: registry_content,
             });
         }
 
@@ -833,7 +851,7 @@ impl CodeGenerator {
                 }
             })
             .map(|(field_name, prop)| {
-                let field_ident = format_ident!("{}", self.to_rust_field_name(field_name));
+                let field_ident = Self::to_field_ident(&self.to_rust_field_name(field_name));
                 let is_required = required.contains(field_name);
                 let field_type =
                     self.generate_field_type(&schema.name, field_name, prop, is_required, analysis);
@@ -1231,9 +1249,13 @@ impl CodeGenerator {
     ) -> TokenStream {
         let mut attrs = Vec::new();
 
-        // Generate rename attribute if field name is not valid Rust identifier
+        // Generate rename attribute if field name differs from Rust identifier
+        // Strip r# prefix for comparison since serde handles raw idents transparently
         let rust_field_name = self.to_rust_field_name(field_name);
-        if rust_field_name != field_name {
+        let comparison_name = rust_field_name
+            .strip_prefix("r#")
+            .unwrap_or(&rust_field_name);
+        if comparison_name != field_name {
             attrs.push(quote! { rename = #field_name });
         }
 
@@ -1592,57 +1614,72 @@ impl CodeGenerator {
             result = format!("field_{result}");
         }
 
-        // Handle reserved keywords
-        match result.as_str() {
-            "type" => "type_".to_string(),
-            "match" => "match_".to_string(),
-            "fn" => "fn_".to_string(),
-            "struct" => "struct_".to_string(),
-            "enum" => "enum_".to_string(),
-            "impl" => "impl_".to_string(),
-            "trait" => "trait_".to_string(),
-            "mod" => "mod_".to_string(),
-            "use" => "use_".to_string(),
-            "pub" => "pub_".to_string(),
-            "const" => "const_".to_string(),
-            "static" => "static_".to_string(),
-            "let" => "let_".to_string(),
-            "mut" => "mut_".to_string(),
-            "ref" => "ref_".to_string(),
-            "move" => "move_".to_string(),
-            "return" => "return_".to_string(),
-            "if" => "if_".to_string(),
-            "else" => "else_".to_string(),
-            "while" => "while_".to_string(),
-            "for" => "for_".to_string(),
-            "loop" => "loop_".to_string(),
-            "break" => "break_".to_string(),
-            "continue" => "continue_".to_string(),
-            // Handle some common edge cases
-            "self" => "self_".to_string(),
-            "super" => "super_".to_string(),
-            "crate" => "crate_".to_string(),
-            "async" => "async_".to_string(),
-            "await" => "await_".to_string(),
-            // Reserved keywords for edition 2018+
-            "override" => "override_".to_string(),
-            "box" => "box_".to_string(),
-            "dyn" => "dyn_".to_string(),
-            "where" => "where_".to_string(),
-            "in" => "in_".to_string(),
-            // Reserved for future use
-            "abstract" => "abstract_".to_string(),
-            "become" => "become_".to_string(),
-            "do" => "do_".to_string(),
-            "final" => "final_".to_string(),
-            "macro" => "macro_".to_string(),
-            "priv" => "priv_".to_string(),
-            "try" => "try_".to_string(),
-            "typeof" => "typeof_".to_string(),
-            "unsized" => "unsized_".to_string(),
-            "virtual" => "virtual_".to_string(),
-            "yield" => "yield_".to_string(),
-            _ => result,
+        // Handle reserved keywords using raw identifiers (r#keyword)
+        if Self::is_rust_keyword(&result) {
+            format!("r#{result}")
+        } else {
+            result
+        }
+    }
+
+    /// Check if a string is a Rust keyword that needs raw identifier treatment
+    pub fn is_rust_keyword(s: &str) -> bool {
+        matches!(
+            s,
+            "type"
+                | "match"
+                | "fn"
+                | "struct"
+                | "enum"
+                | "impl"
+                | "trait"
+                | "mod"
+                | "use"
+                | "pub"
+                | "const"
+                | "static"
+                | "let"
+                | "mut"
+                | "ref"
+                | "move"
+                | "return"
+                | "if"
+                | "else"
+                | "while"
+                | "for"
+                | "loop"
+                | "break"
+                | "continue"
+                | "self"
+                | "super"
+                | "crate"
+                | "async"
+                | "await"
+                | "override"
+                | "box"
+                | "dyn"
+                | "where"
+                | "in"
+                | "abstract"
+                | "become"
+                | "do"
+                | "final"
+                | "macro"
+                | "priv"
+                | "try"
+                | "typeof"
+                | "unsized"
+                | "virtual"
+                | "yield"
+        )
+    }
+
+    /// Create a proc_macro2::Ident from a field name, handling r# raw identifiers
+    pub fn to_field_ident(name: &str) -> proc_macro2::Ident {
+        if let Some(raw) = name.strip_prefix("r#") {
+            proc_macro2::Ident::new_raw(raw, proc_macro2::Span::call_site())
+        } else {
+            proc_macro2::Ident::new(name, proc_macro2::Span::call_site())
         }
     }
 

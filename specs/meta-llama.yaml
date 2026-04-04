@@ -1,0 +1,1330 @@
+openapi: 3.1.0
+info:
+  title: Llama API Specification
+  version: v1
+  description: >-
+    This is the specification of the Llama API
+servers:
+  - url: http://api.llama.com
+paths:
+  /chat/completions:
+    post:
+      operationId: createChatCompletion
+      responses:
+        '200':
+          description: >-
+            If stream=False, returns a CreateChatCompletionResponse with the full completion.
+            If stream=True, returns an SSE event stream of CreateChatCompletionResponseStreamChunk
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateChatCompletionResponse'
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/CreateChatCompletionResponseStreamChunk'
+        '400':
+          $ref: '#/components/responses/BadRequest400'
+        '429':
+          $ref: >-
+            #/components/responses/TooManyRequests429
+        '500':
+          $ref: >-
+            #/components/responses/InternalServerError500
+        default:
+          $ref: '#/components/responses/DefaultError'
+      tags:
+        - ChatCompletion
+      description: >-
+        Generate a chat completion for the given messages using the specified model.
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChatCompletionRequest'
+  /models/{model}:
+    get:
+      operationId: retrieveModel
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Model'
+        '400':
+          $ref: '#/components/responses/BadRequest400'
+        '429':
+          $ref: >-
+            #/components/responses/TooManyRequests429
+        '500':
+          $ref: >-
+            #/components/responses/InternalServerError500
+        default:
+          $ref: '#/components/responses/DefaultError'
+      tags:
+        - Models
+      description: ''
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+            examples:
+              - Llama-3.3-70B-Instruct
+          description: The ID of the model to use for this request.
+  /models:
+    get:
+      operationId: listModels
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListModelsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest400'
+        '429':
+          $ref: >-
+            #/components/responses/TooManyRequests429
+        '500':
+          $ref: >-
+            #/components/responses/InternalServerError500
+        default:
+          $ref: '#/components/responses/DefaultError'
+      tags:
+        - Models
+      description: >-
+        Lists the currently available models, and provides basic information
+        about each one.
+      parameters: []
+  /moderations:
+    post:
+      operationId: moderations
+      responses:
+        '200':
+          description: >-
+            Returns a Moderation object with moderation results.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModerationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest400'
+        '429':
+          $ref: >-
+            #/components/responses/TooManyRequests429
+        '500':
+          $ref: >-
+            #/components/responses/InternalServerError500
+        default:
+          $ref: '#/components/responses/DefaultError'
+      tags:
+        - Moderations
+      description: >-
+        Classifies if given messages are potentially harmful across several categories.
+      parameters: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModerationRequest'
+  /uploads:
+    post:
+      description: >
+        Initiate an upload session with
+        specified file metadata
+      parameters:
+        - 
+          name: X-API-Version
+          in: header
+          required: false
+          schema:
+            type: string
+            enum:
+              - 1.0.0
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostUploadsRequestSchema'
+      responses:
+        201:
+          description: >
+            Response for initiating an upload
+            session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostUploadsResponseSchema'
+          headers:
+            Access-Control-Allow-Origin:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes whether the response can be
+                shared with requesting code from the
+                given origin
+            Access-Control-Expose-Headers:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes what response headers can be
+                shared with requesting code
+            X-RateLimit-Limit-Requests:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the total number of requests
+                allowed in a period
+            X-RateLimit-Remaining-Requests:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the remaining number of requests
+                allowed
+            X-RateLimit-Limit-Tokens:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the total number of tokens
+                allowed in a period
+            X-RateLimit-Remaining-Tokens:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the remaining number of tokens
+                allowed
+            X-RateLimit-Retry-After:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the number of seconds to wait
+                before retrying again due to rate
+                limiting
+  /uploads/{upload_id}:
+    post:
+      description: >
+        Upload a chunk of bytes to the upload
+        session
+      parameters:
+        - 
+          name: upload_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The upload session identifier
+        - 
+          name: X-Upload-Offset
+          in: header
+          required: false
+          schema:
+            type: integer
+          description: >
+            The offset of the chunk of bytes to
+            upload for the upload session
+        - 
+          name: X-API-Version
+          in: header
+          required: false
+          schema:
+            type: string
+            enum:
+              - 1.0.0
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/PostUploadsWithUploadIdRequestSchema'
+      responses:
+        200:
+          description: >
+            Upload a chunk of bytes to the upload
+            session for upload_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostUploadsWithUploadIdResponseSchema'
+          headers:
+            Access-Control-Allow-Origin:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes whether the response can be
+                shared with requesting code from the
+                given origin
+            Access-Control-Expose-Headers:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes what response headers can be
+                shared with requesting code
+            X-RateLimit-Limit-Requests:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the total number of requests
+                allowed in a period
+            X-RateLimit-Remaining-Requests:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the remaining number of requests
+                allowed
+            X-RateLimit-Limit-Tokens:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the total number of tokens
+                allowed in a period
+            X-RateLimit-Remaining-Tokens:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the remaining number of tokens
+                allowed
+            X-RateLimit-Retry-After:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the number of seconds to wait
+                before retrying again due to rate
+                limiting
+    get:
+      description: >
+        Get the status of the given upload
+        session
+      parameters:
+        - 
+          name: upload_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The upload session identifier
+        - 
+          name: X-API-Version
+          in: header
+          required: false
+          schema:
+            type: string
+            enum:
+              - 1.0.0
+      responses:
+        200:
+          description: >
+            Information about the upload session for
+            upload_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetUploadsWithUploadIdResponseSchema'
+          headers:
+            Access-Control-Allow-Origin:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes whether the response can be
+                shared with requesting code from the
+                given origin
+            Access-Control-Expose-Headers:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes what response headers can be
+                shared with requesting code
+            X-RateLimit-Limit-Requests:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the total number of requests
+                allowed in a period
+            X-RateLimit-Remaining-Requests:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the remaining number of requests
+                allowed
+            X-RateLimit-Limit-Tokens:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the total number of tokens
+                allowed in a period
+            X-RateLimit-Remaining-Tokens:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the remaining number of tokens
+                allowed
+            X-RateLimit-Retry-After:
+              required: false
+              schema:
+                type: string
+              description: >
+                Denotes the number of seconds to wait
+                before retrying again due to rate
+                limiting
+components:
+  schemas:
+    PostUploadsRequestSchema:
+      type: object
+      properties:
+        bytes:
+          type: integer
+          description: >
+            The number of bytes in the file you are
+            uploading
+        filename:
+          type: string
+          description: The name of the file to upload
+        mime_type:
+          type: string
+          enum:
+            - image/jpeg
+            - image/jpg
+            - image/png
+            - image/gif
+            - image/webp
+            - image/x-icon
+            - audio/mp3
+            - audio/mpeg
+            - audio/wav
+            - audio/x-wav
+            - application/jsonl
+            - application/json
+            - text/plain
+            - video/mp4
+            - application/pdf
+          description: >
+            The MIME type of the file. Must be one
+            of the supported MIME type for the given
+            purpose.
+        purpose:
+          type: string
+          enum:
+            - attachment
+            - ephemeral_attachment
+            - image_generation_result
+            - messages_finetune
+            - messages_eval
+            - metadata
+          description: Intended purpose of the uploaded file.
+      required:
+        - bytes
+        - filename
+        - mime_type
+        - purpose
+    PostUploadsResponseSchema:
+      type: object
+      properties:
+        id:
+          type: string
+          description: >
+            The unique upload session identifier to
+            use for uploading the file
+        bytes:
+          type: integer
+          description: >
+            The number of bytes in the file you are
+            uploading
+        filename:
+          type: string
+          description: The name of the file to upload
+        mime_type:
+          type: string
+          enum:
+            - image/jpeg
+            - image/jpg
+            - image/png
+            - image/gif
+            - image/webp
+            - image/x-icon
+            - audio/mp3
+            - audio/mpeg
+            - audio/wav
+            - audio/x-wav
+            - application/jsonl
+            - application/json
+            - text/plain
+            - video/mp4
+            - application/pdf
+          description: >
+            The MIME type of the file. Must be one
+            of the supported MIME type for the given
+            purpose.
+        purpose:
+          type: string
+          enum:
+            - attachment
+            - ephemeral_attachment
+            - image_generation_result
+            - messages_finetune
+            - messages_eval
+            - metadata
+          description: Intended purpose of the uploaded file.
+      required:
+        - id
+        - bytes
+        - filename
+        - mime_type
+        - purpose
+    PostUploadsWithUploadIdRequestSchema:
+      type: object
+      properties:
+        data:
+          type: string
+          format: binary
+          description: The chunk of bytes to upload
+      required:
+        - data
+    PostUploadsWithUploadIdResponseSchema:
+      type: object
+      properties:
+        upload_id:
+          type: string
+          description: >
+            The unique upload session identifier to
+            use for uploading the file
+        file_id:
+          type: string
+          description: >
+            The ready file identifier after the
+            upload is complete
+        offset:
+          type: integer
+          description: >
+            This is a zero-based numeric index of
+            byte number in which the current upload
+            session to be resuming upload from
+      required:
+        - upload_id
+    GetUploadsWithUploadIdResponseSchema:
+      type: object
+      properties:
+        upload_id:
+          type: string
+          description: >
+            The unique upload session identifier to
+            use for uploading the file
+        offset:
+          type: integer
+          description: >
+            This is a zero-based numeric index of
+            byte number in which the current upload
+            session to be resuming upload from
+      required:
+        - upload_id
+    Error:
+      type: object
+      properties:
+        status:
+          type: integer
+          description: HTTP status code
+        title:
+          type: string
+          description: >-
+            Error title, a short summary of the error which is invariant for an error
+            type
+        detail:
+          type: string
+          description: >-
+            Error detail, a longer human-readable description of the error
+        instance:
+          type: string
+          description: >-
+            A URL which can be used to retrieve more information about
+            the specific occurrence of the error
+      additionalProperties: false
+      required:
+        - status
+        - title
+        - detail
+      title: Error
+      description: >-
+        Error response from the API. Roughly follows RFC 7807.
+    AssistantMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          const: assistant
+          default: assistant
+          description: >-
+            Must be "assistant" to identify this as the model's response
+        content:
+          oneOf:
+          - type: string
+          - $ref: '#/components/schemas/AssistantMessageContentItem'
+          description: The content of the model's response.
+        stop_reason:
+          type: string
+          enum:
+            - stop
+            - tool_calls
+            - length
+          description: >-
+            The reason why we stopped. Options are:
+            - "stop": The model reached a natural stopping point.
+            - "tool_calls": The model finished generating and invoked a tool call.
+            - "length": The model reached the maxinum number of tokens specified in the request.
+        tool_calls:
+          $ref: "#/components/schemas/MessageToolCalls"
+      additionalProperties: false
+      required:
+        - role
+      title: AssistantMessage
+      description: >-
+        A message containing the model's (assistant) response in a chat conversation.
+    MessageToolCalls:
+      type: array
+      description: The tool calls generated by the model, such as function calls.
+      items:
+        $ref: "#/components/schemas/MessageToolCall"
+    MessageToolCall:
+      type: object
+      properties:
+        id:
+          type: string
+          description: The ID of the tool call.
+        function:
+          type: object
+          description: The function that the model called.
+          properties:
+            name:
+              type: string
+              description: The name of the function to call.
+            arguments:
+              type: string
+              description:
+                The arguments to call the function with, as generated by the model
+                in JSON format. Note that the model does not always generate
+                valid JSON, and may hallucinate parameters not defined by your
+                function schema. Validate the arguments in your code before
+                calling your function.
+          required:
+            - name
+            - arguments
+      required:
+        - id
+        - function
+    MessageImageContentItem:
+      type: object
+      title: MessageImageContentItem
+      description: A image content item
+      properties:
+        type:
+          type: string
+          enum:
+            - image_url
+          description: >-
+            Discriminator type of the content item. Always "image"
+        image_url:
+          type: object
+          description:
+            Contains either an image URL or a data URL for a base64 encoded
+            image.
+          properties:
+            url:
+              type: string
+              description: Either a URL of the image or the base64 encoded image data.
+              format: uri
+              examples:
+                - https://example.com/image.jpg
+          required:
+            - url
+      required:
+        - type
+        - image_url
+    UserMessageContentItem:
+      oneOf:
+        - $ref: '#/components/schemas/MessageTextContentItem'
+        - $ref: '#/components/schemas/MessageImageContentItem'
+      discriminator:
+        propertyName: type
+        mapping:
+          image: '#/components/schemas/MessageImageContentItem'
+          text: '#/components/schemas/MessageTextContentItem'
+    AssistantMessageContentItem:
+      oneOf:
+        - $ref: '#/components/schemas/MessageTextContentItem'
+      discriminator:
+        propertyName: type
+        mapping:
+          text: '#/components/schemas/MessageTextContentItem'
+    TextResponseFormat:
+      type: object
+      title: TextResponseFormat
+      description: >-
+        Configuration for text-guided response generation.
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+          description: >-
+            The type of response format being defined. Always `text`.
+      required:
+        - type
+    JsonSchemaResponseFormatSchema:
+      type: object
+      title: JSON Schema
+      description: >-
+        The JSON schema the response should conform to. In a Python SDK, this
+        is often a `pydantic` model.
+      additionalProperties: false
+    JsonSchemaResponseFormat:
+      type: object
+      title: JSON Schema Response Format
+      description: >-
+        Configuration for JSON schema-guided response generation.
+      properties:
+        type:
+          type: string
+          enum:
+            - json_schema
+          description: >-
+            The type of response format being defined. Always `json_schema`.
+        json_schema:
+          type: object
+          title: JSON schema
+          description: >-
+            The JSON schema the response should conform to.
+          properties:
+            name:
+              type: string
+              description: >
+                The name of the response format.
+            schema:
+              $ref: "#/components/schemas/JsonSchemaResponseFormatSchema"
+          required:
+            - name
+            - schema
+      additionalProperties: false
+      required:
+        - type
+        - json_schema
+    Message:
+      oneOf:
+        - $ref: '#/components/schemas/UserMessage'
+        - $ref: '#/components/schemas/SystemMessage'
+        - $ref: '#/components/schemas/ToolResponseMessage'
+        - $ref: '#/components/schemas/AssistantMessage'
+      discriminator:
+        propertyName: role
+        mapping:
+          user: '#/components/schemas/UserMessage'
+          system: '#/components/schemas/SystemMessage'
+          tool: '#/components/schemas/ToolResponseMessage'
+          assistant: '#/components/schemas/AssistantMessage'
+    ResponseFormat:
+      oneOf:
+        - $ref: '#/components/schemas/JsonSchemaResponseFormat'
+        - $ref: '#/components/schemas/TextResponseFormat'
+      discriminator:
+        propertyName: type
+        mapping:
+          text: '#/components/schemas/TextResponseFormat'
+          json_schema: '#/components/schemas/JsonSchemaResponseFormat'
+      additionalProperties: false
+      title: ResponseFormat
+    SystemMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          const: system
+          default: system
+          description: >-
+            Must be "system" to identify this as a system message
+        content:
+          description: >-
+            The content of the system message.
+          oneOf:
+            - type: string
+              description: The text contents of the message.
+              title: Text content
+            - type: array
+              description: >-
+                A list of content items, which can include text and other media.
+                Supported content types differ based on model.
+              title: Array of content items
+              items:
+                $ref: '#/components/schemas/MessageTextContentItem'
+      additionalProperties: false
+      required:
+        - role
+        - content
+      title: SystemMessage
+      description: >-
+        A system message providing instructions or context to the model.
+    MessageTextContentItem:
+      type: object
+      title: MessageTextContentItem
+      description: A text content item
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+          description: >-
+            Discriminator type of the content item. Always "text"
+        text:
+          type: string
+          description: Text content
+      required:
+        - type
+        - text
+    ChatCompletionToolChoiceOption:
+      description: >
+        Controls which (if any) tool is called by the model.
+
+        `none` means the model will not call any tool and instead generates a
+        message.
+
+        `auto` means the model can pick between generating a message or calling
+        one or more tools.
+
+        `required` means the model must call one or more tools.
+
+        Specifying a particular tool via `{"type": "function", "function":
+        {"name": "my_function"}}` forces the model to call that tool.
+
+
+        `none` is the default when no tools are present. `auto` is the default
+        if tools are present.
+      oneOf:
+        - type: string
+          description: >
+            `none` means the model will not call any tool and instead generates
+            a message. `auto` means the model can pick between generating a
+            message or calling one or more tools. `required` means the model
+            must call one or more tools.
+          enum:
+            - none
+            - auto
+            - required
+        - $ref: "#/components/schemas/ChatCompletionNamedToolChoice"
+    ChatCompletionNamedToolChoice:
+      type: object
+      description:
+        Specifies a tool the model should use. Use to force the model to
+        call a specific function.
+      properties:
+        type:
+          type: string
+          enum:
+            - function
+          description: The type of the tool. Currently, only `function` is supported.
+        function:
+          type: object
+          properties:
+            name:
+              type: string
+              description: The name of the function to call.
+          required:
+            - name
+      required:
+        - type
+        - function
+    ChatCompletionTool:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - function
+          description: The type of the tool. Currently, only `function` is supported.
+        function:
+          $ref: "#/components/schemas/FunctionObject"
+      required:
+        - type
+        - function
+    FunctionObject:
+      type: object
+      properties:
+        description:
+          type: string
+          description:
+            A description of what the function does, used by the model to
+            choose when and how to call the function.
+        name:
+          type: string
+          description:
+            The name of the function to be called. Must be a-z, A-Z, 0-9, or
+            contain underscores and dashes, with a maximum length of 64.
+        parameters:
+          $ref: "#/components/schemas/FunctionParameters"
+        strict:
+          type: boolean
+          default: false
+          description:
+            Whether to enable strict schema adherence when generating the
+            function call. If set to true, the model will follow the exact
+            schema defined in the `parameters` field. Only a subset of JSON
+            Schema is supported when `strict` is `true`. Learn more about
+            Structured Outputs in the [function calling
+            guide](docs/guides/function-calling).
+      required:
+        - name
+    FunctionParameters:
+      type: object
+      description: >-
+        The parameters the functions accepts, described as a JSON Schema object.
+        Omitting `parameters` defines a function with an empty parameter list.
+      additionalProperties: true
+    ToolResponseMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          const: tool
+          default: tool
+          description: >-
+            Must be "tool" to identify this as a tool response
+        tool_call_id:
+          type: string
+          description: >-
+            Unique identifier for the tool call this response is for
+        content:
+          description: >-
+            The content of the user message, which can include text and other media.
+          oneOf:
+            - type: string
+              description: The text contents of the message.
+              title: Text content
+            - type: array
+              description: >-
+                A list of content items, which can include text and other media.
+                Supported content types differ based on model.
+              title: Array of content items
+              items:
+                $ref: '#/components/schemas/MessageTextContentItem'
+      additionalProperties: false
+      required:
+        - role
+        - tool_call_id
+        - content
+      title: ToolResponseMessage
+      description: >-
+        A message representing the result of a tool invocation.
+    URL:
+      type: object
+      properties:
+        uri:
+          type: string
+      additionalProperties: false
+      required:
+        - uri
+      title: URL
+    UserMessage:
+      type: object
+      properties:
+        role:
+          type: string
+          enum:
+            - user
+          description: >-
+            Must be "user" to identify this as a user message.
+        content:
+          description: >-
+            The content of the user message, which can include text and other media.
+          oneOf:
+            - type: string
+              description: The text contents of the message.
+              title: Text content
+            - type: array
+              description: >-
+                A list of content items, which can include text and other media.
+                Supported content types differ based on model.
+              title: Array of content items
+              items:
+                $ref: '#/components/schemas/UserMessageContentItem'
+      additionalProperties: false
+      required:
+        - role
+        - content
+      title: UserMessage
+      description: >-
+        A message from the user in a chat conversation.
+    CreateChatCompletionRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          description: >-
+            The identifier of the model to use.
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Message'
+          description: List of messages in the conversation.
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatCompletionTool'
+          description: >-
+            List of tool definitions available to the model
+        tool_choice:
+            $ref: "#/components/schemas/ChatCompletionToolChoiceOption"
+        response_format:
+          $ref: '#/components/schemas/ResponseFormat'
+          description: >-
+            An object specifying the format that the model must output.
+
+            Setting to `{ "type": "json_schema", "json_schema": {...} }`
+            enables Structured Outputs which ensures the model will match your
+            supplied JSON schema.
+
+            If not specified, the default is {"type": "text"}, and model will return a free-form text response.
+        stream:
+          type: boolean
+          description: >-
+            If True, generate an SSE event stream of the response. Defaults
+            to False.
+        repetition_penalty:
+          type: number
+          minimum: 1.0
+          maximum: 2.0
+          default: 1.0
+          description: >
+            Controls the likelyhood and generating repetitive responses.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 1.0
+          default: 0.6
+          description: >
+            Controls randomness of the response by setting a temperature.
+            Higher value leads to more creative responses.
+            Lower values will make the response more focused and deterministic.
+        top_p:
+          type: number
+          minimum: 0
+          maximum: 1
+          default: 0.9
+          description: >
+            Controls diversity of the response by setting a probability threshold when choosing the next token.
+        top_k:
+          type: integer
+          minimum: 0
+          default: 0
+          description: >
+            Only sample from the top K options for each subsequent token.
+        max_completion_tokens:
+          type: integer
+          description: >
+            The maximum number of tokens to generate.
+          minimum: 1
+          default: 4096
+        user:
+          type: string
+          description: >-
+            A unique identifier representing your application end-user for monitoring abuse.
+      additionalProperties: false
+      required:
+        - model
+        - messages
+      title: CreateChatCompletionRequest
+    CreateChatCompletionResponse:
+      type: object
+      description: Response from a chat completion request.
+      properties:
+        id:
+          type: string
+          description: The unique identifier of the chat completion request.
+        metrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricInResponse'
+        completion_message:
+          $ref: '#/components/schemas/AssistantMessage'
+          description: The complete response message
+      additionalProperties: false
+      required:
+        - completion_message
+      title: CreateChatCompletionResponse
+    MetricInResponse:
+      type: object
+      properties:
+        metric:
+          type: string
+        value:
+          oneOf:
+            - type: integer
+            - type: number
+        unit:
+          type: string
+      additionalProperties: false
+      required:
+        - metric
+        - value
+      title: MetricInResponse
+    CreateChatCompletionResponseEvent:
+      type: object
+      properties:
+        event_type:
+          type: string
+          enum:
+            - start
+            - complete
+            - progress
+            - metrics
+          description: Type of the event
+        delta:
+          $ref: '#/components/schemas/ChatCompletionStreamResponseDelta'
+          description: >-
+            Content generated since last event. This can be one or more tokens, or
+            a tool call.
+        stop_reason:
+          type: string
+          enum:
+            - stop
+            - tool_calls
+            - length
+          description: >-
+            The reason why we stopped. Options are:
+            - "stop": The model reached a natural stopping point.
+            - "tool_calls": The model finished generating and invoked a tool call.
+            - "length": The model reached the maxinum number of tokens specified in the request.
+        metrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricInResponse'
+      additionalProperties: false
+      required:
+        - event_type
+        - delta
+      title: CreateChatCompletionResponseEvent
+      description: >-
+        An event during chat completion generation.
+    CreateChatCompletionResponseStreamChunk:
+      type: object
+      properties:
+        id:
+          type: string
+          description: The unique identifier of the chat completion request.
+        event:
+          $ref: '#/components/schemas/CreateChatCompletionResponseEvent'
+          description: The event containing the new content
+      additionalProperties: false
+      required:
+        - event
+      title: CreateChatCompletionResponseStreamChunk
+      description: >-
+        A chunk of a streamed chat completion response.
+    TextDelta:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - text
+        text:
+          type: string
+      additionalProperties: false
+      required:
+        - type
+        - text
+    ToolCallDelta:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - tool_call
+        id:
+          type: string
+          description: The ID of the tool call.
+        function:
+          type: object
+          properties:
+            name:
+              type: string
+              description: The name of the function to call.
+            arguments:
+              type: string
+              description:
+                The arguments to call the function with, as generated by the model
+                in JSON format. Note that the model does not always generate
+                valid JSON, and may hallucinate parameters not defined by your
+                function schema. Validate the arguments in your code before
+                calling your function.
+      required:
+        - type
+        - function
+    ChatCompletionStreamResponseDelta:
+      oneOf:
+        - $ref: '#/components/schemas/TextDelta'
+        - $ref: '#/components/schemas/ToolCallDelta'
+      discriminator:
+        propertyName: type
+        mapping:
+          text: '#/components/schemas/TextDelta'
+          tool_call: '#/components/schemas/ToolCallDelta'
+    ModerationRequest:
+      type: object
+      properties:
+        model:
+          type: string
+          description: >-
+            Optional identifier of the model to use. Defaults to "Llama-Guard".
+        messages:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Message'
+          description: List of messages in the conversation.
+      required:
+        - messages
+      title: ModerationRequest
+    ModerationResponse:
+      type: object
+      properties:
+        model:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModerationObject'
+      required:
+        - model
+        - results
+    ModerationObject:
+      type: object
+      properties:
+        flagged:
+          type: boolean
+        flagged_categories:
+          type: array
+          items:
+            type: string
+      required:
+        - flagged
+        - flagged_categories
+    Model:
+      type: object
+      properties:
+        id:
+          type: string
+          description: The unique model identifier, which can be referenced in the API.
+        owned_by:
+          type: string
+          description: The owner of the model.
+        object:
+          type: string
+          description: The object type, which is always "model"
+          enum:
+            - model
+        created:
+          type: integer
+          description: The creation time of the model.
+      additionalProperties: false
+      required:
+        - id
+        - owned_by
+        - object
+        - created
+      title: Model
+    ListModelsResponse:
+      type: object
+      properties:
+        object:
+          type: string
+          enum:
+            - list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Model'
+      additionalProperties: false
+      required:
+        - data
+      title: ListModelsResponse
+  responses:
+    BadRequest400:
+      description: The request was invalid or malformed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 400
+            title: Bad Request
+            detail: The request was invalid or malformed
+    TooManyRequests429:
+      description: >-
+        The client has sent too many requests in a given amount of time
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 429
+            title: Too Many Requests
+            detail: >-
+              You have exceeded the rate limit. Please try again later.
+    InternalServerError500:
+      description: >-
+        The server encountered an unexpected error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 500
+            title: Internal Server Error
+            detail: >-
+              An unexpected error occurred. Our team has been notified.
+    DefaultError:
+      description: An unexpected error occurred
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            status: 0
+            title: Error
+            detail: An unexpected error occurred
+security:
+  - Default: []
+tags:
+  - name: ChatCompletion
+    x-displayName: >-
+      ChatCompletion
+  - name: Models
+  - name: Moderations
+x-tagGroups:
+  - name: Operations
+    tags:
+      - ChatCompletion
+      - Models
+      - Moderations
