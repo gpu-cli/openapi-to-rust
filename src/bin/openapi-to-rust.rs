@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
+use openapi_to_rust::cli::{json_from_str_lossy, yaml_to_json_value};
 use openapi_to_rust::{CodeGenerator, ConfigFile, SchemaAnalyzer};
-use openapi_to_rust::cli::{yaml_to_json_value, json_from_str_lossy};
 use std::path::PathBuf;
 
 #[derive(Parser)]

@@ -479,8 +479,8 @@ fn test_multiple_operations() {
             method: "POST".to_string(),
             path: "/users".to_string(),
             summary: None,
-        description: None,
-        request_body: Some(RequestBodyContent::Json {
+            description: None,
+            request_body: Some(RequestBodyContent::Json {
                 schema_name: "CreateUserRequest".to_string(),
             }),
             response_schemas: {

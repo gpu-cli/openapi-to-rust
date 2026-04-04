@@ -773,5 +773,4 @@ impl CodeGenerator {
             snake_case
         }
     }
-
 }

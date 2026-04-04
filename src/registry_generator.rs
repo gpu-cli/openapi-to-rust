@@ -207,9 +207,16 @@ impl CodeGenerator {
                 .collect();
 
             // Sanitize operation ID to a valid Rust identifier for the static name
-            let sanitized_id: String = op.operation_id
+            let sanitized_id: String = op
+                .operation_id
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_uppercase()
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let params_static_name = syn::Ident::new(
                 &format!("PARAMS_{sanitized_id}"),
@@ -227,12 +234,14 @@ impl CodeGenerator {
                 Some(rb) => {
                     use crate::analysis::RequestBodyContent;
                     let (content_type, schema_name) = match rb {
-                        RequestBodyContent::Json { schema_name } => {
-                            (quote! { BodyContentType::Json }, quote! { Some(#schema_name) })
-                        }
-                        RequestBodyContent::FormUrlEncoded { schema_name } => {
-                            (quote! { BodyContentType::FormUrlEncoded }, quote! { Some(#schema_name) })
-                        }
+                        RequestBodyContent::Json { schema_name } => (
+                            quote! { BodyContentType::Json },
+                            quote! { Some(#schema_name) },
+                        ),
+                        RequestBodyContent::FormUrlEncoded { schema_name } => (
+                            quote! { BodyContentType::FormUrlEncoded },
+                            quote! { Some(#schema_name) },
+                        ),
                         RequestBodyContent::Multipart => {
                             (quote! { BodyContentType::Multipart }, quote! { None })
                         }

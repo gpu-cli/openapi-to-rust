@@ -3541,7 +3541,9 @@ impl SchemaAnalyzer {
             for param in path_params {
                 let resolved = self.resolve_parameter(param);
                 if let Some(param_info) = self.analyze_parameter(&resolved)? {
-                    if !existing_keys.contains(&(param_info.name.clone(), param_info.location.clone())) {
+                    if !existing_keys
+                        .contains(&(param_info.name.clone(), param_info.location.clone()))
+                    {
                         op_info.parameters.push(param_info);
                     }
                 }

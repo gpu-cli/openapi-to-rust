@@ -1252,7 +1252,9 @@ impl CodeGenerator {
         // Generate rename attribute if field name differs from Rust identifier
         // Strip r# prefix for comparison since serde handles raw idents transparently
         let rust_field_name = self.to_rust_field_name(field_name);
-        let comparison_name = rust_field_name.strip_prefix("r#").unwrap_or(&rust_field_name);
+        let comparison_name = rust_field_name
+            .strip_prefix("r#")
+            .unwrap_or(&rust_field_name);
         if comparison_name != field_name {
             attrs.push(quote! { rename = #field_name });
         }
@@ -1624,13 +1626,51 @@ impl CodeGenerator {
     pub fn is_rust_keyword(s: &str) -> bool {
         matches!(
             s,
-            "type" | "match" | "fn" | "struct" | "enum" | "impl" | "trait" | "mod"
-            | "use" | "pub" | "const" | "static" | "let" | "mut" | "ref" | "move"
-            | "return" | "if" | "else" | "while" | "for" | "loop" | "break"
-            | "continue" | "self" | "super" | "crate" | "async" | "await"
-            | "override" | "box" | "dyn" | "where" | "in"
-            | "abstract" | "become" | "do" | "final" | "macro" | "priv" | "try"
-            | "typeof" | "unsized" | "virtual" | "yield"
+            "type"
+                | "match"
+                | "fn"
+                | "struct"
+                | "enum"
+                | "impl"
+                | "trait"
+                | "mod"
+                | "use"
+                | "pub"
+                | "const"
+                | "static"
+                | "let"
+                | "mut"
+                | "ref"
+                | "move"
+                | "return"
+                | "if"
+                | "else"
+                | "while"
+                | "for"
+                | "loop"
+                | "break"
+                | "continue"
+                | "self"
+                | "super"
+                | "crate"
+                | "async"
+                | "await"
+                | "override"
+                | "box"
+                | "dyn"
+                | "where"
+                | "in"
+                | "abstract"
+                | "become"
+                | "do"
+                | "final"
+                | "macro"
+                | "priv"
+                | "try"
+                | "typeof"
+                | "unsized"
+                | "virtual"
+                | "yield"
         )
     }
 

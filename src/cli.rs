@@ -373,12 +373,10 @@ fn try_sanitize_integer_line(line: &str) -> Option<String> {
     // Check if it overflows i64/u64
     let overflows = if is_negative {
         // Check if |value| > i64::MAX + 1 = 9223372036854775808
-        digit_part.len() > 19
-            || (digit_part.len() == 19 && digit_part > "9223372036854775808")
+        digit_part.len() > 19 || (digit_part.len() == 19 && digit_part > "9223372036854775808")
     } else {
         // Check if value > u64::MAX = 18446744073709551615
-        digit_part.len() > 20
-            || (digit_part.len() == 20 && digit_part > "18446744073709551615")
+        digit_part.len() > 20 || (digit_part.len() == 20 && digit_part > "18446744073709551615")
     };
 
     if overflows {
