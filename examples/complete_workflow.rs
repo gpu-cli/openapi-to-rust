@@ -311,6 +311,8 @@ fn demonstrate_rust_api(
         streaming_config: None,
         nullable_field_overrides: std::collections::BTreeMap::new(),
         schema_extensions: vec![],
+        enable_registry: false,
+        registry_only: false,
     };
 
     // Generate code

@@ -285,6 +285,8 @@ pub fn run_generation_test(
         retry_config: None,
         tracing_enabled: true,
         auth_config: None,
+        enable_registry: false,
+        registry_only: false,
     };
 
     // Generate code

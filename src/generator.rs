@@ -45,6 +45,10 @@ pub struct GeneratorConfig {
     pub tracing_enabled: bool,
     /// Authentication configuration
     pub auth_config: Option<crate::http_config::AuthConfig>,
+    /// Enable operation registry generation (static metadata for CLI/proxy routing)
+    pub enable_registry: bool,
+    /// Generate only the operation registry (skip types, client, streaming)
+    pub registry_only: bool,
 }
 
 impl Default for GeneratorConfig {
@@ -64,6 +68,8 @@ impl Default for GeneratorConfig {
             retry_config: None,
             tracing_enabled: true,
             auth_config: None,
+            enable_registry: false,
+            registry_only: false,
         }
     }
 }
@@ -113,28 +119,40 @@ impl CodeGenerator {
     pub fn generate_all(&self, analysis: &mut SchemaAnalysis) -> Result<GenerationResult> {
         let mut files = Vec::new();
 
-        // Generate types file
-        let types_content = self.generate_types(analysis)?;
-        files.push(GeneratedFile {
-            path: "types.rs".into(),
-            content: types_content,
-        });
-
-        // Generate streaming client if configured
-        if let Some(ref streaming_config) = self.config.streaming_config {
-            let streaming_content = self.generate_streaming_client(streaming_config, analysis)?;
+        if !self.config.registry_only {
+            // Generate types file
+            let types_content = self.generate_types(analysis)?;
             files.push(GeneratedFile {
-                path: "streaming.rs".into(),
-                content: streaming_content,
+                path: "types.rs".into(),
+                content: types_content,
             });
+
+            // Generate streaming client if configured
+            if let Some(ref streaming_config) = self.config.streaming_config {
+                let streaming_content =
+                    self.generate_streaming_client(streaming_config, analysis)?;
+                files.push(GeneratedFile {
+                    path: "streaming.rs".into(),
+                    content: streaming_content,
+                });
+            }
+
+            // Generate HTTP client if enabled
+            if self.config.enable_async_client {
+                let http_content = self.generate_http_client(analysis)?;
+                files.push(GeneratedFile {
+                    path: "client.rs".into(),
+                    content: http_content,
+                });
+            }
         }
 
-        // Generate HTTP client if enabled
-        if self.config.enable_async_client {
-            let http_content = self.generate_http_client(analysis)?;
+        // Generate operation registry if enabled
+        if self.config.enable_registry || self.config.registry_only {
+            let registry_content = self.generate_registry(analysis)?;
             files.push(GeneratedFile {
-                path: "client.rs".into(),
-                content: http_content,
+                path: "registry.rs".into(),
+                content: registry_content,
             });
         }
 
