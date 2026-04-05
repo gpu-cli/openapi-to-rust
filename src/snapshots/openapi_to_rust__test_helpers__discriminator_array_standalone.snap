@@ -1,0 +1,62 @@
+---
+source: src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreateMessageParams {
+    pub messages: Vec<InputContentBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<CreateMessageParamsSystem>,
+}
+/// Wrapper enum that re-adds the discriminator tag
+/// for array contexts where the inner struct had its
+/// discriminator field stripped for tagged enum use.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum RequestTextBlockArrayItem {
+    #[serde(rename = "text")]
+    RequestTextBlock(RequestTextBlock),
+}
+///Array variant in union
+pub type RequestTextBlockArray = Vec<RequestTextBlockArrayItem>;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum InputContentBlock {
+    #[serde(rename = "text")]
+    RequestTextBlock(RequestTextBlock),
+    #[serde(rename = "image")]
+    RequestImageBlock(RequestImageBlock),
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestTextBlock {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<RequestTextBlockCacheControl>,
+    pub text: String,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestTextBlockCacheControl {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<serde_json::Value>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RequestImageBlock {
+    pub source: String,
+}
+pub type CreateMessageParamsSystemString = String;
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CreateMessageParamsSystem {
+    CreateMessageParamsSystemString(CreateMessageParamsSystemString),
+    RequestTextBlockArray(RequestTextBlockArray),
+}

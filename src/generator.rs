@@ -9,6 +9,8 @@ use std::path::PathBuf;
 struct DiscriminatedVariantInfo {
     /// The discriminator field name (e.g., "type")
     discriminator_field: String,
+    /// The const value of the discriminator (e.g., "text")
+    discriminator_value: String,
     /// Whether the parent union is untagged
     is_parent_untagged: bool,
 }
@@ -206,6 +208,7 @@ impl CodeGenerator {
                                     variant.type_name.clone(),
                                     DiscriminatedVariantInfo {
                                         discriminator_field: discriminator_field.clone(),
+                                        discriminator_value: variant.discriminator_value.clone(),
                                         is_parent_untagged,
                                     },
                                 );
@@ -603,8 +606,52 @@ impl CodeGenerator {
                 }
             }
             SchemaType::Array { item_type } => {
-                // Generate type alias for named array schemas
+                // Generate type alias for named array schemas.
+                //
+                // Special case: if the array item is a struct whose discriminator
+                // field was stripped (because it's used in a tagged enum), the bare
+                // struct won't serialize the discriminator in standalone contexts.
+                // Generate a single-variant tagged wrapper enum so the discriminator
+                // field is re-added by serde's tag attribute.
                 let array_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
+
+                // Check if the item type is a Reference to a discriminator-stripped struct
+                if let SchemaType::Reference { target } = item_type.as_ref() {
+                    if let Some(info) = discriminated_variant_info.get(target) {
+                        if !info.is_parent_untagged {
+                            // Generate a wrapper enum that re-adds the discriminator tag
+                            let wrapper_name = format_ident!(
+                                "{}Item",
+                                self.to_rust_type_name(&schema.name)
+                            );
+                            let variant_type =
+                                format_ident!("{}", self.to_rust_type_name(target));
+                            let disc_field = &info.discriminator_field;
+                            let disc_value = &info.discriminator_value;
+
+                            let doc_comment = if let Some(desc) = &schema.description {
+                                quote! { #[doc = #desc] }
+                            } else {
+                                TokenStream::new()
+                            };
+
+                            return Ok(quote! {
+                                /// Wrapper enum that re-adds the discriminator tag
+                                /// for array contexts where the inner struct had its
+                                /// discriminator field stripped for tagged enum use.
+                                #[derive(Debug, Clone, Deserialize, Serialize)]
+                                #[serde(tag = #disc_field)]
+                                pub enum #wrapper_name {
+                                    #[serde(rename = #disc_value)]
+                                    #variant_type(#variant_type),
+                                }
+                                #doc_comment
+                                pub type #array_name = Vec<#wrapper_name>;
+                            });
+                        }
+                    }
+                }
+
                 let inner_type = self.generate_array_item_type(item_type, analysis);
 
                 let doc_comment = if let Some(desc) = &schema.description {
@@ -856,7 +903,7 @@ impl CodeGenerator {
                 let field_type =
                     self.generate_field_type(&schema.name, field_name, prop, is_required, analysis);
 
-                let serde_attrs = self.generate_serde_field_attrs(field_name, prop, is_required);
+                let serde_attrs = self.generate_serde_field_attrs(field_name, prop, is_required, analysis);
                 let specta_attrs = self.generate_specta_field_attrs(field_name);
 
                 let doc_comment = if let Some(desc) = &prop.description {
@@ -1235,7 +1282,13 @@ impl CodeGenerator {
             .unwrap_or(false);
 
         if is_required && !prop.nullable && !is_nullable_override {
-            base_type
+            // If the field has a default value but its type doesn't implement Default,
+            // wrap in Option<T> so serde can default to None instead of requiring Default.
+            if prop.default.is_some() && self.type_lacks_default(&prop.schema_type, analysis) {
+                quote! { Option<#base_type> }
+            } else {
+                base_type
+            }
         } else {
             quote! { Option<#base_type> }
         }
@@ -1246,6 +1299,7 @@ impl CodeGenerator {
         field_name: &str,
         prop: &crate::analysis::PropertyInfo,
         is_required: bool,
+        analysis: &crate::analysis::SchemaAnalysis,
     ) -> TokenStream {
         let mut attrs = Vec::new();
 
@@ -1264,16 +1318,41 @@ impl CodeGenerator {
             attrs.push(quote! { skip_serializing_if = "Option::is_none" });
         }
 
-        // Only add default attribute for required fields that have default values
-        // Optional fields (Option<T>) already default to None, so don't need #[serde(default)]
+        // Only add default attribute for required fields that have default values.
+        // Skip #[serde(default)] for types that don't implement Default (discriminated
+        // unions, union enums) — those fields should be Option<T> instead.
         if prop.default.is_some() && (is_required && !prop.nullable) {
-            attrs.push(quote! { default });
+            if !self.type_lacks_default(&prop.schema_type, analysis) {
+                attrs.push(quote! { default });
+            }
         }
 
         if attrs.is_empty() {
             TokenStream::new()
         } else {
             quote! { #[serde(#(#attrs),*)] }
+        }
+    }
+
+    /// Check if a schema type resolves to a type that doesn't implement `Default`.
+    /// Discriminated unions and union enums don't derive Default, so fields with
+    /// these types can't use `#[serde(default)]`.
+    fn type_lacks_default(
+        &self,
+        schema_type: &crate::analysis::SchemaType,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> bool {
+        use crate::analysis::SchemaType;
+        match schema_type {
+            SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => true,
+            SchemaType::Reference { target } => {
+                if let Some(schema) = analysis.schemas.get(target) {
+                    self.type_lacks_default(&schema.schema_type, analysis)
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 
