@@ -90,8 +90,12 @@ impl CodeGenerator {
                 TextPlain,
             }
 
-            /// Definition of an operation parameter
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            /// Definition of an operation parameter.
+            ///
+            /// Only `Serialize` is derived: this struct holds `&'static`
+            /// references to data baked into the binary, which cannot be
+            /// reconstructed by `Deserialize`.
+            #[derive(Debug, Clone, serde::Serialize)]
             pub struct ParamDef {
                 pub name: &'static str,
                 pub location: ParamLocation,
@@ -100,16 +104,20 @@ impl CodeGenerator {
                 pub description: Option<&'static str>,
             }
 
-            /// Definition of a request body
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            /// Definition of a request body.
+            ///
+            /// `Serialize`-only for the same reason as [`ParamDef`].
+            #[derive(Debug, Clone, serde::Serialize)]
             pub struct BodyDef {
                 pub content_type: BodyContentType,
                 /// Name of the schema type (for JSON/form bodies)
                 pub schema_name: Option<&'static str>,
             }
 
-            /// A single operation in the registry
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            /// A single operation in the registry.
+            ///
+            /// `Serialize`-only because of the `&'static` fields.
+            #[derive(Debug, Clone, serde::Serialize)]
             pub struct OperationDef {
                 /// Unique operation identifier (e.g. "repos/get", "issues/create-comment")
                 pub id: &'static str,
