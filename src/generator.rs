@@ -620,12 +620,9 @@ impl CodeGenerator {
                     if let Some(info) = discriminated_variant_info.get(target) {
                         if !info.is_parent_untagged {
                             // Generate a wrapper enum that re-adds the discriminator tag
-                            let wrapper_name = format_ident!(
-                                "{}Item",
-                                self.to_rust_type_name(&schema.name)
-                            );
-                            let variant_type =
-                                format_ident!("{}", self.to_rust_type_name(target));
+                            let wrapper_name =
+                                format_ident!("{}Item", self.to_rust_type_name(&schema.name));
+                            let variant_type = format_ident!("{}", self.to_rust_type_name(target));
                             let disc_field = &info.discriminator_field;
                             let disc_value = &info.discriminator_value;
 
@@ -903,7 +900,8 @@ impl CodeGenerator {
                 let field_type =
                     self.generate_field_type(&schema.name, field_name, prop, is_required, analysis);
 
-                let serde_attrs = self.generate_serde_field_attrs(field_name, prop, is_required, analysis);
+                let serde_attrs =
+                    self.generate_serde_field_attrs(field_name, prop, is_required, analysis);
                 let specta_attrs = self.generate_specta_field_attrs(field_name);
 
                 let doc_comment = if let Some(desc) = &prop.description {
@@ -1321,10 +1319,11 @@ impl CodeGenerator {
         // Only add default attribute for required fields that have default values.
         // Skip #[serde(default)] for types that don't implement Default (discriminated
         // unions, union enums) — those fields should be Option<T> instead.
-        if prop.default.is_some() && (is_required && !prop.nullable) {
-            if !self.type_lacks_default(&prop.schema_type, analysis) {
-                attrs.push(quote! { default });
-            }
+        if prop.default.is_some()
+            && (is_required && !prop.nullable)
+            && !self.type_lacks_default(&prop.schema_type, analysis)
+        {
+            attrs.push(quote! { default });
         }
 
         if attrs.is_empty() {

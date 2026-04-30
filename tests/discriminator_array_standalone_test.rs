@@ -83,8 +83,8 @@ fn test_discriminator_stripped_struct_in_standalone_array() {
         }
     });
 
-    let result = test_generation("discriminator_array_standalone", spec)
-        .expect("Generation failed");
+    let result =
+        test_generation("discriminator_array_standalone", spec).expect("Generation failed");
 
     // The system field's array variant must serialize RequestTextBlock with type: "text".
     // This means the array can't use bare Vec<RequestTextBlock> since the struct had
@@ -164,8 +164,8 @@ fn test_default_field_with_discriminated_union_type() {
         }
     });
 
-    let result = test_generation("default_discriminated_union_field", spec)
-        .expect("Generation failed");
+    let result =
+        test_generation("default_discriminated_union_field", spec).expect("Generation failed");
 
     // The `caller` field should be Option<CallerType>, not bare CallerType with #[serde(default)]
     // because CallerType is a discriminated union that doesn't implement Default.

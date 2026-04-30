@@ -467,7 +467,12 @@ pub struct RequestBody {
 /// `application/problem+json`). Trailing parameters such as
 /// `; charset=utf-8` are tolerated.
 pub fn is_json_media_type(ct: &str) -> bool {
-    let essence = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+    let essence = ct
+        .split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase();
     if essence == "application/json" {
         return true;
     }
@@ -480,13 +485,16 @@ pub fn is_json_media_type(ct: &str) -> bool {
 /// Returns true for `application/x-www-form-urlencoded` (with optional
 /// parameters).
 pub fn is_form_urlencoded_media_type(ct: &str) -> bool {
-    let essence = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+    let essence = ct
+        .split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .to_ascii_lowercase();
     essence == "application/x-www-form-urlencoded"
 }
 
-fn find_json_content<'a>(
-    content: &'a BTreeMap<String, MediaType>,
-) -> Option<(&'a str, &'a MediaType)> {
+fn find_json_content(content: &BTreeMap<String, MediaType>) -> Option<(&str, &MediaType)> {
     if let Some(mt) = content.get("application/json") {
         return Some(("application/json", mt));
     }
@@ -565,7 +573,7 @@ pub struct MediaType {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -684,7 +692,9 @@ mod tests {
         assert!(is_json_media_type("application/hal+json"));
         assert!(is_json_media_type("application/problem+json"));
         assert!(is_json_media_type("application/ld+json"));
-        assert!(is_json_media_type("application/vnd.api+json; charset=utf-8"));
+        assert!(is_json_media_type(
+            "application/vnd.api+json; charset=utf-8"
+        ));
         // Negatives
         assert!(!is_json_media_type("application/xml"));
         assert!(!is_json_media_type("application/x-www-form-urlencoded"));
