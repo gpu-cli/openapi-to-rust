@@ -3473,23 +3473,28 @@ impl SchemaAnalyzer {
         if let Some(request_body) = &operation.request_body
             && let Some((content_type, maybe_schema)) = request_body.best_content()
         {
-            op_info.request_body = match content_type {
-                "application/json" => maybe_schema
+            use crate::openapi::{is_form_urlencoded_media_type, is_json_media_type};
+            op_info.request_body = if is_json_media_type(content_type) {
+                maybe_schema
                     .map(|s| {
                         self.resolve_or_inline_schema(s, operation_id, "Request")
                             .map(|name| RequestBodyContent::Json { schema_name: name })
                     })
-                    .transpose()?,
-                "application/x-www-form-urlencoded" => maybe_schema
+                    .transpose()?
+            } else if is_form_urlencoded_media_type(content_type) {
+                maybe_schema
                     .map(|s| {
                         self.resolve_or_inline_schema(s, operation_id, "Request")
                             .map(|name| RequestBodyContent::FormUrlEncoded { schema_name: name })
                     })
-                    .transpose()?,
-                "multipart/form-data" => Some(RequestBodyContent::Multipart),
-                "application/octet-stream" => Some(RequestBodyContent::OctetStream),
-                "text/plain" => Some(RequestBodyContent::TextPlain),
-                _ => None,
+                    .transpose()?
+            } else {
+                match content_type {
+                    "multipart/form-data" => Some(RequestBodyContent::Multipart),
+                    "application/octet-stream" => Some(RequestBodyContent::OctetStream),
+                    "text/plain" => Some(RequestBodyContent::TextPlain),
+                    _ => None,
+                }
             };
         }
 

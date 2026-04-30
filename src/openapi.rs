@@ -459,20 +459,65 @@ pub struct RequestBody {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// Returns true for media types whose payload is JSON.
+///
+/// Matches `application/json` exactly, plus any RFC 6839 structured-syntax
+/// suffix variant of the form `application/<subtype>+json`
+/// (e.g. `application/vnd.api+json`, `application/hal+json`,
+/// `application/problem+json`). Trailing parameters such as
+/// `; charset=utf-8` are tolerated.
+pub fn is_json_media_type(ct: &str) -> bool {
+    let essence = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+    if essence == "application/json" {
+        return true;
+    }
+    if let Some(subtype) = essence.strip_prefix("application/") {
+        return subtype.ends_with("+json");
+    }
+    false
+}
+
+/// Returns true for `application/x-www-form-urlencoded` (with optional
+/// parameters).
+pub fn is_form_urlencoded_media_type(ct: &str) -> bool {
+    let essence = ct.split(';').next().unwrap_or(ct).trim().to_ascii_lowercase();
+    essence == "application/x-www-form-urlencoded"
+}
+
+fn find_json_content<'a>(
+    content: &'a BTreeMap<String, MediaType>,
+) -> Option<(&'a str, &'a MediaType)> {
+    if let Some(mt) = content.get("application/json") {
+        return Some(("application/json", mt));
+    }
+    content
+        .iter()
+        .find(|(ct, _)| is_json_media_type(ct))
+        .map(|(ct, mt)| (ct.as_str(), mt))
+}
+
 impl RequestBody {
-    /// Get schema for application/json content type
+    /// Get schema for any JSON content type
+    ///
+    /// Prefers the canonical `application/json` entry, then falls back to
+    /// any `application/*+json` variant (RFC 6839) such as
+    /// `application/vnd.api+json` or `application/hal+json`.
     pub fn json_schema(&self) -> Option<&Schema> {
         self.content
             .as_ref()
-            .and_then(|content| content.get("application/json"))
-            .and_then(|media_type| media_type.schema.as_ref())
+            .and_then(find_json_content)
+            .and_then(|(_, media_type)| media_type.schema.as_ref())
     }
 
     /// Get the best content type and its schema, preferring JSON over others
     pub fn best_content(&self) -> Option<(&str, Option<&Schema>)> {
         let content = self.content.as_ref()?;
+
+        if let Some((ct, media_type)) = find_json_content(content) {
+            return Some((ct, media_type.schema.as_ref()));
+        }
+
         const PRIORITY: &[&str] = &[
-            "application/json",
             "application/x-www-form-urlencoded",
             "multipart/form-data",
             "application/octet-stream",
@@ -497,12 +542,17 @@ pub struct Response {
 }
 
 impl Response {
-    /// Get schema for application/json content type
+    /// Get schema for any JSON content type
+    ///
+    /// Prefers the canonical `application/json` entry, then falls back to
+    /// any `application/*+json` variant (RFC 6839) such as
+    /// `application/vnd.api+json`, `application/hal+json`, or
+    /// `application/problem+json`.
     pub fn json_schema(&self) -> Option<&Schema> {
         self.content
             .as_ref()
-            .and_then(|content| content.get("application/json"))
-            .and_then(|media_type| media_type.schema.as_ref())
+            .and_then(find_json_content)
+            .and_then(|(_, media_type)| media_type.schema.as_ref())
     }
 }
 
@@ -620,5 +670,103 @@ mod tests {
         assert!(schema.is_nullable_pattern());
         let non_null = schema.non_null_variant().unwrap();
         assert!(non_null.is_reference());
+    }
+
+    #[test]
+    fn is_json_media_type_accepts_canonical_and_structured_suffix() {
+        // Canonical
+        assert!(is_json_media_type("application/json"));
+        // Parameters tolerated (RFC 7231 §3.1.1.1)
+        assert!(is_json_media_type("application/json; charset=utf-8"));
+        assert!(is_json_media_type("APPLICATION/JSON"));
+        // RFC 6839 +json structured-syntax suffix
+        assert!(is_json_media_type("application/vnd.api+json"));
+        assert!(is_json_media_type("application/hal+json"));
+        assert!(is_json_media_type("application/problem+json"));
+        assert!(is_json_media_type("application/ld+json"));
+        assert!(is_json_media_type("application/vnd.api+json; charset=utf-8"));
+        // Negatives
+        assert!(!is_json_media_type("application/xml"));
+        assert!(!is_json_media_type("application/x-www-form-urlencoded"));
+        assert!(!is_json_media_type("text/plain"));
+        assert!(!is_json_media_type("application/jsonbutnotreally"));
+        // +json suffix only applies to application/* per RFC 6839
+        assert!(!is_json_media_type("text/something+json"));
+    }
+
+    #[test]
+    fn request_body_json_schema_finds_vnd_api_plus_json() {
+        // Mirrors Latitude.sh: request body declared under
+        // application/vnd.api+json without a sibling application/json.
+        let body_json = json!({
+            "required": true,
+            "content": {
+                "application/vnd.api+json": {
+                    "schema": {"$ref": "#/components/schemas/create_api_key"}
+                }
+            }
+        });
+
+        let body: RequestBody = serde_json::from_value(body_json).unwrap();
+        let schema = body.json_schema().expect("expected +json schema match");
+        assert!(schema.is_reference());
+    }
+
+    #[test]
+    fn request_body_best_content_prefers_canonical_json_over_plus_json() {
+        // When both are present (e.g. Latitude.sh's POST /auth/api_keys),
+        // best_content should still pick application/json for backwards
+        // compatibility with the existing snapshot suite.
+        let body_json = json!({
+            "required": true,
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/A"}
+                },
+                "application/vnd.api+json": {
+                    "schema": {"$ref": "#/components/schemas/B"}
+                }
+            }
+        });
+
+        let body: RequestBody = serde_json::from_value(body_json).unwrap();
+        let (ct, _) = body.best_content().expect("expected best_content");
+        assert_eq!(ct, "application/json");
+    }
+
+    #[test]
+    fn request_body_best_content_falls_back_to_plus_json() {
+        // When only the +json variant is declared, best_content returns
+        // it instead of skipping straight to form-urlencoded.
+        let body_json = json!({
+            "required": true,
+            "content": {
+                "application/vnd.api+json": {
+                    "schema": {"$ref": "#/components/schemas/B"}
+                }
+            }
+        });
+
+        let body: RequestBody = serde_json::from_value(body_json).unwrap();
+        let (ct, _) = body.best_content().expect("expected best_content");
+        assert_eq!(ct, "application/vnd.api+json");
+    }
+
+    #[test]
+    fn response_json_schema_finds_vnd_api_plus_json() {
+        // Mirrors every Latitude.sh response: schema lives under
+        // application/vnd.api+json only.
+        let resp_json = json!({
+            "description": "OK",
+            "content": {
+                "application/vnd.api+json": {
+                    "schema": {"$ref": "#/components/schemas/api_keys"}
+                }
+            }
+        });
+
+        let resp: Response = serde_json::from_value(resp_json).unwrap();
+        let schema = resp.json_schema().expect("expected +json schema match");
+        assert!(schema.is_reference());
     }
 }
