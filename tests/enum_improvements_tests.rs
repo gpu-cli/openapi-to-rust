@@ -416,3 +416,205 @@ fn test_extensible_enum_serialization() {
         "Should contain Other/Custom variant for extensible enum"
     );
 }
+
+#[test]
+fn test_inline_enum_collision_at_different_nesting_levels() {
+    // Real-world case from Latitude.sh's `plan_data` schema:
+    //
+    //   plan_data.type                                              -> ["plans"]
+    //   plan_data.attributes.specs.drives[].type                    -> ["SSD","HDD","NVME"]
+    //
+    // Both want the synthetic name `PlanDataType`. Before the fix,
+    // the second registration overwrote the first in `resolved_cache`,
+    // so the top-level `type` field's reference still pointed at
+    // `PlanDataType` but that enum was now `{SSD, HDD, NVME}` — drives
+    // deserialization was fine but every plan response failed to
+    // deserialize the top-level `type: "plans"` (and vice versa,
+    // depending on processing order).
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Test API", "version": "1.0.0"},
+        "components": {
+            "schemas": {
+                "PlanData": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["plans"]
+                        },
+                        "attributes": {
+                            "type": "object",
+                            "properties": {
+                                "specs": {
+                                    "type": "object",
+                                    "properties": {
+                                        "drives": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "type": {
+                                                        "type": "string",
+                                                        "enum": ["SSD", "HDD", "NVME"]
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let result = test_generation("inline_enum_collision_nesting", spec).expect("Generation failed");
+
+    // The exact assignment of "primary" vs "disambiguated" depends on
+    // schema-walk order. What we MUST verify is:
+    //   1. Two distinct enums got emitted (one for each value-set), and
+    //   2. The struct field types route to the correct enums.
+    //
+    // Both enums must exist somewhere:
+    let plans_enum_name = if result.contains("pub enum PlanDataType")
+        && extract_enum_variants(&result, "PlanDataType")
+            .iter()
+            .any(|v| v == "Plans")
+    {
+        "PlanDataType".to_string()
+    } else {
+        let disambiguated = ["PlanDataTypePlans"];
+        disambiguated
+            .iter()
+            .find(|name| result.contains(&format!("pub enum {name}")))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| panic!("could not find resource-type enum in: {result}"))
+    };
+    let drives_enum_name = if result.contains("pub enum PlanDataType")
+        && extract_enum_variants(&result, "PlanDataType")
+            .iter()
+            .any(|v| v == "Nvme")
+    {
+        "PlanDataType".to_string()
+    } else {
+        let disambiguated = ["PlanDataTypeSsd", "PlanDataTypeHdd", "PlanDataTypeNvme"];
+        disambiguated
+            .iter()
+            .find(|name| result.contains(&format!("pub enum {name}")))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| panic!("could not find drives-media-type enum in: {result}"))
+    };
+
+    assert_ne!(
+        plans_enum_name, drives_enum_name,
+        "two distinct inline `type` enums must NOT collapse to the same name: {result}"
+    );
+
+    // Resource-type field on `PlanData` references the plans enum.
+    let plan_data_struct = extract_struct_block(&result, "PlanData")
+        .expect("PlanData struct must be present");
+    assert!(
+        plan_data_struct.contains(&format!("Option<{plans_enum_name}>")),
+        "PlanData.type must reference {plans_enum_name}, got: {plan_data_struct}"
+    );
+
+    // Drive-item field references the drives enum.
+    let drives_struct = extract_struct_block(&result, "PlanDataDrivesItem")
+        .expect("PlanDataDrivesItem struct must be present");
+    assert!(
+        drives_struct.contains(&format!("Option<{drives_enum_name}>")),
+        "PlanDataDrivesItem.type must reference {drives_enum_name}, got: {drives_struct}"
+    );
+
+    // Drive-media-type variants
+    assert!(result.contains("Ssd"), "missing Ssd variant: {result}");
+    assert!(result.contains("Hdd"), "missing Hdd variant: {result}");
+    assert!(result.contains("Nvme"), "missing Nvme variant: {result}");
+}
+
+fn extract_struct_block(source: &str, name: &str) -> Option<String> {
+    let header = format!("pub struct {name} {{");
+    let start = source.find(&header)?;
+    let rest = &source[start..];
+    let end = rest.find("\n}\n")?;
+    Some(rest[..end].to_string())
+}
+
+fn extract_enum_variants(source: &str, name: &str) -> Vec<String> {
+    let header = format!("pub enum {name} {{");
+    let Some(start) = source.find(&header) else {
+        return Vec::new();
+    };
+    let rest = &source[start + header.len()..];
+    let Some(end) = rest.find('}') else {
+        return Vec::new();
+    };
+    rest[..end]
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            // Skip attributes / blank lines / comments
+            if trimmed.is_empty()
+                || trimmed.starts_with('#')
+                || trimmed.starts_with("//")
+            {
+                return None;
+            }
+            // Variant lines look like "Plans," or "Plans"
+            trimmed.trim_end_matches(',').split('(').next().map(|v| v.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn test_inline_enum_dedup_when_values_identical() {
+    // Sibling fields that both happen to have the same enum should
+    // continue to share a single named type — the disambiguation is
+    // strictly for *value* mismatches, not name collisions per se.
+    //
+    // Two different parent schemas declare a `status` field with the
+    // exact same set of values. We expect ONE enum, referenced from
+    // both structs.
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Test API", "version": "1.0.0"},
+        "components": {
+            "schemas": {
+                "Job": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["queued", "running", "done"]
+                        }
+                    }
+                },
+                "Task": {
+                    "type": "object",
+                    "properties": {
+                        "status": {
+                            "type": "string",
+                            "enum": ["queued", "running", "done"]
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let result = test_generation("inline_enum_dedup_identical_values", spec).expect("Generation failed");
+
+    // JobStatus is the canonical name (alphabetical first). TaskStatus
+    // either re-uses JobStatus or has its own definition — but if it has
+    // its own definition, the values must match. The important check is
+    // that whichever shape we end up with, NO disambiguated suffix
+    // appears (which would only show up on a value mismatch).
+    assert!(
+        !result.contains("StatusQueued") && !result.contains("StatusRunning"),
+        "values match — should not disambiguate: {result}"
+    );
+}

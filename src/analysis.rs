@@ -1360,8 +1360,8 @@ impl SchemaAnalyzer {
                             .clone()
                             .unwrap_or_else(|| "Unknown".to_string());
 
-                        // Generate a unique name based on both the schema and property context
-                        let enum_type_name = if let Some(prop_name) = property_name {
+                        // Generate a candidate name based on both the schema and property context.
+                        let primary_name = if let Some(prop_name) = property_name {
                             // We have property name context - use it for a unique name
                             let prop_pascal = self.to_pascal_case(prop_name);
                             format!("{context_name}{prop_pascal}")
@@ -1377,25 +1377,87 @@ impl SchemaAnalyzer {
                             format!("{context_name}{suffix}")
                         };
 
-                        // Check if this exact enum type was already created (for deduplication)
-                        // Only reuse if the enum values are exactly the same
-                        let should_create_new = !self
-                            .resolved_cache
-                            .get(&enum_type_name)
-                            .map(|existing| {
-                                if let SchemaType::StringEnum {
-                                    values: existing_values,
-                                } = &existing.schema_type
-                                {
-                                    existing_values == &enum_values
-                                } else {
-                                    false
-                                }
-                            })
-                            .unwrap_or(false);
+                        // Resolve a name that either matches an existing same-valued
+                        // enum (dedup) or doesn't collide with a different one.
+                        //
+                        // Two distinct inline enums can land on the same primary
+                        // candidate when a parent schema has a property like
+                        // `type` that recurs at multiple nesting levels — e.g.
+                        // Latitude.sh's `plan_data.type = ["plans"]` (the
+                        // JSON-API resource type) and
+                        // `plan_data.attributes.specs.drives[].type =
+                        // ["SSD","HDD","NVME"]` both want to become
+                        // `PlanDataType`. We must NOT silently overwrite the
+                        // first registration: that breaks deserialization
+                        // because both fields end up referencing whichever
+                        // enum was processed last.
+                        //
+                        // Disambiguation strategy: append the PascalCase first
+                        // enum value (`PlanDataTypeNVME` vs `PlanDataTypePlans`)
+                        // and, if that's also claimed with different values,
+                        // fall back to a numeric `_2`, `_3`, … suffix.
+                        fn matches_values(
+                            existing: &AnalyzedSchema,
+                            values: &[String],
+                        ) -> bool {
+                            matches!(
+                                &existing.schema_type,
+                                SchemaType::StringEnum { values: existing_values }
+                                    if existing_values == values
+                            )
+                        }
 
-                        if should_create_new {
-                            // Store the enum as a named schema
+                        let mut enum_type_name = primary_name.clone();
+                        let mut should_insert = match self.resolved_cache.get(&enum_type_name) {
+                            None => true,
+                            Some(existing) if matches_values(existing, &enum_values) => false,
+                            Some(_) => {
+                                // Collision with different values — try a
+                                // value-suffixed name first.
+                                let suffix = enum_values
+                                    .first()
+                                    .map(|v| self.to_pascal_case(v))
+                                    .unwrap_or_else(|| "Variant".to_string());
+                                let candidate = format!("{primary_name}{suffix}");
+
+                                let resolved = match self.resolved_cache.get(&candidate) {
+                                    None => Some((candidate.clone(), true)),
+                                    Some(existing) if matches_values(existing, &enum_values) => {
+                                        Some((candidate.clone(), false))
+                                    }
+                                    Some(_) => {
+                                        // Walk a numeric suffix until we find
+                                        // a slot that's free or matches.
+                                        let mut found = None;
+                                        for n in 2..1000 {
+                                            let numbered = format!("{candidate}_{n}");
+                                            match self.resolved_cache.get(&numbered) {
+                                                None => {
+                                                    found = Some((numbered, true));
+                                                    break;
+                                                }
+                                                Some(existing)
+                                                    if matches_values(existing, &enum_values) =>
+                                                {
+                                                    found = Some((numbered, false));
+                                                    break;
+                                                }
+                                                Some(_) => continue,
+                                            }
+                                        }
+                                        found
+                                    }
+                                };
+
+                                let (resolved_name, insert) = resolved.unwrap_or((candidate, true));
+                                enum_type_name = resolved_name;
+                                insert
+                            }
+                        };
+
+                        // Store the enum as a named schema if this is the
+                        // first time we've seen this exact (name, values) pair.
+                        if should_insert {
                             self.resolved_cache.insert(
                                 enum_type_name.clone(),
                                 AnalyzedSchema {
@@ -1410,6 +1472,9 @@ impl SchemaAnalyzer {
                                     default: schema.details().default.clone(),
                                 },
                             );
+                            // Silence unused-write warnings when the value
+                            // is not consulted again on this path.
+                            let _ = &mut should_insert;
                         }
 
                         // Return a reference to the named enum type
