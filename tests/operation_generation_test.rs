@@ -670,3 +670,60 @@ fn test_generate_text_plain_operation() {
     // Verify content-type header
     assert!(result_str.contains("text/plain"));
 }
+
+#[test]
+fn test_request_body_schema_name_pascal_cased() {
+    // Specs like Latitude.sh declare components/schemas with snake_case
+    // names (e.g. `update_api_key`). The struct definitions go through
+    // `to_rust_type_name` and become `UpdateApiKey`, but the request-body
+    // parameter type used to be wired in raw, producing
+    // `request: update_api_key` and a borked compile.
+    let config = create_test_config();
+    let generator = CodeGenerator::new(config);
+
+    let json_op = OperationInfo {
+        operation_id: "patchApiKey".to_string(),
+        method: "PATCH".to_string(),
+        path: "/auth/api_keys/{id}".to_string(),
+        summary: None,
+        description: None,
+        request_body: Some(RequestBodyContent::Json {
+            schema_name: "update_api_key".to_string(),
+        }),
+        response_schemas: BTreeMap::new(),
+        parameters: vec![],
+        supports_streaming: false,
+        stream_parameter: None,
+    };
+
+    let form_op = OperationInfo {
+        operation_id: "createToken".to_string(),
+        method: "POST".to_string(),
+        path: "/oauth/token".to_string(),
+        summary: None,
+        description: None,
+        request_body: Some(RequestBodyContent::FormUrlEncoded {
+            schema_name: "create_oauth_token".to_string(),
+        }),
+        response_schemas: BTreeMap::new(),
+        parameters: vec![],
+        supports_streaming: false,
+        stream_parameter: None,
+    };
+
+    let analysis = create_test_analysis_with_operations(vec![json_op, form_op]);
+    let result_str = generator.generate_operation_methods(&analysis).to_string();
+
+    assert!(
+        result_str.contains("request : UpdateApiKey"),
+        "expected PascalCase JSON request body type, got: {result_str}"
+    );
+    assert!(
+        !result_str.contains("request : update_api_key"),
+        "raw snake_case schema name leaked into JSON method signature: {result_str}"
+    );
+    assert!(
+        result_str.contains("request : CreateOauthToken"),
+        "expected PascalCase form-urlencoded request body type, got: {result_str}"
+    );
+}

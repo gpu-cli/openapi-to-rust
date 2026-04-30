@@ -568,8 +568,9 @@ impl CodeGenerator {
             match rb {
                 RequestBodyContent::Json { schema_name }
                 | RequestBodyContent::FormUrlEncoded { schema_name } => {
+                    let rust_type_name = self.to_rust_type_name(schema_name);
                     let request_ident =
-                        syn::Ident::new(schema_name, proc_macro2::Span::call_site());
+                        syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
                     params.push(quote! { request: #request_ident });
                 }
                 RequestBodyContent::Multipart => {
