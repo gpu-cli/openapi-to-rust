@@ -1396,10 +1396,7 @@ impl SchemaAnalyzer {
                         // enum value (`PlanDataTypeNVME` vs `PlanDataTypePlans`)
                         // and, if that's also claimed with different values,
                         // fall back to a numeric `_2`, `_3`, … suffix.
-                        fn matches_values(
-                            existing: &AnalyzedSchema,
-                            values: &[String],
-                        ) -> bool {
+                        fn matches_values(existing: &AnalyzedSchema, values: &[String]) -> bool {
                             matches!(
                                 &existing.schema_type,
                                 SchemaType::StringEnum { values: existing_values }

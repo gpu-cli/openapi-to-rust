@@ -1890,10 +1890,10 @@ impl CodeGenerator {
                         }
                     }
                 }
-                crate::analysis::SchemaType::Reference { target } => {
-                    if !defined_types.contains(target) {
-                        missing.insert(target.clone());
-                    }
+                crate::analysis::SchemaType::Reference { target }
+                    if !defined_types.contains(target) =>
+                {
+                    missing.insert(target.clone());
                 }
                 _ => {}
             }

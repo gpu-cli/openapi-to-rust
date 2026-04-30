@@ -515,8 +515,8 @@ fn test_inline_enum_collision_at_different_nesting_levels() {
     );
 
     // Resource-type field on `PlanData` references the plans enum.
-    let plan_data_struct = extract_struct_block(&result, "PlanData")
-        .expect("PlanData struct must be present");
+    let plan_data_struct =
+        extract_struct_block(&result, "PlanData").expect("PlanData struct must be present");
     assert!(
         plan_data_struct.contains(&format!("Option<{plans_enum_name}>")),
         "PlanData.type must reference {plans_enum_name}, got: {plan_data_struct}"
@@ -558,14 +558,15 @@ fn extract_enum_variants(source: &str, name: &str) -> Vec<String> {
         .filter_map(|line| {
             let trimmed = line.trim();
             // Skip attributes / blank lines / comments
-            if trimmed.is_empty()
-                || trimmed.starts_with('#')
-                || trimmed.starts_with("//")
-            {
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
                 return None;
             }
             // Variant lines look like "Plans," or "Plans"
-            trimmed.trim_end_matches(',').split('(').next().map(|v| v.to_string())
+            trimmed
+                .trim_end_matches(',')
+                .split('(')
+                .next()
+                .map(|v| v.to_string())
         })
         .collect()
 }
@@ -606,7 +607,8 @@ fn test_inline_enum_dedup_when_values_identical() {
         }
     });
 
-    let result = test_generation("inline_enum_dedup_identical_values", spec).expect("Generation failed");
+    let result =
+        test_generation("inline_enum_dedup_identical_values", spec).expect("Generation failed");
 
     // JobStatus is the canonical name (alphabetical first). TaskStatus
     // either re-uses JobStatus or has its own definition — but if it has
