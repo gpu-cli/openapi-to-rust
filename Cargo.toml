@@ -1,9 +1,9 @@
 [package]
 name = "openapi-to-rust"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 rust-version = "1.85.0"
-authors = ["James Lalonde"]
+authors = ["James Lal"]
 license = "MIT"
 description = "Generate strongly-typed Rust structs, HTTP clients, and SSE streaming clients from OpenAPI 3.1 specifications"
 repository = "https://github.com/gpu-cli/openapi-to-rust"
