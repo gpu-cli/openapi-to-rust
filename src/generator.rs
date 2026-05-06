@@ -1140,28 +1140,34 @@ impl CodeGenerator {
                 // Handle nested Vec types (e.g., Vec<Vec<i64>>)
                 if inner.starts_with("Vec<") && inner.ends_with(">") {
                     let inner_inner = &inner[4..inner.len() - 1];
-                    let inner_inner_type = if matches!(
-                        inner_inner,
-                        "bool"
-                            | "i8"
-                            | "i16"
-                            | "i32"
-                            | "i64"
-                            | "i128"
-                            | "u8"
-                            | "u16"
-                            | "u32"
-                            | "u64"
-                            | "u128"
-                            | "f32"
-                            | "f64"
-                            | "String"
-                    ) {
-                        format_ident!("{}", inner_inner)
+                    if inner_inner == "serde_json::Value" {
+                        quote! { Vec<Vec<serde_json::Value>> }
                     } else {
-                        format_ident!("{}", self.to_rust_type_name(inner_inner))
-                    };
-                    quote! { Vec<Vec<#inner_inner_type>> }
+                        let inner_inner_type = if matches!(
+                            inner_inner,
+                            "bool"
+                                | "i8"
+                                | "i16"
+                                | "i32"
+                                | "i64"
+                                | "i128"
+                                | "u8"
+                                | "u16"
+                                | "u32"
+                                | "u64"
+                                | "u128"
+                                | "f32"
+                                | "f64"
+                                | "String"
+                        ) {
+                            format_ident!("{}", inner_inner)
+                        } else {
+                            format_ident!("{}", self.to_rust_type_name(inner_inner))
+                        };
+                        quote! { Vec<Vec<#inner_inner_type>> }
+                    }
+                } else if inner == "serde_json::Value" {
+                    quote! { Vec<serde_json::Value> }
                 } else {
                     let inner_type = if matches!(
                         inner,

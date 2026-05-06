@@ -362,6 +362,77 @@ mod tests {
     }
 
     // Regression for https://github.com/gpu-cli/openapi-to-rust/issues/7:
+    // anyOf with {"type": "null"} among 3+ variants used to panic with
+    // `"()" is not a valid Ident` because the null branch produced a
+    // `Primitive { rust_type: "()" }` type alias.
+    #[test]
+    fn test_anyof_null_among_multiple_variants_does_not_panic() {
+        let spec_json = minimal_spec(json!({
+            "AnyOfNullMixed": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "number"},
+                            {"type": "null"}
+                        ]
+                    }
+                }
+            }
+        }));
+
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json).unwrap();
+        let mut analysis = analyzer.analyze().unwrap();
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
+        let types_content = generator.generate(&mut analysis).unwrap();
+
+        assert!(
+            !types_content.contains("= ()"),
+            "null variant must not produce a `()` type alias, got:\n{types_content}"
+        );
+        assert!(
+            !types_content.contains("SerdeJsonValue"),
+            "null variant must not become SerdeJsonValue, got:\n{types_content}"
+        );
+    }
+
+    // Regression for https://github.com/gpu-cli/openapi-to-rust/issues/7:
+    // oneOf with an array variant used to emit `Vec<SerdeJsonValue>` because
+    // the generator mangled the inner `serde_json::Value` path into an ident.
+    #[test]
+    fn test_oneof_array_with_empty_items_emits_real_type() {
+        let spec_json = minimal_spec(json!({
+            "OneOfArrayOption": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "oneOf": [
+                            {"type": "array", "items": {}},
+                            {"type": "string"},
+                            {"type": "number"}
+                        ]
+                    }
+                }
+            }
+        }));
+
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json).unwrap();
+        let mut analysis = analyzer.analyze().unwrap();
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
+        let types_content = generator.generate(&mut analysis).unwrap();
+
+        assert!(
+            !types_content.contains("SerdeJsonValue"),
+            "Vec inner type leaked as SerdeJsonValue, got:\n{types_content}"
+        );
+        assert!(
+            types_content.contains("Vec<serde_json::Value>"),
+            "expected Vec<serde_json::Value> for array with `items: {{}}`, got:\n{types_content}"
+        );
+    }
+
+    // Regression for https://github.com/gpu-cli/openapi-to-rust/issues/7:
     // {"type": "null"} inside oneOf with 3+ variants must be filtered out, not
     // emitted as a phantom `SerdeJsonValue(SerdeJsonValue)` variant.
     #[test]

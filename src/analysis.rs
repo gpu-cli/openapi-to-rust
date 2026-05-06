@@ -3109,27 +3109,34 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
         context_name: &str,
     ) -> Result<SchemaType> {
-        // Analyze the semantics of this anyOf
-
-        // Pattern 1: Nullable type [Type, null]
-        if any_of_schemas.len() == 2 {
-            let null_count = any_of_schemas
+        // Drop {"type": "null"} variants. Nullability is surfaced as Option<T>
+        // at the property level via is_nullable_pattern(); leaving the null
+        // variant in here would produce a phantom `()` or `serde_json::Value`
+        // type alias that the generator can't render.
+        let filtered_owned: Vec<Schema>;
+        let any_of_schemas: &[Schema] = if any_of_schemas
+            .iter()
+            .any(|s| matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+        {
+            filtered_owned = any_of_schemas
                 .iter()
-                .filter(|s| matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
-                .count();
-            if null_count == 1 {
-                // This is a nullable pattern - find the non-null type
-                for schema in any_of_schemas {
-                    if !matches!(schema.schema_type(), Some(OpenApiSchemaType::Null)) {
-                        // For nullable pattern, return the non-null type directly
-                        // The nullable information is handled at the property level
-                        return self
-                            .analyze_schema_value(schema, context_name)
-                            .map(|a| a.schema_type);
-                    }
-                }
+                .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+                .cloned()
+                .collect();
+            if filtered_owned.is_empty() {
+                return Ok(SchemaType::Primitive {
+                    rust_type: "serde_json::Value".to_string(),
+                });
             }
-        }
+            if filtered_owned.len() == 1 {
+                return self
+                    .analyze_schema_value(&filtered_owned[0], context_name)
+                    .map(|a| a.schema_type);
+            }
+            &filtered_owned
+        } else {
+            any_of_schemas
+        };
 
         // Pattern 2: Multiple complex types or mixed primitive/complex = flexible union
         let has_refs = any_of_schemas.iter().any(|s| s.is_reference());
