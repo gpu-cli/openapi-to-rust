@@ -345,11 +345,58 @@ mod tests {
         let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
-        // Could be handled as Option<String> or as a union with null variant
+        // The non-null variant should reduce to String — directly as Option<String>,
+        // through a type alias (`pub type X = String;`), or as an untagged enum that
+        // contains a String variant. The {"type": "null"} branch must not produce a
+        // `serde_json::Value` / `SerdeJsonValue` variant.
         assert!(
             types_content.contains("Option<String>")
+                || types_content.contains("= String;")
                 || types_content.contains("#[serde(untagged)]"),
-            "Should handle nullable oneOf appropriately"
+            "Should handle nullable oneOf appropriately, got:\n{types_content}"
+        );
+        assert!(
+            !types_content.contains("SerdeJsonValue"),
+            "null variant must not become a SerdeJsonValue variant, got:\n{types_content}"
+        );
+    }
+
+    // Regression for https://github.com/gpu-cli/openapi-to-rust/issues/7:
+    // {"type": "null"} inside oneOf with 3+ variants must be filtered out, not
+    // emitted as a phantom `SerdeJsonValue(SerdeJsonValue)` variant.
+    #[test]
+    fn test_oneof_null_among_multiple_variants_is_filtered() {
+        let spec_json = minimal_spec(json!({
+            "NullOneOfMixed": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "oneOf": [
+                            {"type": "null"},
+                            {"type": "string"},
+                            {"type": "integer"}
+                        ]
+                    }
+                }
+            }
+        }));
+
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json).unwrap();
+        let mut analysis = analyzer.analyze().unwrap();
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
+        let types_content = generator.generate(&mut analysis).unwrap();
+
+        assert!(
+            !types_content.contains("SerdeJsonValue"),
+            "null variant leaked through as SerdeJsonValue, got:\n{types_content}"
+        );
+        assert!(
+            types_content.contains("String(String)"),
+            "expected String variant in untagged enum, got:\n{types_content}"
+        );
+        assert!(
+            types_content.contains("Integer(i64)"),
+            "expected Integer variant in untagged enum, got:\n{types_content}"
         );
     }
 

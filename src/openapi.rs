@@ -288,29 +288,32 @@ impl Schema {
         }
     }
 
-    /// Check if this appears to be a nullable pattern (anyOf with null)
+    /// Check if this appears to be a nullable pattern (anyOf or oneOf with null)
     pub fn is_nullable_pattern(&self) -> bool {
-        match self {
-            Schema::AnyOf { any_of, .. } => {
-                any_of.len() == 2
-                    && any_of
-                        .iter()
-                        .any(|s| matches!(s.schema_type(), Some(SchemaType::Null)))
-            }
-            _ => false,
-        }
+        let variants = match self {
+            Schema::AnyOf { any_of, .. } => any_of,
+            Schema::OneOf { one_of, .. } => one_of,
+            _ => return false,
+        };
+        variants.len() == 2
+            && variants
+                .iter()
+                .any(|s| matches!(s.schema_type(), Some(SchemaType::Null)))
     }
 
     /// Get the non-null variant from a nullable pattern
     pub fn non_null_variant(&self) -> Option<&Schema> {
-        if self.is_nullable_pattern() {
-            if let Schema::AnyOf { any_of, .. } = self {
-                return any_of
-                    .iter()
-                    .find(|s| !matches!(s.schema_type(), Some(SchemaType::Null)));
-            }
+        if !self.is_nullable_pattern() {
+            return None;
         }
-        None
+        let variants = match self {
+            Schema::AnyOf { any_of, .. } => any_of,
+            Schema::OneOf { one_of, .. } => one_of,
+            _ => return None,
+        };
+        variants
+            .iter()
+            .find(|s| !matches!(s.schema_type(), Some(SchemaType::Null)))
     }
 
     /// Infer schema type from structure if not explicitly set

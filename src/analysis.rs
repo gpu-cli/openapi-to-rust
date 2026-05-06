@@ -1127,7 +1127,12 @@ impl SchemaAnalyzer {
                 ..
             } => {
                 // Handle oneOf discriminated unions
-                self.analyze_oneof_union(one_of, discriminator.as_ref(), None, &mut dependencies)?
+                self.analyze_oneof_union(
+                    one_of,
+                    discriminator.as_ref(),
+                    schema_name,
+                    &mut dependencies,
+                )?
             }
             Schema::AllOf { all_of, .. } => {
                 // Handle allOf composition (schema inheritance)
@@ -1258,7 +1263,7 @@ impl SchemaAnalyzer {
                     let union_schema_type = self.analyze_oneof_union(
                         one_of,
                         discriminator.as_ref(),
-                        Some(&union_type_name),
+                        &union_type_name,
                         dependencies,
                     )?;
 
@@ -1627,7 +1632,7 @@ impl SchemaAnalyzer {
                         let oneof_result = self.analyze_oneof_union(
                             one_of,
                             discriminator.as_ref(),
-                            Some(&union_name),
+                            &union_name,
                             dependencies,
                         )?;
 
@@ -1927,9 +1932,28 @@ impl SchemaAnalyzer {
         &mut self,
         one_of_schemas: &[Schema],
         discriminator: Option<&crate::openapi::Discriminator>,
-        parent_name: Option<&str>,
+        parent_name: &str,
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // Pattern: nullable [Type, null] — return the non-null type directly.
+        // The nullable bit is recorded at the property level via is_nullable_pattern().
+        if one_of_schemas.len() == 2 {
+            let null_count = one_of_schemas
+                .iter()
+                .filter(|s| matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+                .count();
+            if null_count == 1 {
+                if let Some(non_null) = one_of_schemas
+                    .iter()
+                    .find(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+                {
+                    return self
+                        .analyze_schema_value(non_null, parent_name)
+                        .map(|a| a.schema_type);
+                }
+            }
+        }
+
         // If there's no discriminator, we should create an untagged union
         if discriminator.is_none() {
             // Handle untagged unions (oneOf without discriminator)
@@ -2136,9 +2160,8 @@ impl SchemaAnalyzer {
                     });
                 } else {
                     // Handle inline schemas by creating type aliases or using primitive types directly
-                    let context = parent_name.unwrap_or("Union");
                     let inline_name = self.generate_context_aware_name(
-                        context,
+                        parent_name,
                         "InlineVariant",
                         variant_index,
                         Some(variant_schema),
@@ -2178,9 +2201,8 @@ impl SchemaAnalyzer {
                                 }
                                 _ => {
                                     // For other array types, create an inline type
-                                    let context = parent_name.unwrap_or("Inline");
                                     let inline_type_name = self.generate_context_aware_name(
-                                        context,
+                                        parent_name,
                                         "Variant",
                                         variant_index,
                                         None,
@@ -2206,11 +2228,8 @@ impl SchemaAnalyzer {
                         }
                         // For other complex types, create an inline type
                         _ => {
-                            let inline_type_name = format!(
-                                "{}Variant{}",
-                                parent_name.unwrap_or("Inline"),
-                                variant_index + 1
-                            );
+                            let inline_type_name =
+                                format!("{}Variant{}", parent_name, variant_index + 1);
                             self.add_inline_schema(
                                 &inline_type_name,
                                 variant_schema,
@@ -2246,12 +2265,27 @@ impl SchemaAnalyzer {
     fn analyze_untagged_oneof_union(
         &mut self,
         one_of_schemas: &[Schema],
-        parent_name: Option<&str>,
+        parent_name: &str,
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // Drop {"type": "null"} variants. They mean "may be null" and are surfaced
+        // as Option<T> at the property level — including them here produces a junk
+        // `SerdeJsonValue(serde_json::Value)` variant.
+        let filtered: Vec<&Schema> = one_of_schemas
+            .iter()
+            .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+            .collect();
+
+        // If filtering leaves a single variant, return its analyzed type directly.
+        if filtered.len() == 1 {
+            return self
+                .analyze_schema_value(filtered[0], parent_name)
+                .map(|a| a.schema_type);
+        }
+
         let mut union_variants = Vec::new();
 
-        for (variant_index, variant_schema) in one_of_schemas.iter().enumerate() {
+        for (variant_index, variant_schema) in filtered.iter().copied().enumerate() {
             // First check if it's a reference or recursive reference
             if let Some(ref_str) = variant_schema.reference() {
                 if let Some(schema_name) = self.extract_schema_name(ref_str) {
@@ -2279,9 +2313,8 @@ impl SchemaAnalyzer {
                 });
             } else {
                 // Handle inline schemas by creating type aliases or using primitive types directly
-                let context = parent_name.unwrap_or("Union");
                 let inline_name = self.generate_context_aware_name(
-                    context,
+                    parent_name,
                     "InlineVariant",
                     variant_index,
                     Some(variant_schema),
@@ -2340,9 +2373,8 @@ impl SchemaAnalyzer {
                                     }
                                     _ => {
                                         // For deeper nesting, create an inline type
-                                        let context = parent_name.unwrap_or("Inline");
                                         let inline_type_name = self.generate_context_aware_name(
-                                            context,
+                                            parent_name,
                                             "Variant",
                                             variant_index,
                                             None,
@@ -2361,9 +2393,8 @@ impl SchemaAnalyzer {
                             }
                             _ => {
                                 // For other array types, create an inline type
-                                let context = parent_name.unwrap_or("Inline");
                                 let inline_type_name = self.generate_context_aware_name(
-                                    context,
+                                    parent_name,
                                     "Variant",
                                     variant_index,
                                     None,
@@ -2389,9 +2420,8 @@ impl SchemaAnalyzer {
                     }
                     // For other complex types, create an inline type
                     _ => {
-                        let context = parent_name.unwrap_or("Inline");
                         let inline_type_name = self.generate_context_aware_name(
-                            context,
+                            parent_name,
                             "Variant",
                             variant_index,
                             None,
@@ -3122,7 +3152,12 @@ impl SchemaAnalyzer {
             // Check if this is a discriminated union
             if let Some(disc) = discriminator {
                 // This is a discriminated anyOf union, analyze it the same way as oneOf
-                return self.analyze_oneof_union(any_of_schemas, Some(disc), None, dependencies);
+                return self.analyze_oneof_union(
+                    any_of_schemas,
+                    Some(disc),
+                    context_name,
+                    dependencies,
+                );
             }
 
             // Auto-detect implicit discriminator from const fields across all variants
@@ -3134,7 +3169,7 @@ impl SchemaAnalyzer {
                         mapping: None,
                         extra: BTreeMap::new(),
                     }),
-                    None,
+                    context_name,
                     dependencies,
                 );
             }

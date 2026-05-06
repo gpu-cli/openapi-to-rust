@@ -1129,6 +1129,10 @@ impl CodeGenerator {
             ) {
                 let type_ident = format_ident!("{}", variant.target);
                 quote! { #type_ident }
+            } else if variant.target == "serde_json::Value" {
+                // The target is a fully-qualified path; emit it as a path so
+                // it doesn't get mangled into a phantom `SerdeJsonValue` ident.
+                quote! { serde_json::Value }
             } else if variant.target.starts_with("Vec<") && variant.target.ends_with(">") {
                 // Handle Vec types by parsing the inner type
                 let inner = &variant.target[4..variant.target.len() - 1];
@@ -1960,6 +1964,7 @@ impl CodeGenerator {
             "u8" | "u16" | "u32" | "u64" | "u128" => return "UnsignedInteger".to_string(),
             "f32" | "f64" => return "Number".to_string(),
             "String" => return "String".to_string(),
+            "serde_json::Value" => return "Value".to_string(),
             _ => {}
         }
 
