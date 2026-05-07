@@ -381,7 +381,13 @@ impl CodeGenerator {
         quote! {
             use thiserror::Error;
 
-            /// HTTP client errors that can occur during API requests
+            /// Transport-level errors: failures where we never received an
+            /// inspectable HTTP response from the server.
+            ///
+            /// HTTP responses with non-2xx status codes are surfaced as
+            /// [`ApiError`] inside [`ApiOpError::Api`], not here, so callers can
+            /// always inspect status, headers, and the raw body when the server
+            /// actually responded.
             #[derive(Error, Debug)]
             pub enum HttpError {
                 /// Network or connection error (from reqwest)
@@ -395,18 +401,6 @@ impl CodeGenerator {
                 /// Request serialization error
                 #[error("Failed to serialize request: {0}")]
                 Serialization(String),
-
-                /// Response deserialization error
-                #[error("Failed to deserialize response: {0}")]
-                Deserialization(String),
-
-                /// HTTP error response (4xx, 5xx)
-                #[error("HTTP error {status}: {message}")]
-                Http {
-                    status: u16,
-                    message: String,
-                    body: Option<String>,
-                },
 
                 /// Authentication error
                 #[error("Authentication error: {0}")]
@@ -426,51 +420,108 @@ impl CodeGenerator {
             }
 
             impl HttpError {
-                /// Create an HTTP error from a status code and message
-                pub fn from_status(status: u16, message: impl Into<String>, body: Option<String>) -> Self {
-                    Self::Http {
-                        status,
-                        message: message.into(),
-                        body,
-                    }
-                }
-
                 /// Create a serialization error
                 pub fn serialization_error(error: impl std::fmt::Display) -> Self {
                     Self::Serialization(error.to_string())
                 }
 
-                /// Create a deserialization error
-                pub fn deserialization_error(error: impl std::fmt::Display) -> Self {
-                    Self::Deserialization(error.to_string())
-                }
-
-                /// Check if this is a client error (4xx)
-                pub fn is_client_error(&self) -> bool {
-                    matches!(self, Self::Http { status, .. } if *status >= 400 && *status < 500)
-                }
-
-                /// Check if this is a server error (5xx)
-                pub fn is_server_error(&self) -> bool {
-                    matches!(self, Self::Http { status, .. } if *status >= 500 && *status < 600)
-                }
-
-                /// Check if this error is retryable
+                /// Check if this transport error is retryable
                 pub fn is_retryable(&self) -> bool {
-                    match self {
-                        Self::Network(_) => true,
-                        Self::Middleware(_) => true,
-                        Self::Timeout => true,
-                        Self::Http { status, .. } => {
-                            // Retry on 429 (rate limit), 500, 502, 503, 504
-                            matches!(status, 429 | 500 | 502 | 503 | 504)
-                        }
-                        _ => false,
-                    }
+                    matches!(self, Self::Network(_) | Self::Middleware(_) | Self::Timeout)
                 }
             }
 
-            /// Result type for HTTP operations
+            /// Envelope returned for any HTTP response that we received but
+            /// couldn't (or didn't) treat as a successful typed result.
+            ///
+            /// Includes both non-2xx responses and 2xx responses whose body
+            /// failed to deserialize into the expected success type. `status`,
+            /// `headers`, and `body` are always populated so callers can
+            /// inspect what the server sent without modifying the generated
+            /// code. `typed` carries the parsed per-operation error variant
+            /// when the body matched a declared schema.
+            #[derive(Debug, Clone)]
+            pub struct ApiError<E> {
+                pub status: u16,
+                pub headers: reqwest::header::HeaderMap,
+                pub body: String,
+                pub typed: Option<E>,
+                pub parse_error: Option<String>,
+            }
+
+            impl<E> ApiError<E> {
+                pub fn is_client_error(&self) -> bool {
+                    (400..500).contains(&self.status)
+                }
+
+                pub fn is_server_error(&self) -> bool {
+                    (500..600).contains(&self.status)
+                }
+
+                /// Retry guidance for the response. Mirrors the previous
+                /// HttpError logic for backwards-compatible retry middleware.
+                pub fn is_retryable(&self) -> bool {
+                    matches!(self.status, 429 | 500 | 502 | 503 | 504)
+                }
+            }
+
+            impl<E: std::fmt::Debug> std::fmt::Display for ApiError<E> {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(f, "API error {}: {}", self.status, self.body)
+                }
+            }
+
+            impl<E: std::fmt::Debug> std::error::Error for ApiError<E> {}
+
+            /// Result error type returned by every generated operation method.
+            ///
+            /// `Transport` covers failures where we never got an inspectable
+            /// response (network, timeout, middleware, request-side
+            /// serialization). `Api` covers any case where the server *did*
+            /// respond — the envelope always carries status + headers + raw
+            /// body even when the typed deserialize fails.
+            #[derive(Debug, Error)]
+            pub enum ApiOpError<E: std::fmt::Debug> {
+                #[error(transparent)]
+                Transport(#[from] HttpError),
+
+                #[error(transparent)]
+                Api(ApiError<E>),
+            }
+
+            impl<E: std::fmt::Debug> ApiOpError<E> {
+                /// Returns the API envelope when this is an `Api` variant.
+                pub fn api(&self) -> Option<&ApiError<E>> {
+                    match self {
+                        Self::Api(e) => Some(e),
+                        Self::Transport(_) => None,
+                    }
+                }
+
+                /// True when the underlying error came from the server (i.e.
+                /// any `Api` variant) rather than the transport layer.
+                pub fn is_api_error(&self) -> bool {
+                    matches!(self, Self::Api(_))
+                }
+            }
+
+            // Direct From impls so `?` works without going through HttpError
+            // first. Rust's `?` only chains a single `From` conversion.
+            impl<E: std::fmt::Debug> From<reqwest::Error> for ApiOpError<E> {
+                fn from(e: reqwest::Error) -> Self {
+                    Self::Transport(HttpError::Network(e))
+                }
+            }
+
+            impl<E: std::fmt::Debug> From<reqwest_middleware::Error> for ApiOpError<E> {
+                fn from(e: reqwest_middleware::Error) -> Self {
+                    Self::Transport(HttpError::Middleware(e))
+                }
+            }
+
+            /// Result alias for transport-only error paths (e.g. helpers that
+            /// don't have a per-operation error type). Generated operation
+            /// methods use [`ApiOpError`] directly.
             pub type HttpResult<T> = Result<T, HttpError>;
         }
     }

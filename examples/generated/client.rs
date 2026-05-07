@@ -2,9 +2,17 @@
 //!
 //! This file contains the HTTP client implementation for GET, POST, etc.
 //! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
 use super::types::*;
 use thiserror::Error;
-/// HTTP client errors that can occur during API requests
+/// Transport-level errors: failures where we never received an
+/// inspectable HTTP response from the server.
+///
+/// HTTP responses with non-2xx status codes are surfaced as
+/// [`ApiError`] inside [`ApiOpError::Api`], not here, so callers can
+/// always inspect status, headers, and the raw body when the server
+/// actually responded.
 #[derive(Error, Debug)]
 pub enum HttpError {
     /// Network or connection error (from reqwest)
@@ -16,12 +24,6 @@ pub enum HttpError {
     /// Request serialization error
     #[error("Failed to serialize request: {0}")]
     Serialization(String),
-    /// Response deserialization error
-    #[error("Failed to deserialize response: {0}")]
-    Deserialization(String),
-    /// HTTP error response (4xx, 5xx)
-    #[error("HTTP error {status}: {message}")]
-    Http { status: u16, message: String, body: Option<String> },
     /// Authentication error
     #[error("Authentication error: {0}")]
     Auth(String),
@@ -36,46 +38,92 @@ pub enum HttpError {
     Other(String),
 }
 impl HttpError {
-    /// Create an HTTP error from a status code and message
-    pub fn from_status(
-        status: u16,
-        message: impl Into<String>,
-        body: Option<String>,
-    ) -> Self {
-        Self::Http {
-            status,
-            message: message.into(),
-            body,
-        }
-    }
     /// Create a serialization error
     pub fn serialization_error(error: impl std::fmt::Display) -> Self {
         Self::Serialization(error.to_string())
     }
-    /// Create a deserialization error
-    pub fn deserialization_error(error: impl std::fmt::Display) -> Self {
-        Self::Deserialization(error.to_string())
-    }
-    /// Check if this is a client error (4xx)
-    pub fn is_client_error(&self) -> bool {
-        matches!(self, Self::Http { status, .. } if * status >= 400 && * status < 500)
-    }
-    /// Check if this is a server error (5xx)
-    pub fn is_server_error(&self) -> bool {
-        matches!(self, Self::Http { status, .. } if * status >= 500 && * status < 600)
-    }
-    /// Check if this error is retryable
+    /// Check if this transport error is retryable
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Network(_) => true,
-            Self::Middleware(_) => true,
-            Self::Timeout => true,
-            Self::Http { status, .. } => matches!(status, 429 | 500 | 502 | 503 | 504),
-            _ => false,
-        }
+        matches!(self, Self::Network(_) | Self::Middleware(_) | Self::Timeout)
     }
 }
-/// Result type for HTTP operations
+/// Envelope returned for any HTTP response that we received but
+/// couldn't (or didn't) treat as a successful typed result.
+///
+/// Includes both non-2xx responses and 2xx responses whose body
+/// failed to deserialize into the expected success type. `status`,
+/// `headers`, and `body` are always populated so callers can
+/// inspect what the server sent without modifying the generated
+/// code. `typed` carries the parsed per-operation error variant
+/// when the body matched a declared schema.
+#[derive(Debug, Clone)]
+pub struct ApiError<E> {
+    pub status: u16,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: String,
+    pub typed: Option<E>,
+    pub parse_error: Option<String>,
+}
+impl<E> ApiError<E> {
+    pub fn is_client_error(&self) -> bool {
+        (400..500).contains(&self.status)
+    }
+    pub fn is_server_error(&self) -> bool {
+        (500..600).contains(&self.status)
+    }
+    /// Retry guidance for the response. Mirrors the previous
+    /// HttpError logic for backwards-compatible retry middleware.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self.status, 429 | 500 | 502 | 503 | 504)
+    }
+}
+impl<E: std::fmt::Debug> std::fmt::Display for ApiError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "API error {}: {}", self.status, self.body)
+    }
+}
+impl<E: std::fmt::Debug> std::error::Error for ApiError<E> {}
+/// Result error type returned by every generated operation method.
+///
+/// `Transport` covers failures where we never got an inspectable
+/// response (network, timeout, middleware, request-side
+/// serialization). `Api` covers any case where the server *did*
+/// respond — the envelope always carries status + headers + raw
+/// body even when the typed deserialize fails.
+#[derive(Debug, Error)]
+pub enum ApiOpError<E: std::fmt::Debug> {
+    #[error(transparent)]
+    Transport(#[from] HttpError),
+    #[error(transparent)]
+    Api(ApiError<E>),
+}
+impl<E: std::fmt::Debug> ApiOpError<E> {
+    /// Returns the API envelope when this is an `Api` variant.
+    pub fn api(&self) -> Option<&ApiError<E>> {
+        match self {
+            Self::Api(e) => Some(e),
+            Self::Transport(_) => None,
+        }
+    }
+    /// True when the underlying error came from the server (i.e.
+    /// any `Api` variant) rather than the transport layer.
+    pub fn is_api_error(&self) -> bool {
+        matches!(self, Self::Api(_))
+    }
+}
+impl<E: std::fmt::Debug> From<reqwest::Error> for ApiOpError<E> {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Transport(HttpError::Network(e))
+    }
+}
+impl<E: std::fmt::Debug> From<reqwest_middleware::Error> for ApiOpError<E> {
+    fn from(e: reqwest_middleware::Error) -> Self {
+        Self::Transport(HttpError::Middleware(e))
+    }
+}
+/// Result alias for transport-only error paths (e.g. helpers that
+/// don't have a per-operation error type). Generated operation
+/// methods use [`ApiOpError`] directly.
 pub type HttpResult<T> = Result<T, HttpError>;
 /// Retry configuration for HTTP requests
 #[derive(Debug, Clone)]
@@ -162,17 +210,22 @@ impl HttpClient {
         self
     }
 }
+impl Default for HttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl HttpClient {
     ///POST /todos
-    pub async fn create_todo(&self, request: CreateTodoRequest) -> HttpResult<Todo> {
-        let url = format!("{}{}", self.base_url, "/todos");
+    pub async fn create_todo(
+        &self,
+        request: CreateTodoRequest,
+    ) -> Result<Todo, ApiOpError<serde_json::Value>> {
+        let request_url = format!("{}{}", self.base_url, "/todos");
         let mut req = self
             .http_client
-            .post(url)
-            .body(
-                serde_json::to_vec(&request)
-                    .map_err(|e| HttpError::serialization_error(e))?,
-            )
+            .post(request_url)
+            .body(serde_json::to_vec(&request).map_err(HttpError::serialization_error)?)
             .header("content-type", "application/json");
         if let Some(api_key) = &self.api_key {
             req = req.bearer_auth(api_key);
@@ -182,23 +235,66 @@ impl HttpClient {
         }
         let response = req.send().await?;
         let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
         if status.is_success() {
-            let body = response
-                .json()
-                .await
-                .map_err(|e| HttpError::deserialization_error(e))?;
-            Ok(body)
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
         } else {
-            let status_code = status.as_u16();
-            let message = status.canonical_reason().unwrap_or("Unknown error");
-            let body = response.text().await.ok();
-            Err(HttpError::from_status(status_code, message, body))
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     ///DELETE /todos/{id}
-    pub async fn delete_todo(&self) -> HttpResult<()> {
-        let url = format!("{}{}", self.base_url, "/todos/{id}");
-        let mut req = self.http_client.delete(url);
+    pub async fn delete_todo(
+        &self,
+        id: impl AsRef<str>,
+    ) -> Result<(), ApiOpError<serde_json::Value>> {
+        let request_url = format!(
+            "{}{}", self.base_url, format!("/todos/{}", id.as_ref())
+        );
+        let mut req = self.http_client.delete(request_url);
         if let Some(api_key) = &self.api_key {
             req = req.bearer_auth(api_key);
         }
@@ -207,23 +303,53 @@ impl HttpClient {
         }
         let response = req.send().await?;
         let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
         if status.is_success() {
-            let body = response
-                .json()
-                .await
-                .map_err(|e| HttpError::deserialization_error(e))?;
-            Ok(body)
+            let _ = body_text;
+            let _ = headers;
+            Ok(())
         } else {
-            let status_code = status.as_u16();
-            let message = status.canonical_reason().unwrap_or("Unknown error");
-            let body = response.text().await.ok();
-            Err(HttpError::from_status(status_code, message, body))
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     ///GET /todos/{id}
-    pub async fn get_todo(&self) -> HttpResult<Todo> {
-        let url = format!("{}{}", self.base_url, "/todos/{id}");
-        let mut req = self.http_client.get(url);
+    pub async fn get_todo(
+        &self,
+        id: impl AsRef<str>,
+    ) -> Result<Todo, ApiOpError<serde_json::Value>> {
+        let request_url = format!(
+            "{}{}", self.base_url, format!("/todos/{}", id.as_ref())
+        );
+        let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
             req = req.bearer_auth(api_key);
         }
@@ -232,23 +358,63 @@ impl HttpClient {
         }
         let response = req.send().await?;
         let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
         if status.is_success() {
-            let body = response
-                .json()
-                .await
-                .map_err(|e| HttpError::deserialization_error(e))?;
-            Ok(body)
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
         } else {
-            let status_code = status.as_u16();
-            let message = status.canonical_reason().unwrap_or("Unknown error");
-            let body = response.text().await.ok();
-            Err(HttpError::from_status(status_code, message, body))
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     ///GET /todos
-    pub async fn list_todos(&self) -> HttpResult<()> {
-        let url = format!("{}{}", self.base_url, "/todos");
-        let mut req = self.http_client.get(url);
+    pub async fn list_todos(
+        &self,
+    ) -> Result<ListTodosResponse, ApiOpError<serde_json::Value>> {
+        let request_url = format!("{}{}", self.base_url, "/todos");
+        let mut req = self.http_client.get(request_url);
         if let Some(api_key) = &self.api_key {
             req = req.bearer_auth(api_key);
         }
@@ -257,29 +423,70 @@ impl HttpClient {
         }
         let response = req.send().await?;
         let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
         if status.is_success() {
-            let body = response
-                .json()
-                .await
-                .map_err(|e| HttpError::deserialization_error(e))?;
-            Ok(body)
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
         } else {
-            let status_code = status.as_u16();
-            let message = status.canonical_reason().unwrap_or("Unknown error");
-            let body = response.text().await.ok();
-            Err(HttpError::from_status(status_code, message, body))
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
     ///PUT /todos/{id}
-    pub async fn update_todo(&self, request: UpdateTodoRequest) -> HttpResult<Todo> {
-        let url = format!("{}{}", self.base_url, "/todos/{id}");
+    pub async fn update_todo(
+        &self,
+        id: impl AsRef<str>,
+        request: UpdateTodoRequest,
+    ) -> Result<Todo, ApiOpError<serde_json::Value>> {
+        let request_url = format!(
+            "{}{}", self.base_url, format!("/todos/{}", id.as_ref())
+        );
         let mut req = self
             .http_client
-            .put(url)
-            .body(
-                serde_json::to_vec(&request)
-                    .map_err(|e| HttpError::serialization_error(e))?,
-            )
+            .put(request_url)
+            .body(serde_json::to_vec(&request).map_err(HttpError::serialization_error)?)
             .header("content-type", "application/json");
         if let Some(api_key) = &self.api_key {
             req = req.bearer_auth(api_key);
@@ -289,17 +496,55 @@ impl HttpClient {
         }
         let response = req.send().await?;
         let status = response.status();
+        let status_code = status.as_u16();
+        let headers = response.headers().clone();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
         if status.is_success() {
-            let body = response
-                .json()
-                .await
-                .map_err(|e| HttpError::deserialization_error(e))?;
-            Ok(body)
+            match serde_json::from_str(&body_text) {
+                Ok(body) => Ok(body),
+                Err(e) => {
+                    Err(
+                        ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers: headers,
+                            body: body_text,
+                            typed: None,
+                            parse_error: Some(
+                                format!("failed to deserialize 2xx response body: {}", e),
+                            ),
+                        }),
+                    )
+                }
+            }
         } else {
-            let status_code = status.as_u16();
-            let message = status.canonical_reason().unwrap_or("Unknown error");
-            let body = response.text().await.ok();
-            Err(HttpError::from_status(status_code, message, body))
+            let typed: Option<serde_json::Value>;
+            let parse_error: Option<String>;
+            match status_code {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            Err(
+                ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    typed,
+                    parse_error,
+                }),
+            )
         }
     }
 }

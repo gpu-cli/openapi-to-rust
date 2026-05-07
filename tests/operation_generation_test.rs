@@ -60,8 +60,8 @@ fn test_generate_get_operation() {
     assert!(result_str.contains("get_user"));
     // Verify HTTP method is GET
     assert!(result_str.contains(". get (request_url)"));
-    // Verify response type
-    assert!(result_str.contains("HttpResult < User >"));
+    // Verify response type — see issue #8 for the ApiOpError envelope.
+    assert!(result_str.contains("Result < User , ApiOpError <"));
     // Verify no request body parameter
     assert!(!result_str.contains("request :"));
 }
@@ -103,8 +103,8 @@ fn test_generate_post_operation() {
     // Verify request body serialization (middleware-compatible)
     assert!(result_str.contains("serde_json :: to_vec (& request)"));
     assert!(result_str.contains("application/json"));
-    // Verify response type
-    assert!(result_str.contains("HttpResult < User >"));
+    // Verify response type — see issue #8 for the ApiOpError envelope.
+    assert!(result_str.contains("Result < User , ApiOpError <"));
 }
 
 #[test]
@@ -271,8 +271,9 @@ fn test_method_with_response_type() {
     let result = generator.generate_operation_methods(&analysis);
     let result_str = result.to_string();
 
-    // Verify response type is correctly mapped
-    assert!(result_str.contains("HttpResult < DataResponse >"));
+    // Verify response type is correctly mapped — see issue #8 for the
+    // ApiOpError envelope.
+    assert!(result_str.contains("Result < DataResponse , ApiOpError <"));
 }
 
 #[test]
@@ -299,12 +300,13 @@ fn test_method_without_response_type() {
     let result = generator.generate_operation_methods(&analysis);
     let result_str = result.to_string();
 
-    // Verify unit type for no response
-    assert!(result_str.contains("HttpResult < () >"));
+    // Verify unit type for no response — see issue #8 for the ApiOpError
+    // envelope.
+    assert!(result_str.contains("Result < () , ApiOpError <"));
 
     // Verify no deserialization for empty response (should use Ok(()) directly)
     assert!(
-        !result_str.contains("deserialization_error"),
+        !result_str.contains("failed to deserialize 2xx response body"),
         "Empty response type should not attempt JSON deserialization"
     );
     assert!(
@@ -339,11 +341,13 @@ fn test_error_handling_generation() {
     let result = generator.generate_operation_methods(&analysis);
     let result_str = result.to_string();
 
-    // Verify error handling logic
+    // Verify error handling logic — the new envelope reads the body to a
+    // string before deserializing and wraps non-2xx (and 2xx parse failures)
+    // in `ApiOpError::Api(ApiError { ... })`. See issue #8.
     assert!(result_str.contains("let status = response . status ()"));
     assert!(result_str.contains("if status . is_success ()"));
-    assert!(result_str.contains("HttpError :: deserialization_error"));
-    assert!(result_str.contains("HttpError :: from_status"));
+    assert!(result_str.contains("response . text ()"));
+    assert!(result_str.contains("ApiOpError :: Api (ApiError"));
 }
 
 #[test]

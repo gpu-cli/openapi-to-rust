@@ -3662,14 +3662,32 @@ impl SchemaAnalyzer {
         Ok(op_info)
     }
 
-    /// Generate a type name for an inline response schema
-    fn generate_inline_response_type_name(&self, operation_id: &str, _status_code: &str) -> String {
+    /// Generate a type name for an inline response schema.
+    ///
+    /// 200 (the canonical success status) keeps the unsuffixed `{Op}Response`
+    /// name so simple specs and existing snapshots are unchanged. Every other
+    /// status code is disambiguated by suffix so that multi-response operations
+    /// (e.g. 200 + 400) don't collide in the schema registry — see issue #8.
+    fn generate_inline_response_type_name(&self, operation_id: &str, status_code: &str) -> String {
         use heck::ToPascalCase;
-        // Convert operation_id to PascalCase and append Response
-        // e.g., "app.skills" -> "AppSkillsResponse"
-        // e.g., "getUser" + "200" -> "GetUserResponse"
         let base_name = operation_id.replace('.', "_").to_pascal_case();
-        format!("{}Response", base_name)
+        let suffix = Self::status_code_suffix(status_code);
+        format!("{}Response{}", base_name, suffix)
+    }
+
+    /// Map an OpenAPI status code key to a suffix for generated type names.
+    ///
+    /// "200" → "" (unchanged, the dominant case)
+    /// "201", "400", "404" → "201", "400", "404"
+    /// "default" → "Default"
+    /// "4XX" / "4xx" → "4xx" (lowercased range form)
+    fn status_code_suffix(status_code: &str) -> String {
+        match status_code {
+            "" | "200" => String::new(),
+            "default" | "Default" => "Default".to_string(),
+            other if other.chars().all(|c| c.is_ascii_digit()) => other.to_string(),
+            other => other.to_ascii_lowercase(),
+        }
     }
 
     /// Generate a type name for an inline request body schema

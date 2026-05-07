@@ -247,13 +247,11 @@ fn test_generated_error_code() {
 
     let client_content = &client_file.expect("client file").content;
 
-    // Verify the generated code contains HttpError enum
+    // Transport-level error machinery
     assert!(
         client_content.contains("pub enum HttpError"),
         "Generated code should contain HttpError enum"
     );
-
-    // Verify error variants
     assert!(
         client_content.contains("Network(#[from] reqwest::Error)"),
         "Generated code should contain Network variant"
@@ -261,26 +259,6 @@ fn test_generated_error_code() {
     assert!(
         client_content.contains("Serialization(String)"),
         "Generated code should contain Serialization variant"
-    );
-    assert!(
-        client_content.contains("Deserialization(String)"),
-        "Generated code should contain Deserialization variant"
-    );
-    assert!(
-        client_content.contains("Http {"),
-        "Generated code should contain Http variant"
-    );
-    assert!(
-        client_content.contains("status: u16"),
-        "Generated code should contain status field in Http variant"
-    );
-    assert!(
-        client_content.contains("message: String"),
-        "Generated code should contain message field in Http variant"
-    );
-    assert!(
-        client_content.contains("body: Option<String>"),
-        "Generated code should contain body field in Http variant"
     );
     assert!(
         client_content.contains("Auth(String)"),
@@ -299,18 +277,25 @@ fn test_generated_error_code() {
         "Generated code should contain Other variant"
     );
 
-    // Verify helper methods
+    // New typed-response envelope (replaces the old HttpError::Http variant
+    // and from_status helper — see issue #8).
     assert!(
-        client_content.contains("pub fn from_status"),
-        "Generated code should contain from_status method"
+        client_content.contains("pub struct ApiError"),
+        "Generated code should contain ApiError struct"
     );
+    assert!(
+        client_content.contains("pub enum ApiOpError"),
+        "Generated code should contain ApiOpError enum"
+    );
+    assert!(
+        client_content.contains("Transport(#[from] HttpError)"),
+        "ApiOpError should have Transport variant carrying HttpError"
+    );
+
+    // Helpers on the new envelope
     assert!(
         client_content.contains("pub fn serialization_error"),
         "Generated code should contain serialization_error method"
-    );
-    assert!(
-        client_content.contains("pub fn deserialization_error"),
-        "Generated code should contain deserialization_error method"
     );
     assert!(
         client_content.contains("pub fn is_client_error"),

@@ -18,7 +18,7 @@ pub use config::ConfigFile;
 pub use error::GeneratorError;
 pub use generator::{CodeGenerator, GeneratedFile, GenerationResult, GeneratorConfig};
 pub use http_config::{AuthConfig, HttpClientConfig, RetryConfig};
-pub use http_error::{HttpError, HttpResult};
+pub use http_error::{ApiError, ApiOpError, HttpError, HttpResult};
 pub use openapi::{OpenApiSpec, Schema, SchemaType};
 
 pub type Result<T> = std::result::Result<T, GeneratorError>;
