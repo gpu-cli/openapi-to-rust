@@ -27,7 +27,19 @@ pub enum ToolsRequestToolsItemUnion {
 pub struct TextTool {
     pub name: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum TextToolType {
+    #[default]
+    #[serde(rename = "text")]
+    Text,
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CodeTool {
     pub language: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum CodeToolType {
+    #[default]
+    #[serde(rename = "code")]
+    Code,
 }

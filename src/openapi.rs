@@ -344,19 +344,37 @@ impl SchemaDetails {
     }
 
     /// Check if this is a string enum
+    ///
+    /// A standalone string `const` (no `enum` array) is treated as a
+    /// degenerate single-value enum so the generator emits a tightly-typed
+    /// single-variant enum instead of a bare `String`. See issue #10.
     pub fn is_string_enum(&self) -> bool {
-        self.enum_values.is_some()
+        self.enum_values.is_some() || self.const_string_value().is_some()
     }
 
-    /// Get enum values as strings if this is a string enum
+    /// Get enum values as strings if this is a string enum.
+    ///
+    /// Falls back to `[const_value]` when `enum` is absent but `const` is a
+    /// string, so a property like `{ "type": "string", "const": "X" }`
+    /// produces a single-variant enum.
     pub fn string_enum_values(&self) -> Option<Vec<String>> {
-        self.enum_values.as_ref().map(|values| {
-            values
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect()
-        })
+        if let Some(values) = self.enum_values.as_ref() {
+            return Some(
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect(),
+            );
+        }
+        self.const_string_value().map(|s| vec![s])
+    }
+
+    fn const_string_value(&self) -> Option<String> {
+        self.const_value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     /// Check if a field is required
