@@ -12,12 +12,13 @@ expression: "&generated_code"
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TypedEvent {
-    pub r#type: TypedEventType,
+pub struct ConstModifier {
+    #[serde(rename = "someConstant", skip_serializing_if = "Option::is_none")]
+    pub some_constant: Option<ConstModifierSomeConstant>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub enum TypedEventType {
+pub enum ConstModifierSomeConstant {
     #[default]
-    #[serde(rename = "event.created")]
-    EventCreated,
+    #[serde(rename = "TheOnlyValidValue")]
+    TheOnlyValidValue,
 }
