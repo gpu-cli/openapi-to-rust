@@ -161,21 +161,17 @@ fn test_generated_multi_response_client_compiles() {
 /// unions, etc) that the toy multi_response_spec doesn't exercise.
 #[test]
 fn test_generated_anthropic_client_compiles() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/anthropic.yml");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/anthropic.yml");
     let raw = fs::read_to_string(&path).expect("read anthropic fixture");
-    let spec: serde_json::Value =
-        serde_yaml::from_str(&raw).expect("parse anthropic fixture");
+    let spec: serde_json::Value = serde_yaml::from_str(&raw).expect("parse anthropic fixture");
     let _temp = assert_generates_compiling_client("anthropic_client", spec);
 }
 
 #[test]
 fn test_generated_openai_client_compiles() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/openai-responses.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/openai-responses.json");
     let raw = fs::read_to_string(&path).expect("read openai fixture");
-    let spec: serde_json::Value =
-        serde_json::from_str(&raw).expect("parse openai fixture");
+    let spec: serde_json::Value = serde_json::from_str(&raw).expect("parse openai fixture");
     let _temp = assert_generates_compiling_client("openai_client", spec);
 }
 

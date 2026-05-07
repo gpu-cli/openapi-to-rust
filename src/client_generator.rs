@@ -417,8 +417,7 @@ impl CodeGenerator {
             .map(|(code, schema)| {
                 let variant_ident = Self::op_error_variant_ident(code);
                 let payload_ty_name = self.to_rust_type_name(schema);
-                let payload_ty =
-                    syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
+                let payload_ty = syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
                 quote! { #variant_ident(#payload_ty) }
             })
             .collect();
@@ -840,8 +839,7 @@ impl CodeGenerator {
             .filter_map(|(code, schema)| {
                 let variant_ident = Self::op_error_variant_ident(code);
                 let payload_ty_name = self.to_rust_type_name(schema);
-                let payload_ty =
-                    syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
+                let payload_ty = syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
                 let enum_ident = self.op_error_enum_ident(op);
 
                 let pattern = match code.as_str() {
@@ -875,10 +873,9 @@ impl CodeGenerator {
         // Fallback for "default" or undeclared status codes: try to parse
         // as `serde_json::Value` for inspectability when the op's error
         // type is generic, otherwise leave typed = None.
-        let has_typed_enum = op
-            .response_schemas
-            .iter()
-            .any(|(code, _)| !code.starts_with('2') && !matches!(code.as_str(), "default" | "Default"));
+        let has_typed_enum = op.response_schemas.iter().any(|(code, _)| {
+            !code.starts_with('2') && !matches!(code.as_str(), "default" | "Default")
+        });
 
         let default_arm = if has_typed_enum {
             quote! {
