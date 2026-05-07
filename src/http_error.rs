@@ -203,3 +203,63 @@ impl HttpError {
 
 /// Result type for HTTP operations
 pub type HttpResult<T> = Result<T, HttpError>;
+
+/// Envelope for an API response we received but couldn't (or didn't) treat as success.
+///
+/// `ApiError<E>` is returned whenever the server actually responded — whether the
+/// status was non-2xx, or the 2xx body failed to deserialize into the expected
+/// type. `status`, `headers`, and `body` are always populated so callers can
+/// inspect what the server actually sent without having to hack the generated
+/// client. `typed` is `Some(_)` when the raw body was successfully parsed into a
+/// per-operation error type; `parse_error` records why parsing failed when not.
+#[derive(Debug, Clone)]
+pub struct ApiError<E> {
+    pub status: u16,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: String,
+    pub typed: Option<E>,
+    pub parse_error: Option<String>,
+}
+
+impl<E> ApiError<E> {
+    pub fn is_client_error(&self) -> bool {
+        (400..500).contains(&self.status)
+    }
+
+    pub fn is_server_error(&self) -> bool {
+        (500..600).contains(&self.status)
+    }
+}
+
+impl<E: std::fmt::Debug> std::fmt::Display for ApiError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "API error {}: {}", self.status, self.body)
+    }
+}
+
+impl<E: std::fmt::Debug> std::error::Error for ApiError<E> {}
+
+/// Result error type for generated operation methods.
+///
+/// `Transport` covers failures where the request never produced a response we
+/// can inspect (network, timeout, middleware, request-side serialization).
+/// `Api` covers any case where the server *did* respond — the envelope always
+/// carries status + headers + raw body even when the typed deserialize fails.
+#[derive(Debug, thiserror::Error)]
+pub enum ApiOpError<E: std::fmt::Debug> {
+    #[error(transparent)]
+    Transport(#[from] HttpError),
+
+    #[error(transparent)]
+    Api(ApiError<E>),
+}
+
+impl<E: std::fmt::Debug> ApiOpError<E> {
+    /// Convenience accessor: if this is an Api variant, return the envelope.
+    pub fn api(&self) -> Option<&ApiError<E>> {
+        match self {
+            Self::Api(e) => Some(e),
+            Self::Transport(_) => None,
+        }
+    }
+}

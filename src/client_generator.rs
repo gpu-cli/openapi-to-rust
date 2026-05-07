@@ -368,8 +368,18 @@ impl CodeGenerator {
         }
     }
 
-    /// Generate HTTP operation methods for the client
+    /// Generate HTTP operation methods for the client.
+    ///
+    /// Emits per-operation typed error enums (one variant per declared non-2xx
+    /// response with a body schema) BEFORE the `impl HttpClient` block so the
+    /// generated method signatures can reference them.
     pub fn generate_operation_methods(&self, analysis: &SchemaAnalysis) -> TokenStream {
+        let op_error_enums: Vec<TokenStream> = analysis
+            .operations
+            .values()
+            .filter_map(|op| self.generate_op_error_enum(op))
+            .collect();
+
         let methods: Vec<TokenStream> = analysis
             .operations
             .values()
@@ -377,9 +387,90 @@ impl CodeGenerator {
             .collect();
 
         quote! {
+            #(#op_error_enums)*
+
             impl HttpClient {
                 #(#methods)*
             }
+        }
+    }
+
+    /// Generate the per-operation typed error enum, if the op has any non-2xx
+    /// responses with a body schema. Returns None when the op has no declared
+    /// error bodies — those operations use `ApiOpError<serde_json::Value>` so
+    /// the raw response body is still inspectable.
+    fn generate_op_error_enum(&self, op: &OperationInfo) -> Option<TokenStream> {
+        let variants: Vec<(String, String)> = op
+            .response_schemas
+            .iter()
+            .filter(|(code, _)| !code.starts_with('2'))
+            .map(|(code, schema)| (code.clone(), schema.clone()))
+            .collect();
+
+        if variants.is_empty() {
+            return None;
+        }
+
+        let enum_ident = self.op_error_enum_ident(op);
+        let variant_decls: Vec<TokenStream> = variants
+            .iter()
+            .map(|(code, schema)| {
+                let variant_ident = Self::op_error_variant_ident(code);
+                let payload_ty_name = self.to_rust_type_name(schema);
+                let payload_ty =
+                    syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
+                quote! { #variant_ident(#payload_ty) }
+            })
+            .collect();
+
+        let doc = format!(
+            "Typed error responses for `{}`. One variant per declared non-2xx response.",
+            op.operation_id
+        );
+
+        Some(quote! {
+            #[doc = #doc]
+            #[derive(Debug, Clone)]
+            pub enum #enum_ident {
+                #(#variant_decls,)*
+            }
+        })
+    }
+
+    /// Type name (Ident) for the per-op error enum, e.g. `ListTodosApiError`.
+    fn op_error_enum_ident(&self, op: &OperationInfo) -> syn::Ident {
+        use heck::ToPascalCase;
+        let name = format!(
+            "{}ApiError",
+            op.operation_id.replace('.', "_").to_pascal_case()
+        );
+        syn::Ident::new(&name, proc_macro2::Span::call_site())
+    }
+
+    /// Variant name for a status code: "400" → Status400, "default" → Default,
+    /// "4XX" → Status4xx.
+    fn op_error_variant_ident(status_code: &str) -> syn::Ident {
+        let raw = match status_code {
+            "default" | "Default" => "Default".to_string(),
+            other if other.chars().all(|c| c.is_ascii_digit()) => format!("Status{other}"),
+            other => format!("Status{}", other.to_ascii_lowercase()),
+        };
+        syn::Ident::new(&raw, proc_macro2::Span::call_site())
+    }
+
+    /// Token stream for the type plugged into `ApiOpError<T>` for an op:
+    /// either the per-op enum, or `serde_json::Value` for ops with no
+    /// declared error body schemas.
+    fn op_error_type_token(&self, op: &OperationInfo) -> TokenStream {
+        if op
+            .response_schemas
+            .iter()
+            .any(|(code, _)| !code.starts_with('2'))
+        {
+            let ident = self.op_error_enum_ident(op);
+            quote! { #ident }
+        } else {
+            quote! { serde_json::Value }
         }
     }
 
@@ -393,7 +484,8 @@ impl CodeGenerator {
         let query_params = self.generate_query_params(op);
         let response_type = self.get_response_type(op);
         let has_response_body = self.get_success_response_schema(op).is_some();
-        let error_handling = self.generate_error_handling(has_response_body);
+        let op_error_type = self.op_error_type_token(op);
+        let error_handling = self.generate_error_handling(op, has_response_body);
         let url_construction = self.generate_url_construction(path, op);
         let doc_comment = self.generate_operation_doc_comment(op);
 
@@ -402,7 +494,7 @@ impl CodeGenerator {
             pub async fn #method_name(
                 &self,
                 #request_param
-            ) -> HttpResult<#response_type> {
+            ) -> Result<#response_type, ApiOpError<#op_error_type>> {
                 #url_construction
 
                 let mut req = self.http_client
@@ -679,31 +771,153 @@ impl CodeGenerator {
 
     /// Generate error handling.
     ///
-    /// When `has_response_body` is false the endpoint returns no JSON body
-    /// (e.g. 204 No Content) and we skip deserialization entirely.
-    fn generate_error_handling(&self, has_response_body: bool) -> TokenStream {
+    /// Always reads the response body to a string before attempting any typed
+    /// deserialization, so the raw body and headers are preserved on the error
+    /// path even when JSON parsing fails. On 2xx the body is parsed into the
+    /// success type; on non-2xx the body is parsed into the matching variant
+    /// of the per-operation error enum (when one is declared) and wrapped in
+    /// `ApiError<E>`.
+    fn generate_error_handling(&self, op: &OperationInfo, has_response_body: bool) -> TokenStream {
+        let op_error_type = self.op_error_type_token(op);
+
         let success_branch = if has_response_body {
             quote! {
-                let body = response.json().await
-                    .map_err(HttpError::deserialization_error)?;
-                Ok(body)
+                match serde_json::from_str(&body_text) {
+                    Ok(body) => Ok(body),
+                    Err(e) => Err(ApiOpError::Api(ApiError {
+                        status: status_code,
+                        headers: headers,
+                        body: body_text,
+                        typed: None,
+                        parse_error: Some(format!(
+                            "failed to deserialize 2xx response body: {}",
+                            e
+                        )),
+                    })),
+                }
             }
         } else {
             quote! {
+                let _ = body_text;
+                let _ = headers;
                 Ok(())
             }
         };
 
+        let error_match_arms = self.generate_error_match_arms(op);
+
         quote! {
             let status = response.status();
+            let status_code = status.as_u16();
+            let headers = response.headers().clone();
+            let body_text = response.text().await
+                .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
 
             if status.is_success() {
                 #success_branch
             } else {
-                let status_code = status.as_u16();
-                let message = status.canonical_reason().unwrap_or("Unknown error");
-                let body = response.text().await.ok();
-                Err(HttpError::from_status(status_code, message, body))
+                let typed: Option<#op_error_type>;
+                let parse_error: Option<String>;
+                #error_match_arms
+                Err(ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    typed,
+                    parse_error,
+                }))
+            }
+        }
+    }
+
+    /// Generate the match arms that select which per-op error variant to
+    /// deserialize the response body into based on the runtime status code.
+    fn generate_error_match_arms(&self, op: &OperationInfo) -> TokenStream {
+        let arms: Vec<TokenStream> = op
+            .response_schemas
+            .iter()
+            .filter(|(code, _)| !code.starts_with('2'))
+            .filter_map(|(code, schema)| {
+                let variant_ident = Self::op_error_variant_ident(code);
+                let payload_ty_name = self.to_rust_type_name(schema);
+                let payload_ty =
+                    syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
+                let enum_ident = self.op_error_enum_ident(op);
+
+                let pattern = match code.as_str() {
+                    "default" | "Default" => return None, // handled in fallback
+                    other if other.chars().all(|c| c.is_ascii_digit()) => {
+                        let n: u16 = other.parse().ok()?;
+                        quote! { #n }
+                    }
+                    // Range like "4XX" / "5XX" — fall through to generic
+                    // for now; declared-range handling is a follow-up.
+                    _ => return None,
+                };
+
+                Some(quote! {
+                    #pattern => {
+                        match serde_json::from_str::<#payload_ty>(&body_text) {
+                            Ok(v) => {
+                                typed = Some(#enum_ident::#variant_ident(v));
+                                parse_error = None;
+                            }
+                            Err(e) => {
+                                typed = None;
+                                parse_error = Some(e.to_string());
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Fallback for "default" or undeclared status codes: try to parse
+        // as `serde_json::Value` for inspectability when the op's error
+        // type is generic, otherwise leave typed = None.
+        let has_typed_enum = op
+            .response_schemas
+            .iter()
+            .any(|(code, _)| !code.starts_with('2') && !matches!(code.as_str(), "default" | "Default"));
+
+        let default_arm = if has_typed_enum {
+            quote! {
+                _ => {
+                    typed = None;
+                    parse_error = None;
+                }
+            }
+        } else {
+            // No typed enum — op_error_type is serde_json::Value.
+            quote! {
+                _ => {
+                    match serde_json::from_str::<serde_json::Value>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(v);
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+        };
+
+        if arms.is_empty() {
+            // No declared status arms — just the fallback.
+            quote! {
+                match status_code {
+                    #default_arm
+                }
+            }
+        } else {
+            quote! {
+                match status_code {
+                    #(#arms)*
+                    #default_arm
+                }
             }
         }
     }

@@ -402,7 +402,7 @@ fn test_full_client_includes_errors() {
         .generate_http_client(&analysis)
         .expect("Failed to generate HTTP client");
 
-    // Verify all error types are present
+    // Verify transport-error machinery is present
     assert!(
         client_code.contains("pub enum HttpError"),
         "Should include HttpError enum"
@@ -416,22 +416,34 @@ fn test_full_client_includes_errors() {
         "Should include Serialization error variant"
     );
     assert!(
-        client_code.contains("Deserialization(String)"),
-        "Should include Deserialization error variant"
-    );
-    assert!(
-        client_code.contains("Http {"),
-        "Should include Http error variant with status and message"
-    );
-    assert!(
         client_code.contains("pub type HttpResult<T>"),
         "Should include HttpResult type alias"
     );
 
-    // Verify helper methods
+    // Verify the new typed-response error envelope and operation result
+    // wrapper are emitted (replaces the old `HttpError::Http { ... }`
+    // variant — see issue #8 for the design).
     assert!(
-        client_code.contains("pub fn from_status"),
-        "Should include from_status helper"
+        client_code.contains("pub struct ApiError"),
+        "Should include ApiError envelope struct"
+    );
+    assert!(
+        client_code.contains("pub enum ApiOpError"),
+        "Should include ApiOpError enum"
+    );
+    assert!(
+        client_code.contains("Transport(#[from] HttpError)"),
+        "ApiOpError should have Transport variant carrying HttpError"
+    );
+
+    // Verify helper methods on the new envelope
+    assert!(
+        client_code.contains("pub fn is_client_error"),
+        "Should include is_client_error helper"
+    );
+    assert!(
+        client_code.contains("pub fn is_server_error"),
+        "Should include is_server_error helper"
     );
     assert!(
         client_code.contains("pub fn is_retryable"),
