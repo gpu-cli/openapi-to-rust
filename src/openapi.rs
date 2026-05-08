@@ -90,10 +90,21 @@ pub enum Schema {
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
-    /// Recursive reference (OpenAPI 3.1)
+    /// Recursive reference (older draft, kept for OAS 3.0 compatibility)
     RecursiveRef {
         #[serde(rename = "$recursiveRef")]
         recursive_ref: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    /// Dynamic reference per JSON Schema 2020-12 (OAS 3.1+).
+    /// `$dynamicRef` resolves against the nearest enclosing `$dynamicAnchor`.
+    /// J1: modeled today; full dynamic resolution at analysis time is a
+    /// follow-up. Self-references via `$dynamicRef: "#x"` are treated as
+    /// recursive references to the schema bearing `$dynamicAnchor: "x"`.
+    DynamicRef {
+        #[serde(rename = "$dynamicRef")]
+        dynamic_ref: String,
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
@@ -159,14 +170,20 @@ pub enum SchemaType {
     Null,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SchemaDetails {
     pub description: Option<String>,
     pub nullable: Option<bool>,
 
-    // OpenAPI 3.1 recursive support
+    // OpenAPI 3.0 recursive support (obsoleted by JSON Schema 2020-12).
     #[serde(rename = "$recursiveAnchor")]
     pub recursive_anchor: Option<bool>,
+
+    // JSON Schema 2020-12 dynamic anchors (J1).
+    #[serde(rename = "$dynamicAnchor")]
+    pub dynamic_anchor: Option<String>,
+    #[serde(rename = "$id")]
+    pub schema_id: Option<String>,
 
     // String-specific
     #[serde(rename = "enum")]
@@ -212,7 +229,13 @@ pub enum AdditionalProperties {
 pub struct Discriminator {
     #[serde(rename = "propertyName")]
     pub property_name: String,
+    #[serde(default)]
     pub mapping: Option<BTreeMap<String, String>>,
+    /// 3.2 §"Discriminator Object" — fallback mapping target when the
+    /// discriminator value is unknown (D9). Captured today; a future bead
+    /// will emit a `_Other(Value)` enum variant when this is set.
+    #[serde(rename = "defaultMapping", default)]
+    pub default_mapping: Option<String>,
     #[serde(flatten, default)]
     pub extensions: Extensions,
 }
@@ -247,52 +270,12 @@ impl Schema {
 
     /// Get schema details
     pub fn details(&self) -> &SchemaDetails {
+        static EMPTY_DETAILS: Lazy<SchemaDetails> = Lazy::new(SchemaDetails::default);
         match self {
             Schema::Typed { details, .. } => details,
             Schema::TypedMulti { details, .. } => details,
-            Schema::Reference { .. } => {
-                static EMPTY_DETAILS: Lazy<SchemaDetails> = Lazy::new(|| SchemaDetails {
-                    description: None,
-                    nullable: None,
-                    recursive_anchor: None,
-                    enum_values: None,
-                    format: None,
-                    default: None,
-                    const_value: None,
-                    properties: None,
-                    required: None,
-                    additional_properties: None,
-                    items: None,
-                    minimum: None,
-                    maximum: None,
-                    min_length: None,
-                    max_length: None,
-                    pattern: None,
-                    extra: BTreeMap::new(),
-                });
+            Schema::Reference { .. } | Schema::RecursiveRef { .. } | Schema::DynamicRef { .. } => {
                 &EMPTY_DETAILS
-            }
-            Schema::RecursiveRef { .. } => {
-                static EMPTY_DETAILS_RECURSIVE: Lazy<SchemaDetails> = Lazy::new(|| SchemaDetails {
-                    description: None,
-                    nullable: None,
-                    recursive_anchor: None,
-                    enum_values: None,
-                    format: None,
-                    default: None,
-                    const_value: None,
-                    properties: None,
-                    required: None,
-                    additional_properties: None,
-                    items: None,
-                    minimum: None,
-                    maximum: None,
-                    min_length: None,
-                    max_length: None,
-                    pattern: None,
-                    extra: BTreeMap::new(),
-                });
-                &EMPTY_DETAILS_RECURSIVE
             }
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
@@ -307,12 +290,13 @@ impl Schema {
             Schema::Typed { details, .. } => details,
             Schema::TypedMulti { details, .. } => details,
             Schema::Reference { .. } => {
-                // Cannot mutate reference details
                 panic!("Cannot get mutable details for reference schema")
             }
             Schema::RecursiveRef { .. } => {
-                // Cannot mutate recursive reference details
                 panic!("Cannot get mutable details for recursive reference schema")
+            }
+            Schema::DynamicRef { .. } => {
+                panic!("Cannot get mutable details for dynamic reference schema")
             }
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
@@ -483,6 +467,14 @@ pub struct PathItem {
     pub head: Option<Operation>,
     pub patch: Option<Operation>,
     pub trace: Option<Operation>,
+    /// 3.2 §"Path Item Object" — `QUERY` HTTP method (D1). Originally
+    /// proposed for safe, idempotent reads with a body.
+    pub query: Option<Operation>,
+    /// 3.2 §"Path Item Object" — extension map for HTTP methods beyond the
+    /// well-known ones (e.g. WebDAV's PROPFIND, SEARCH; LINK/UNLINK). Keys
+    /// are uppercase method names (D1).
+    #[serde(rename = "additionalOperations", default)]
+    pub additional_operations: Option<BTreeMap<String, Operation>>,
     pub parameters: Option<Vec<Parameter>>,
     #[serde(default)]
     pub servers: Option<Value>,
@@ -493,7 +485,8 @@ pub struct PathItem {
 }
 
 impl PathItem {
-    /// Get all operations in this path item
+    /// Get all operations in this path item, including 3.2's `query`
+    /// (D1) and any custom verbs declared in `additionalOperations`.
     pub fn operations(&self) -> Vec<(&str, &Operation)> {
         let mut ops = Vec::new();
         if let Some(ref op) = self.get {
@@ -519,6 +512,14 @@ impl PathItem {
         }
         if let Some(ref op) = self.trace {
             ops.push(("trace", op));
+        }
+        if let Some(ref op) = self.query {
+            ops.push(("query", op));
+        }
+        if let Some(map) = &self.additional_operations {
+            for (verb, op) in map {
+                ops.push((verb.as_str(), op));
+            }
         }
         ops
     }

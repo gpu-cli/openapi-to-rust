@@ -1,6 +1,5 @@
 # coverage: [objects.Path Item.fields.query]
-# fails_at: L0
-# reason: 3.2 added `query` HTTP method; PathItem struct has no field for it
+# reason: D1 — PathItem.query is typed; codegen emits a method that uses reqwest::Method::from_bytes("QUERY")
 openapi: 3.2.0
 info:
   title: Query Method Demo

@@ -1059,16 +1059,22 @@ impl SchemaAnalyzer {
                 dependencies.insert(target.clone());
                 SchemaType::Reference { target }
             }
-            Schema::RecursiveRef { recursive_ref, .. } => {
-                // Handle recursive references
+            Schema::RecursiveRef { recursive_ref, .. }
+            | Schema::DynamicRef {
+                dynamic_ref: recursive_ref,
+                ..
+            } => {
+                // Handle recursive / dynamic references. J1: full $dynamicRef
+                // resolution against $dynamicAnchor scopes is a follow-up; for
+                // now we treat them like recursive refs (self-reference when
+                // it's a fragment to the same schema, otherwise resolve via
+                // schema name).
                 if recursive_ref == "#" {
-                    // Self-reference to the current schema
                     dependencies.insert(schema_name.to_string());
                     SchemaType::Reference {
                         target: schema_name.to_string(),
                     }
                 } else {
-                    // Handle other recursive reference patterns
                     let target = self
                         .extract_schema_name(recursive_ref)
                         .unwrap_or(schema_name)
@@ -3191,6 +3197,7 @@ impl SchemaAnalyzer {
                     Some(&Discriminator {
                         property_name: disc_field,
                         mapping: None,
+                        default_mapping: None,
                         extensions: crate::extensions::Extensions::default(),
                     }),
                     context_name,

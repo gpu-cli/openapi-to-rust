@@ -868,10 +868,20 @@ impl CodeGenerator {
             "TRACE" => quote! {
                 self.http_client.request(reqwest::Method::TRACE, request_url)
             },
-            other => panic!(
-                "unsupported HTTP method `{other}` for operation `{}` ({})",
-                op.operation_id, op.method
-            ),
+            // D1: 3.2 `QUERY` verb + any custom verb from
+            // PathItem.additionalOperations. reqwest's Method::from_bytes
+            // accepts arbitrary uppercase tokens that match the RFC7230
+            // method grammar.
+            other => {
+                let upper = other.to_string();
+                quote! {
+                    self.http_client.request(
+                        reqwest::Method::from_bytes(#upper.as_bytes())
+                            .expect("invalid HTTP method"),
+                        request_url,
+                    )
+                }
+            }
         }
     }
 
