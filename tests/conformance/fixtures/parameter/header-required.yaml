@@ -1,6 +1,5 @@
 # coverage: [objects.Parameter.in.header]
-# fails_at: L3
-# reason: header parameters silently dropped at codegen time
+# reason: T1 wires header request parameters through codegen — required headers go on the wire
 openapi: 3.1.0
 info: { title: Header Param Demo, version: 1.0.0 }
 paths:

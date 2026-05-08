@@ -1,5 +1,6 @@
 ---
 source: tests/operation_extraction_test.rs
+assertion_line: 108
 expression: analysis.operations
 ---
 deleteItem:

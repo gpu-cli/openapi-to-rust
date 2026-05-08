@@ -97,7 +97,7 @@ pub struct DetectedPatterns {
 }
 
 /// Information about an OpenAPI operation
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct OperationInfo {
     /// Operation ID
     pub operation_id: String,
@@ -111,6 +111,9 @@ pub struct OperationInfo {
     pub description: Option<String>,
     /// Request body content type and schema (if any)
     pub request_body: Option<RequestBodyContent>,
+    /// Whether `requestBody.required` was true. Drives whether the generated
+    /// method takes a `Body` argument or `Option<Body>` (T11).
+    pub request_body_required: bool,
     /// Response schemas by status code
     pub response_schemas: BTreeMap<String, String>,
     /// Parameters (path, query, header)
@@ -639,19 +642,21 @@ impl SchemaAnalyzer {
     }
 
     fn extract_schemas(spec: &OpenApiSpec) -> Result<BTreeMap<String, Schema>> {
+        // OAS 3.1+ requires only one of `paths`, `webhooks`, or `components`.
+        // A document may legitimately have no `components.schemas` (e.g. a
+        // webhooks-only or paths-only spec). Return an empty map in that case
+        // and let downstream codegen handle "no types to emit" gracefully.
         let schemas = spec
             .components
             .as_ref()
-            .and_then(|c| c.schemas.as_ref())
-            .ok_or_else(|| {
-                GeneratorError::InvalidSchema("No schemas found in OpenAPI spec".to_string())
-            })?;
-
-        // Convert BTreeMap to BTreeMap for deterministic iteration order
+            .and_then(|c| c.schemas.as_ref());
         Ok(schemas
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default())
     }
 
     pub fn analyze(&mut self) -> Result<SchemaAnalysis> {
@@ -3516,6 +3521,16 @@ impl SchemaAnalyzer {
                         path_item.parameters.as_ref(),
                         analysis,
                     )?;
+                    // T6: detect operationId collisions instead of silently overwriting.
+                    // Per OAS 3.x §"Operation Object", operationId is unique among all
+                    // operations described in the document.
+                    if let Some(existing) = analysis.operations.get(&operation_id) {
+                        return Err(GeneratorError::InvalidSchema(format!(
+                            "duplicate operationId `{}` — first at `{} {}`, then at `{} {}`. \
+                             OpenAPI requires operationId to be unique across the document.",
+                            operation_id, existing.method, existing.path, method, path
+                        )));
+                    }
                     analysis.operations.insert(operation_id, op_info);
                 }
             }
@@ -3579,6 +3594,12 @@ impl SchemaAnalyzer {
             summary: operation.summary.clone(),
             description: operation.description.clone(),
             request_body: None,
+            // Per OAS 3.x §"Request Body Object", `required` defaults to false.
+            request_body_required: operation
+                .request_body
+                .as_ref()
+                .and_then(|rb| rb.required)
+                .unwrap_or(false),
             response_schemas: BTreeMap::new(),
             parameters: Vec::new(),
             supports_streaming: false, // Will be determined by StreamingConfig, not spec

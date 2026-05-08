@@ -1,5 +1,6 @@
 ---
 source: tests/operation_extraction_test.rs
+assertion_line: 145
 expression: analysis.operations
 ---
 getV0Servers:

@@ -1,5 +1,6 @@
 ---
 source: tests/operation_extraction_test.rs
+assertion_line: 51
 expression: analysis.operations
 ---
 createItem:

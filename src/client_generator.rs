@@ -567,11 +567,12 @@ impl CodeGenerator {
     /// Generate a single operation method
     fn generate_single_operation_method(&self, op: &OperationInfo) -> TokenStream {
         let method_name = self.get_method_name(op);
-        let http_method = self.get_http_method(op);
+        let http_method_call = self.http_method_call(op);
         let path = &op.path;
         let request_param = self.generate_request_param(op);
         let request_body = self.generate_request_body(op);
         let query_params = self.generate_query_params(op);
+        let header_params = self.generate_header_params(op);
         let response_type = self.get_response_type(op);
         let has_response_body = self.get_success_response_schema(op).is_some();
         let op_error_type = self.op_error_type_token(op);
@@ -587,11 +588,11 @@ impl CodeGenerator {
             ) -> Result<#response_type, ApiOpError<#op_error_type>> {
                 #url_construction
 
-                let mut req = self.http_client
-                    .#http_method(request_url)
+                let mut req = #http_method_call
                     #request_body;
 
                 #query_params
+                #header_params
 
                 // Add API key if configured
                 if let Some(api_key) = &self.api_key {
@@ -606,6 +607,52 @@ impl CodeGenerator {
                 let response = req.send().await?;
                 #error_handling
             }
+        }
+    }
+
+    /// Generate header-parameter handling. Emits `req = req.header(name, ...)`
+    /// for each `in: header` parameter — required headers unconditionally,
+    /// optional ones gated on `Some(_)`.
+    fn generate_header_params(&self, op: &OperationInfo) -> TokenStream {
+        let header_params: Vec<_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == "header")
+            .collect();
+        if header_params.is_empty() {
+            return quote! {};
+        }
+        let mut emit = Vec::new();
+        for param in header_params {
+            let param_name_snake = self.sanitize_param_name(&param.name);
+            let param_ident = Self::to_field_ident(&param_name_snake);
+            let header_name = &param.name;
+            if param.required {
+                if param.rust_type == "String" {
+                    emit.push(quote! {
+                        req = req.header(#header_name, #param_ident.as_ref());
+                    });
+                } else {
+                    emit.push(quote! {
+                        req = req.header(#header_name, #param_ident.to_string());
+                    });
+                }
+            } else if param.rust_type == "String" {
+                emit.push(quote! {
+                    if let Some(v) = #param_ident {
+                        req = req.header(#header_name, v.as_ref());
+                    }
+                });
+            } else {
+                emit.push(quote! {
+                    if let Some(v) = #param_ident {
+                        req = req.header(#header_name, v.to_string());
+                    }
+                });
+            }
+        }
+        quote! {
+            #(#emit)*
         }
     }
 
@@ -700,21 +747,32 @@ impl CodeGenerator {
         syn::Ident::new(&name, proc_macro2::Span::call_site())
     }
 
-    /// Get the HTTP method
-    fn get_http_method(&self, op: &OperationInfo) -> syn::Ident {
-        let method = match op.method.to_uppercase().as_str() {
-            "GET" => "get",
-            "POST" => "post",
-            "PUT" => "put",
-            "DELETE" => "delete",
-            "PATCH" => "patch",
-            _ => "get", // Default fallback
-        };
-
-        syn::Ident::new(method, proc_macro2::Span::call_site())
+    /// Build the request-builder expression for the operation's HTTP method.
+    /// Named reqwest methods (`.get`/`.post`/…) are used where available;
+    /// OPTIONS and TRACE go through `Client::request(Method::OPTIONS, _)` since
+    /// reqwest doesn't expose those as named methods.
+    fn http_method_call(&self, op: &OperationInfo) -> TokenStream {
+        match op.method.to_uppercase().as_str() {
+            "GET" => quote! { self.http_client.get(request_url) },
+            "POST" => quote! { self.http_client.post(request_url) },
+            "PUT" => quote! { self.http_client.put(request_url) },
+            "DELETE" => quote! { self.http_client.delete(request_url) },
+            "PATCH" => quote! { self.http_client.patch(request_url) },
+            "HEAD" => quote! { self.http_client.head(request_url) },
+            "OPTIONS" => quote! {
+                self.http_client.request(reqwest::Method::OPTIONS, request_url)
+            },
+            "TRACE" => quote! {
+                self.http_client.request(reqwest::Method::TRACE, request_url)
+            },
+            other => panic!(
+                "unsupported HTTP method `{other}` for operation `{}` ({})",
+                op.operation_id, op.method
+            ),
+        }
     }
 
-    /// Generate request parameters including path parameters, query parameters, and request body
+    /// Generate request parameters including path, query, header, and request body.
     fn generate_request_param(&self, op: &OperationInfo) -> TokenStream {
         let mut params = Vec::new();
 
@@ -744,26 +802,50 @@ impl CodeGenerator {
             }
         }
 
-        // Add request body parameter based on content type
+        // Add header parameters. Required headers are bare; optional ones are
+        // Option<T>. Per OAS 3.x §"Parameter Object", header names matching
+        // `Accept`, `Content-Type`, and `Authorization` are forbidden — those
+        // are described by other mechanisms — but we leave that validation to
+        // analysis.
+        for param in &op.parameters {
+            if param.location == "header" {
+                let param_name_snake = self.sanitize_param_name(&param.name);
+                let param_name = Self::to_field_ident(&param_name_snake);
+                let param_type = self.get_param_rust_type(param);
+                if param.required {
+                    params.push(quote! { #param_name: #param_type });
+                } else {
+                    params.push(quote! { #param_name: Option<#param_type> });
+                }
+            }
+        }
+
+        // Add request body parameter based on content type. Optional bodies
+        // (`requestBody.required` is false or absent) become `Option<T>` per T11.
         if let Some(ref rb) = op.request_body {
             use crate::analysis::RequestBodyContent;
-            match rb {
+            let required = op.request_body_required;
+            let body_type = match rb {
                 RequestBodyContent::Json { schema_name }
                 | RequestBodyContent::FormUrlEncoded { schema_name } => {
                     let rust_type_name = self.to_rust_type_name(schema_name);
                     let request_ident =
                         syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
-                    params.push(quote! { request: #request_ident });
+                    quote! { #request_ident }
                 }
-                RequestBodyContent::Multipart => {
-                    params.push(quote! { form: reqwest::multipart::Form });
-                }
-                RequestBodyContent::OctetStream => {
-                    params.push(quote! { body: Vec<u8> });
-                }
-                RequestBodyContent::TextPlain => {
-                    params.push(quote! { body: String });
-                }
+                RequestBodyContent::Multipart => quote! { reqwest::multipart::Form },
+                RequestBodyContent::OctetStream => quote! { Vec<u8> },
+                RequestBodyContent::TextPlain => quote! { String },
+            };
+            let body_ident = match rb {
+                RequestBodyContent::Multipart => quote! { form },
+                RequestBodyContent::OctetStream | RequestBodyContent::TextPlain => quote! { body },
+                _ => quote! { request },
+            };
+            if required {
+                params.push(quote! { #body_ident: #body_type });
+            } else {
+                params.push(quote! { #body_ident: Option<#body_type> });
             }
         }
 
