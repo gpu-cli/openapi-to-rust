@@ -3686,11 +3686,26 @@ impl SchemaAnalyzer {
             // be unique, but real-world specs (arcade, cal-com, telnyx,
             // val-town, …) frequently aren't. Auto-disambiguate by suffixing
             // with the method, then a counter, and warn.
-            let operation_id = if analysis.operations.contains_key(&raw_operation_id) {
+            //
+            // The collision key is the PascalCased form so that case-only
+            // differences (telnyx has `getMdrUsageReports` AND
+            // `GetMdrUsageReports`) collide too — otherwise codegen would
+            // produce two `GetMdrUsageReportsApiError` enums in the same
+            // module.
+            use heck::ToPascalCase;
+            let canon = |s: &str| s.replace('.', "_").to_pascal_case();
+            let key_collides = |id: &str| -> bool {
+                let target = canon(id);
+                analysis
+                    .operations
+                    .keys()
+                    .any(|existing| canon(existing) == target)
+            };
+            let operation_id = if key_collides(&raw_operation_id) {
                 let method_lower = method.to_lowercase();
                 let mut candidate = format!("{}_{}", raw_operation_id, method_lower);
                 let mut suffix = 2;
-                while analysis.operations.contains_key(&candidate) {
+                while key_collides(&candidate) {
                     candidate = format!("{}_{}_{}", raw_operation_id, method_lower, suffix);
                     suffix += 1;
                 }

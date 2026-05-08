@@ -65,9 +65,9 @@ jobs:
       - run: |
           scripts/spec-compile.sh \
             anthropic arcade asana box browserbase cartesia cerebras circleci \
-            coda coingecko datadog-v2 digitalocean github gitpod \
+            coda coingecko datadog-v2 digitalocean gcore github gitpod \
             google-calendar google-drive google-gmail google-tasks google-youtube \
-            grafana groq imagekit increase launchdarkly letta luma meta-llama \
-            modern-treasury openai pagerduty perplexity resend retell runway \
-            sentry snyk spotify supabase terminal-shop together twilio val-town \
-            writer
+            grafana groq imagekit increase launchdarkly letta lithic luma \
+            meta-llama microsoft-graph modern-treasury openai pagerduty \
+            perplexity resend retell runway sentry snyk spotify stripe \
+            supabase telnyx terminal-shop together twilio val-town vercel writer

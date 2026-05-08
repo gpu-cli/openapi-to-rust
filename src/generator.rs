@@ -638,7 +638,7 @@ impl CodeGenerator {
                             nullable: false,
                         })
                         .collect();
-                    self.generate_union_enum(schema, &schema_refs)
+                    self.generate_union_enum(schema, &schema_refs, analysis)
                 } else {
                     self.generate_discriminated_enum(
                         schema,
@@ -648,7 +648,7 @@ impl CodeGenerator {
                     )
                 }
             }
-            SchemaType::Union { variants } => self.generate_union_enum(schema, variants),
+            SchemaType::Union { variants } => self.generate_union_enum(schema, variants, analysis),
             SchemaType::Reference { target } => {
                 // For references, check if we need to generate a type alias
                 // This handles cases like nullable patterns
@@ -868,12 +868,21 @@ impl CodeGenerator {
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
-        // Determine which variant should be the default
+        // Determine which variant should be the default. The spec's `default`
+        // may not exactly match any enum value (telnyx has
+        // `default: "en"` on a language enum that lists `en-US`, `en-AU`,
+        // … — no exact match). When that happens, drop the `Default` derive
+        // entirely instead of emitting it on an enum where no variant has
+        // `#[default]` (E0665).
         let default_value = schema
             .default
             .as_ref()
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let has_default_match = match &default_value {
+            Some(d) => values.iter().any(|v| v == d),
+            None => !values.is_empty(),
+        };
 
         // Variant-name uniqueness: enum values that PascalCase to the same
         // identifier (e.g. `ASC`/`asc` both → `Asc`) collide and produce
@@ -933,16 +942,23 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Generate derives with optional Specta support
-        let derives = if self.config.enable_specta {
-            quote! {
+        // Generate derives with optional Specta support. Drop `Default` if
+        // no variant ends up tagged `#[default]` (would trigger E0665).
+        let derives = match (self.config.enable_specta, has_default_match) {
+            (true, true) => quote! {
                 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
-            }
-        } else {
-            quote! {
+            },
+            (true, false) => quote! {
+                #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+                #[cfg_attr(feature = "specta", derive(specta::Type))]
+            },
+            (false, true) => quote! {
                 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-            }
+            },
+            (false, false) => quote! {
+                #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+            },
         };
 
         Ok(quote! {
@@ -1119,19 +1135,31 @@ impl CodeGenerator {
                     nullable: false,
                 })
                 .collect();
-            return self.generate_union_enum(schema, &schema_refs);
+            return self.generate_union_enum(schema, &schema_refs, analysis);
         }
 
+        let enclosing = self.to_rust_type_name(&schema.name);
         let enum_variants = variants.iter().map(|variant| {
             let variant_name = format_ident!("{}", variant.rust_name);
             let variant_value = &variant.discriminator_value;
 
-            // Always use tuple variant that references the existing type
-            // This ensures the standalone event types are actually used
             let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.type_name));
+            // Box variant payloads that point at the enclosing enum or any
+            // schema in the analysis's recursive set, otherwise the enum has
+            // infinite size (E0072).
+            let payload = if self.to_rust_type_name(&variant.type_name) == enclosing
+                || analysis
+                    .dependencies
+                    .recursive_schemas
+                    .contains(&variant.type_name)
+            {
+                quote! { Box<#variant_type> }
+            } else {
+                quote! { #variant_type }
+            };
             quote! {
                 #[serde(rename = #variant_value)]
-                #variant_name(#variant_type),
+                #variant_name(#payload),
             }
         });
 
@@ -1224,6 +1252,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         variants: &[crate::analysis::SchemaRef],
+        analysis: &crate::analysis::SchemaAnalysis,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -1332,7 +1361,15 @@ impl CodeGenerator {
             // break the cycle. Observed in microsoft-graph.yaml.
             let target_rust_name = self.to_rust_type_name(&variant.target);
             let enclosing_name = self.to_rust_type_name(&schema.name);
-            let variant_type_tokens = if target_rust_name == enclosing_name {
+            let is_self_ref = target_rust_name == enclosing_name;
+            // Indirect cycles (stripe BankAccount → BankAccountCustomer →
+            // Customer → BankAccountCustomer): variants pointing into the
+            // analysis's recursive_schemas set must also be heap-allocated.
+            let is_recursive_target = analysis
+                .dependencies
+                .recursive_schemas
+                .contains(&variant.target);
+            let variant_type_tokens = if is_self_ref || is_recursive_target {
                 quote! { Box<#variant_type_tokens> }
             } else {
                 variant_type_tokens
@@ -1803,6 +1840,40 @@ impl CodeGenerator {
             result = format!("Type{result}");
         }
 
+        // Avoid masking ubiquitous std types and traits. cloudflare has a
+        // schema literally named `Result`, gcore has `Default`; emitting
+        // `pub enum Result { ... }` shadows std::result::Result and breaks
+        // every method's `-> Result<T, ApiOpError<...>>`. Same for impls
+        // like `impl Default for HttpClient { ... }` when `Default` resolves
+        // to the local type alias.
+        if matches!(
+            result.as_str(),
+            "Result"
+                | "Option"
+                | "Box"
+                | "Vec"
+                | "String"
+                | "Some"
+                | "None"
+                | "Ok"
+                | "Err"
+                | "Default"
+                | "Clone"
+                | "Debug"
+                | "Send"
+                | "Sync"
+                | "Sized"
+                | "Iterator"
+                | "From"
+                | "Into"
+                | "TryFrom"
+                | "TryInto"
+                | "AsRef"
+                | "AsMut"
+        ) {
+            result.push_str("Type");
+        }
+
         result
     }
 
@@ -1931,6 +2002,8 @@ impl CodeGenerator {
                 | "unsized"
                 | "virtual"
                 | "yield"
+                // Rust 2024 edition reservations.
+                | "gen"
         )
     }
 
