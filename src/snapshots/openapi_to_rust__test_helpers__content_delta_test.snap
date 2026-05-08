@@ -32,6 +32,23 @@ pub enum CreateChatCompletionStreamResponseObject {
     #[serde(rename = "chat.completion.chunk")]
     ChatCompletionChunk,
 }
+impl CreateChatCompletionStreamResponseObject {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ChatCompletionChunk => "chat.completion.chunk",
+        }
+    }
+}
+impl ::std::fmt::Display for CreateChatCompletionStreamResponseObject {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for CreateChatCompletionStreamResponseObject {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateChatCompletionStreamResponseChoicesItem {
     pub delta: ChatCompletionStreamResponseDelta,
@@ -67,6 +84,27 @@ pub enum CreateChatCompletionStreamResponseFinishReason {
     #[serde(rename = "function_call")]
     FunctionCall,
 }
+impl CreateChatCompletionStreamResponseFinishReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+            Self::FunctionCall => "function_call",
+        }
+    }
+}
+impl ::std::fmt::Display for CreateChatCompletionStreamResponseFinishReason {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for CreateChatCompletionStreamResponseFinishReason {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionTokenLogprob {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,4 +132,25 @@ pub enum ChatCompletionStreamResponseDeltaRole {
     Assistant,
     #[serde(rename = "tool")]
     Tool,
+}
+impl ChatCompletionStreamResponseDeltaRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Developer => "developer",
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+        }
+    }
+}
+impl ::std::fmt::Display for ChatCompletionStreamResponseDeltaRole {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ChatCompletionStreamResponseDeltaRole {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }

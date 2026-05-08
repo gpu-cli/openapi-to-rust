@@ -46,3 +46,15 @@ jobs:
       - run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Regression guard: generate clients for our reference specs (Anthropic +
+  # OpenAI) and `cargo check` the result. Catches breakage where a generator
+  # change still passes unit tests but emits invalid Rust against real-world
+  # OAS documents. See scripts/spec-compile.sh.
+  spec-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/spec-compile.sh

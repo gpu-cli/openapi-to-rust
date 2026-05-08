@@ -24,3 +24,20 @@ pub enum AssistantMessageRole {
     #[serde(rename = "assistant")]
     Assistant,
 }
+impl AssistantMessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Assistant => "assistant",
+        }
+    }
+}
+impl ::std::fmt::Display for AssistantMessageRole {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for AssistantMessageRole {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}

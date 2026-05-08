@@ -27,15 +27,68 @@ pub enum SimpleMessageStatus {
     #[serde(rename = "pending")]
     Pending,
 }
+impl SimpleMessageStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+            Self::Pending => "pending",
+        }
+    }
+}
+impl ::std::fmt::Display for SimpleMessageStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for SimpleMessageStatus {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum SimpleMessageRole {
     #[default]
     #[serde(rename = "assistant")]
     Assistant,
 }
+impl SimpleMessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Assistant => "assistant",
+        }
+    }
+}
+impl ::std::fmt::Display for SimpleMessageRole {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for SimpleMessageRole {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum RoleEnum {
     #[default]
     #[serde(rename = "assistant")]
     Assistant,
+}
+impl RoleEnum {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Assistant => "assistant",
+        }
+    }
+}
+impl ::std::fmt::Display for RoleEnum {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for RoleEnum {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }

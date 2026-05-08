@@ -22,3 +22,20 @@ pub enum ConstModifierSomeConstant {
     #[serde(rename = "TheOnlyValidValue")]
     TheOnlyValidValue,
 }
+impl ConstModifierSomeConstant {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TheOnlyValidValue => "TheOnlyValidValue",
+        }
+    }
+}
+impl ::std::fmt::Display for ConstModifierSomeConstant {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ConstModifierSomeConstant {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}

@@ -31,6 +31,25 @@ pub enum TaskType {
     #[serde(rename = "deploy")]
     Deploy,
 }
+impl TaskType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Build => "build",
+            Self::Test => "test",
+            Self::Deploy => "deploy",
+        }
+    }
+}
+impl ::std::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for TaskType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///Task status
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum TaskStatus {
@@ -44,6 +63,26 @@ pub enum TaskStatus {
     #[serde(rename = "failed")]
     Failed,
 }
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+impl ::std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for TaskStatus {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 ///Task priority
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum TaskPriority {
@@ -56,4 +95,24 @@ pub enum TaskPriority {
     High,
     #[serde(rename = "critical")]
     Critical,
+}
+impl TaskPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+}
+impl ::std::fmt::Display for TaskPriority {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for TaskPriority {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }

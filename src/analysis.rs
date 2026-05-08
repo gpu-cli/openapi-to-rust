@@ -3860,6 +3860,30 @@ impl SchemaAnalyzer {
     /// when the parameter's inline schema is a string with `enum` or `const`
     /// (e.g. `GetItemTheConstant`). The client generator emits the enum
     /// alongside the operation methods. See issue #10 follow-up.
+    /// Look up `#/components/schemas/{name}` in the raw OpenAPI document and
+    /// decide whether it's a string with enum values. Used by analyze_parameter
+    /// (T10) so that only string-enum refs flow through to the codegen-typed
+    /// parameter path; struct/object refs stay as `String` until we have
+    /// proper deepObject / form-style query serialization (T14).
+    fn referenced_schema_is_string_enum(&self, name: &str) -> bool {
+        let Some(schema_value) = self
+            .openapi_spec
+            .get("components")
+            .and_then(|c| c.get("schemas"))
+            .and_then(|s| s.get(name))
+        else {
+            return false;
+        };
+        let is_string_type = schema_value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "string")
+            .unwrap_or(false);
+        let has_enum_or_const =
+            schema_value.get("enum").is_some() || schema_value.get("const").is_some();
+        is_string_type && has_enum_or_const
+    }
+
     fn analyze_parameter(
         &self,
         param: &crate::openapi::Parameter,
@@ -3877,7 +3901,17 @@ impl SchemaAnalyzer {
 
         if let Some(schema) = &param.schema {
             if let Some(ref_str) = schema.reference() {
-                schema_ref = self.extract_schema_name(ref_str).map(|s| s.to_string());
+                // T10: keep the resolved type when the target is a string-enum
+                // (then `Display`/`as_str` are emitted, see generate_string_enum).
+                // For struct/object refs we fall back to `String` here — those
+                // need deepObject / form / serde_urlencoded handling that's
+                // not yet generated; emitting the typed name would produce
+                // `(struct).to_string()` and not compile.
+                if let Some(name) = self.extract_schema_name(ref_str) {
+                    if self.referenced_schema_is_string_enum(name) {
+                        schema_ref = Some(name.to_string());
+                    }
+                }
             } else if let Some(schema_type) = schema.schema_type() {
                 rust_type = match schema_type {
                     crate::openapi::SchemaType::Boolean => "bool",
