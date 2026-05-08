@@ -1,5 +1,5 @@
 # coverage: [objects.Components.fields.mediaTypes]
-# fails_at: L0
+# fails_at: L3
 # reason: 3.2-only Components bucket, not modeled
 openapi: 3.2.0
 info: { title: MediaTypes Component Demo, version: 1.0.0 }

@@ -31,8 +31,8 @@ fixtures = ["pathitem/query-method-3.2.yaml"]
 
 [[entry]]
 catalog_ref = "objects.Parameter.style.deepObject"
-status = "unsupported"
-reason = "no style/explode handling; analysis.rs:3767 collapses array/object params to String"
+status = "partial"
+reason = "F1 typed style/explode/allowReserved on Parameter; codegen at analysis.rs:3767 still ignores them"
 fixtures = ["parameter/deepobject-query.yaml"]
 
 [[entry]]

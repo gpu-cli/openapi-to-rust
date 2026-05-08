@@ -214,26 +214,26 @@ fn run(fixture: &Fixture) -> Outcome {
 /// `extra: BTreeMap<String, Value>`. Any such key represents a spec-defined
 /// field the parser dropped because the struct doesn't model it.
 fn collect_extras(spec: &OpenApiSpec, out: &mut Vec<ExtraField>) {
-    push_extras("$", &spec.extra, out);
-    push_extras("$.info", &spec.info.extra, out);
+    push_extras("$", &spec.extensions, out);
+    push_extras("$.info", &spec.info.extensions, out);
     if let Some(c) = &spec.components {
-        push_extras("$.components", &c.extra, out);
+        push_extras("$.components", &c.extensions, out);
     }
     for (path, item) in spec.paths.iter().flatten() {
         let loc = format!("$.paths[{}]", path);
-        push_extras(&loc, &item.extra, out);
+        push_extras(&loc, &item.extensions, out);
         for (method, op) in item.operations() {
             let op_loc = format!("$.paths[{}].{}", path, method);
-            push_extras(&op_loc, &op.extra, out);
+            push_extras(&op_loc, &op.extensions, out);
             for (i, p) in op.parameters.iter().flatten().enumerate() {
-                push_extras(&format!("{}.parameters[{}]", op_loc, i), &p.extra, out);
+                push_extras(&format!("{}.parameters[{}]", op_loc, i), &p.extensions, out);
             }
             if let Some(rb) = &op.request_body {
-                push_extras(&format!("{}.requestBody", op_loc), &rb.extra, out);
+                push_extras(&format!("{}.requestBody", op_loc), &rb.extensions, out);
                 for (ct, mt) in rb.content.iter().flatten() {
                     push_extras(
                         &format!("{}.requestBody.content[{}]", op_loc, ct),
-                        &mt.extra,
+                        &mt.extensions,
                         out,
                     );
                 }
@@ -241,13 +241,13 @@ fn collect_extras(spec: &OpenApiSpec, out: &mut Vec<ExtraField>) {
             for (status, resp) in op.responses.iter().flatten() {
                 push_extras(
                     &format!("{}.responses[{}]", op_loc, status),
-                    &resp.extra,
+                    &resp.extensions,
                     out,
                 );
                 for (ct, mt) in resp.content.iter().flatten() {
                     push_extras(
                         &format!("{}.responses[{}].content[{}]", op_loc, status, ct),
-                        &mt.extra,
+                        &mt.extensions,
                         out,
                     );
                 }

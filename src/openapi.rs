@@ -1,3 +1,4 @@
+use crate::extensions::Extensions;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,27 +8,76 @@ use std::collections::BTreeMap;
 pub struct OpenApiSpec {
     pub openapi: String,
     pub info: Info,
+    #[serde(rename = "jsonSchemaDialect", default)]
+    pub json_schema_dialect: Option<String>,
+    #[serde(default)]
+    pub servers: Option<Value>,
+    #[serde(default)]
     pub paths: Option<BTreeMap<String, PathItem>>,
+    #[serde(default)]
+    pub webhooks: Option<BTreeMap<String, PathItem>>,
+    #[serde(default)]
     pub components: Option<Components>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub security: Option<Value>,
+    #[serde(default)]
+    pub tags: Option<Value>,
+    #[serde(rename = "externalDocs", default)]
+    pub external_docs: Option<Value>,
+    /// 3.2 §"$self" — see Appendix F base-URI rules. Captured but not yet used.
+    #[serde(rename = "$self", default)]
+    pub self_uri: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
     pub title: String,
     #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "termsOfService", default)]
+    pub terms_of_service: Option<String>,
+    #[serde(default)]
+    pub contact: Option<Value>,
+    #[serde(default)]
+    pub license: Option<Value>,
+    #[serde(default)]
     pub version: Option<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Components {
+    #[serde(default)]
     pub schemas: Option<BTreeMap<String, Schema>>,
+    #[serde(default)]
+    pub responses: Option<BTreeMap<String, Response>>,
+    #[serde(default)]
     pub parameters: Option<BTreeMap<String, Parameter>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub examples: Option<BTreeMap<String, Value>>,
+    #[serde(rename = "requestBodies", default)]
+    pub request_bodies: Option<BTreeMap<String, RequestBody>>,
+    #[serde(default)]
+    pub headers: Option<BTreeMap<String, Value>>,
+    #[serde(rename = "securitySchemes", default)]
+    pub security_schemes: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    pub links: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    pub callbacks: Option<BTreeMap<String, Value>>,
+    /// 3.1+ §Components — reusable Path Items.
+    #[serde(rename = "pathItems", default)]
+    pub path_items: Option<BTreeMap<String, PathItem>>,
+    /// 3.2 §Components — reusable Media Types.
+    #[serde(rename = "mediaTypes", default)]
+    pub media_types: Option<BTreeMap<String, MediaType>>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -153,8 +203,8 @@ pub struct Discriminator {
     #[serde(rename = "propertyName")]
     pub property_name: String,
     pub mapping: Option<BTreeMap<String, String>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 impl Schema {
@@ -386,28 +436,28 @@ impl SchemaDetails {
     }
 }
 
-/// OpenAPI Path Item Object  
+/// OpenAPI Path Item Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PathItem {
-    #[serde(rename = "get")]
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub get: Option<Operation>,
-    #[serde(rename = "put")]
     pub put: Option<Operation>,
-    #[serde(rename = "post")]
     pub post: Option<Operation>,
-    #[serde(rename = "delete")]
     pub delete: Option<Operation>,
-    #[serde(rename = "options")]
     pub options: Option<Operation>,
-    #[serde(rename = "head")]
     pub head: Option<Operation>,
-    #[serde(rename = "patch")]
     pub patch: Option<Operation>,
-    #[serde(rename = "trace")]
     pub trace: Option<Operation>,
     pub parameters: Option<Vec<Parameter>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub servers: Option<Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 impl PathItem {
@@ -445,39 +495,79 @@ impl PathItem {
 /// OpenAPI Operation Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Operation {
-    #[serde(rename = "operationId")]
+    #[serde(rename = "operationId", default)]
     pub operation_id: Option<String>,
+    #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub deprecated: Option<bool>,
     pub parameters: Option<Vec<Parameter>>,
     #[serde(rename = "requestBody")]
     pub request_body: Option<RequestBody>,
     pub responses: Option<BTreeMap<String, Response>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub callbacks: Option<Value>,
+    #[serde(default)]
+    pub security: Option<Value>,
+    #[serde(default)]
+    pub servers: Option<Value>,
+    #[serde(rename = "externalDocs", default)]
+    pub external_docs: Option<Value>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 /// OpenAPI Parameter Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Parameter {
+    #[serde(default)]
     pub name: Option<String>,
-    #[serde(rename = "in")]
+    #[serde(rename = "in", default)]
     pub location: Option<String>,
+    #[serde(default)]
     pub required: Option<bool>,
+    #[serde(default)]
+    pub deprecated: Option<bool>,
+    #[serde(rename = "allowEmptyValue", default)]
+    pub allow_empty_value: Option<bool>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub explode: Option<bool>,
+    #[serde(rename = "allowReserved", default)]
+    pub allow_reserved: Option<bool>,
+    #[serde(default)]
     pub schema: Option<Schema>,
+    #[serde(default)]
+    pub content: Option<BTreeMap<String, MediaType>>,
+    #[serde(default)]
+    pub example: Option<Value>,
+    #[serde(default)]
+    pub examples: Option<Value>,
+    #[serde(default)]
     pub description: Option<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 /// OpenAPI Request Body Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequestBody {
     pub content: Option<BTreeMap<String, MediaType>>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub required: Option<bool>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 /// Returns true for media types whose payload is JSON.
@@ -564,10 +654,18 @@ impl RequestBody {
 /// OpenAPI Response Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Response {
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub headers: Option<Value>,
+    #[serde(default)]
     pub content: Option<BTreeMap<String, MediaType>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub links: Option<Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 impl Response {
@@ -588,9 +686,18 @@ impl Response {
 /// OpenAPI Media Type Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MediaType {
+    #[serde(default)]
     pub schema: Option<Schema>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub example: Option<Value>,
+    #[serde(default)]
+    pub examples: Option<Value>,
+    #[serde(default)]
+    pub encoding: Option<Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[cfg(test)]

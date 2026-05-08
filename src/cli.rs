@@ -106,6 +106,40 @@ pub async fn run_generation_cli(cli_config: CliConfig) {
         }
     };
 
+    // Version gate: surface unsupported OAS major.minor early. We support
+    // 3.0.x and 3.1.x first-class; 3.2.x parses (extensions on the spec model
+    // capture the new fields), but several 3.2-only behaviors are still TODO,
+    // so warn loudly. See https://github.com/gpu-cli/openapi-to-rust/issues/14.
+    let oas_version = spec_value
+        .get("openapi")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if let Some((major, minor)) = parse_oas_version(oas_version) {
+        match (major, minor) {
+            (3, 0) | (3, 1) => {}
+            (3, 2) => {
+                eprintln!(
+                    "⚠️  OpenAPI {oas_version}: 3.2 is experimentally supported. \
+                     Some 3.2-only features (additionalOperations, query method, \
+                     itemSchema, $self, defaultMapping) are not yet wired through codegen. \
+                     See issue #14 for status."
+                );
+            }
+            _ => {
+                eprintln!(
+                    "❌ Unsupported OpenAPI version: {oas_version}. \
+                     This generator targets 3.0.x, 3.1.x, and (experimentally) 3.2.x."
+                );
+                process::exit(1);
+            }
+        }
+    } else {
+        eprintln!(
+            "❌ Missing or unrecognised `openapi` field. Expected something like \"3.1.0\", got: {oas_version:?}"
+        );
+        process::exit(1);
+    }
+
     if verbose {
         if let Some(info) = spec_value.get("info") {
             if let Some(title) = info.get("title").and_then(|t| t.as_str()) {
@@ -236,6 +270,17 @@ async fn load_spec(input: &str, verbose: bool) -> Result<String, Box<dyn std::er
         let content = fs::read_to_string(input)?;
         Ok(content)
     }
+}
+
+/// Parse the `openapi` version string into (major, minor). Tolerates patch and
+/// build-metadata suffixes. Returns None for unrecognised input.
+fn parse_oas_version(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor_raw = parts.next()?;
+    let minor_digits: String = minor_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let minor = minor_digits.parse().ok()?;
+    Some((major, minor))
 }
 
 fn parse_spec(content: &str, input: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {

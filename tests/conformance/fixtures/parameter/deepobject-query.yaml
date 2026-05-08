@@ -1,6 +1,6 @@
 # coverage: [objects.Parameter.style.deepObject, objects.Parameter.in.query]
-# fails_at: L0
-# reason: style/explode not honored; object query params collapse to String
+# fails_at: L3
+# reason: style/explode are typed since F1, but codegen still collapses object query params to String
 openapi: 3.1.0
 info: { title: DeepObject Demo, version: 1.0.0 }
 paths:

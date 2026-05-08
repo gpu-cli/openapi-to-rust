@@ -3181,7 +3181,7 @@ impl SchemaAnalyzer {
                     Some(&Discriminator {
                         property_name: disc_field,
                         mapping: None,
-                        extra: BTreeMap::new(),
+                        extensions: crate::extensions::Extensions::default(),
                     }),
                     context_name,
                     dependencies,
@@ -3737,7 +3737,7 @@ impl SchemaAnalyzer {
         &'a self,
         param: &'a crate::openapi::Parameter,
     ) -> std::borrow::Cow<'a, crate::openapi::Parameter> {
-        if let Some(ref_str) = param.extra.get("$ref").and_then(|v| v.as_str()) {
+        if let Some(ref_str) = param.reference.as_deref() {
             if let Some(param_name) = ref_str.strip_prefix("#/components/parameters/") {
                 if let Some(resolved) = self.component_parameters.get(param_name) {
                     return std::borrow::Cow::Borrowed(resolved);
