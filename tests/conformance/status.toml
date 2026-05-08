@@ -43,8 +43,8 @@ fixtures = ["parameter/header-required.yaml"]
 
 [[entry]]
 catalog_ref = "objects.Schema.type[array]"
-status = "unsupported"
-reason = "Schema::Typed carries one SchemaType, not Vec; 3.1 canonical type:[\"string\",\"null\"] falls to Untyped"
+status = "supported"
+reason = "F2: Schema::TypedMulti variant accepts type-as-array; nullable propagates to AnalyzedSchema"
 fixtures = ["schema/type-string-or-null.yaml"]
 
 [[entry]]

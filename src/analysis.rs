@@ -1041,7 +1041,8 @@ impl SchemaAnalyzer {
     ) -> Result<AnalyzedSchema> {
         let details = schema.details();
         let description = details.description.clone();
-        let nullable = details.is_nullable();
+        // Combine 3.0-style `nullable: true` with 3.1's `type: ["X", "null"]`.
+        let nullable = details.is_nullable() || schema.type_array_contains_null();
         let mut dependencies = HashSet::new();
 
         let schema_type = match schema {
@@ -1071,8 +1072,12 @@ impl SchemaAnalyzer {
                     SchemaType::Reference { target }
                 }
             }
-            Schema::Typed { schema_type, .. } => {
-                match schema_type {
+            Schema::Typed { .. } | Schema::TypedMulti { .. } => {
+                let primary = schema
+                    .schema_type()
+                    .cloned()
+                    .unwrap_or(OpenApiSchemaType::Object);
+                match primary {
                     OpenApiSchemaType::String => {
                         if let Some(values) = details.string_enum_values() {
                             SchemaType::StringEnum { values }

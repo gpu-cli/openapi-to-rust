@@ -1,6 +1,5 @@
 # coverage: [objects.Schema.type[array]]
-# fails_at: L3
-# reason: 3.1 canonical nullability — Schema::Typed accepts only single SchemaType
+# reason: F2 added Schema::TypedMulti; type:["string","null"] now parses + nullable propagates to AnalyzedSchema
 openapi: 3.1.0
 info: { title: Nullable Demo, version: 1.0.0 }
 components:

@@ -115,7 +115,17 @@ pub enum Schema {
         #[serde(flatten)]
         details: SchemaDetails,
     },
-    /// Schema with explicit type
+    /// Schema with `type` as an array (OpenAPI 3.1 / JSON Schema 2020-12).
+    /// The canonical 3.1 way to express a nullable type is
+    /// `type: ["string", "null"]`. Listed before `Typed` so the array form
+    /// matches first.
+    TypedMulti {
+        #[serde(rename = "type")]
+        schema_types: Vec<SchemaType>,
+        #[serde(flatten)]
+        details: SchemaDetails,
+    },
+    /// Schema with a single explicit type
     Typed {
         #[serde(rename = "type")]
         schema_type: SchemaType,
@@ -208,11 +218,30 @@ pub struct Discriminator {
 }
 
 impl Schema {
-    /// Get the schema type if explicitly set
+    /// Get the schema type if explicitly set. For `Schema::TypedMulti` the
+    /// "primary" non-null type is returned; if the array contained only `null`
+    /// then `Some(&SchemaType::Null)` is returned.
     pub fn schema_type(&self) -> Option<&SchemaType> {
         match self {
             Schema::Typed { schema_type, .. } => Some(schema_type),
+            Schema::TypedMulti { schema_types, .. } => {
+                schema_types
+                    .iter()
+                    .find(|t| **t != SchemaType::Null)
+                    .or_else(|| schema_types.first())
+            }
             _ => None,
+        }
+    }
+
+    /// True when the schema's type set explicitly contains `null`.
+    /// (3.1 canonical nullability via `type: ["X", "null"]`.)
+    pub fn type_array_contains_null(&self) -> bool {
+        match self {
+            Schema::TypedMulti { schema_types, .. } => {
+                schema_types.iter().any(|t| *t == SchemaType::Null)
+            }
+            _ => false,
         }
     }
 
@@ -220,6 +249,7 @@ impl Schema {
     pub fn details(&self) -> &SchemaDetails {
         match self {
             Schema::Typed { details, .. } => details,
+            Schema::TypedMulti { details, .. } => details,
             Schema::Reference { .. } => {
                 static EMPTY_DETAILS: Lazy<SchemaDetails> = Lazy::new(|| SchemaDetails {
                     description: None,
@@ -275,6 +305,7 @@ impl Schema {
     pub fn details_mut(&mut self) -> &mut SchemaDetails {
         match self {
             Schema::Typed { details, .. } => details,
+            Schema::TypedMulti { details, .. } => details,
             Schema::Reference { .. } => {
                 // Cannot mutate reference details
                 panic!("Cannot get mutable details for reference schema")
@@ -370,6 +401,7 @@ impl Schema {
     pub fn inferred_type(&self) -> Option<SchemaType> {
         match self {
             Schema::Typed { schema_type, .. } => Some(schema_type.clone()),
+            Schema::TypedMulti { .. } => self.schema_type().cloned(),
             Schema::Untyped { details } => {
                 // Infer from structure
                 if details.properties.is_some() {
