@@ -28,3 +28,22 @@ pub enum MessageRole {
     #[serde(rename = "system")]
     System,
 }
+impl MessageRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+        }
+    }
+}
+impl ::std::fmt::Display for MessageRole {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for MessageRole {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}

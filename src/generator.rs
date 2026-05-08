@@ -859,30 +859,43 @@ impl CodeGenerator {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let variants = values.iter().enumerate().map(|(i, value)| {
-            // Convert string value to valid Rust enum variant (PascalCase)
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let variant_pairs: Vec<(syn::Ident, &String, bool)> = values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                let variant_name = self.to_rust_enum_variant(value);
+                let variant_ident = format_ident!("{}", variant_name);
+                let is_default = if let Some(ref default) = default_value {
+                    value == default
+                } else {
+                    i == 0
+                };
+                (variant_ident, value, is_default)
+            })
+            .collect();
 
-            // Check if this variant should be the default
-            let is_default = if let Some(ref default) = default_value {
-                value == default
-            } else {
-                i == 0 // Fall back to first variant if no default specified
-            };
+        let variants = variant_pairs
+            .iter()
+            .map(|(variant_ident, value, is_default)| {
+                if *is_default {
+                    quote! {
+                        #[default]
+                        #[serde(rename = #value)]
+                        #variant_ident,
+                    }
+                } else {
+                    quote! {
+                        #[serde(rename = #value)]
+                        #variant_ident,
+                    }
+                }
+            });
 
-            if is_default {
-                quote! {
-                    #[default]
-                    #[serde(rename = #value)]
-                    #variant_ident,
-                }
-            } else {
-                quote! {
-                    #[serde(rename = #value)]
-                    #variant_ident,
-                }
-            }
+        // T13/T10: emit `as_str` and `Display` so the enum can be embedded in
+        // query strings, headers, and path segments without requiring callers
+        // to reach for `serde_json` round-trips.
+        let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _)| {
+            quote! { Self::#variant_ident => #value, }
         });
 
         let doc_comment = if let Some(desc) = &schema.description {
@@ -908,6 +921,26 @@ impl CodeGenerator {
             #derives
             pub enum #enum_name {
                 #(#variants)*
+            }
+
+            impl #enum_name {
+                pub fn as_str(&self) -> &'static str {
+                    match self {
+                        #(#as_str_arms)*
+                    }
+                }
+            }
+
+            impl ::std::fmt::Display for #enum_name {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    f.write_str(self.as_str())
+                }
+            }
+
+            impl AsRef<str> for #enum_name {
+                fn as_ref(&self) -> &str {
+                    self.as_str()
+                }
             }
         })
     }

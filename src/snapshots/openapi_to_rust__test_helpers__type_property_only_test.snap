@@ -21,3 +21,20 @@ pub enum TypedEventType {
     #[serde(rename = "event.created")]
     EventCreated,
 }
+impl TypedEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EventCreated => "event.created",
+        }
+    }
+}
+impl ::std::fmt::Display for TypedEventType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for TypedEventType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}

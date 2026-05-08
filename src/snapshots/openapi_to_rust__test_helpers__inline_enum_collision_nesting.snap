@@ -26,6 +26,23 @@ pub enum PlanDataTypePlans {
     #[serde(rename = "plans")]
     Plans,
 }
+impl PlanDataTypePlans {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plans => "plans",
+        }
+    }
+}
+impl ::std::fmt::Display for PlanDataTypePlans {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for PlanDataTypePlans {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlanDataAttributes {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,4 +67,23 @@ pub enum PlanDataType {
     Hdd,
     #[serde(rename = "NVME")]
     Nvme,
+}
+impl PlanDataType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ssd => "SSD",
+            Self::Hdd => "HDD",
+            Self::Nvme => "NVME",
+        }
+    }
+}
+impl ::std::fmt::Display for PlanDataType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for PlanDataType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }

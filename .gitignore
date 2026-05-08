@@ -1,4 +1,9 @@
 /target
+**/target/
+# Build outputs from spec-compile.sh and ad-hoc generator runs.
+/tmp/spec-compile/
+/tmp/gen-anthropic/
+/tmp/gen-openai/
 *.swp
 *.swo
 *~

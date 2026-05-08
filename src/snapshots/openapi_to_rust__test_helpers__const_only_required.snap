@@ -21,3 +21,20 @@ pub enum RequiredConstKind {
     #[serde(rename = "fixed")]
     Fixed,
 }
+impl RequiredConstKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+        }
+    }
+}
+impl ::std::fmt::Display for RequiredConstKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for RequiredConstKind {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}

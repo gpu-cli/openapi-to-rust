@@ -611,8 +611,8 @@ impl CodeGenerator {
             ) -> Result<#response_type, ApiOpError<#op_error_type>> {
                 #url_construction
 
-                let mut req = #http_method_call
-                    #request_body;
+                let mut req = #http_method_call;
+                #request_body
 
                 #query_params
                 #header_params
@@ -706,7 +706,7 @@ impl CodeGenerator {
             let param_ident = Self::to_field_ident(&param_name_snake);
             let header_name = &param.name;
             if param.required {
-                if param.rust_type == "String" {
+                if Self::param_uses_as_ref_str(param) {
                     emit.push(quote! {
                         req = req.header(#header_name, #param_ident.as_ref());
                     });
@@ -715,7 +715,7 @@ impl CodeGenerator {
                         req = req.header(#header_name, #param_ident.to_string());
                     });
                 }
-            } else if param.rust_type == "String" {
+            } else if Self::param_uses_as_ref_str(param) {
                 emit.push(quote! {
                     if let Some(v) = #param_ident {
                         req = req.header(#header_name, v.as_ref());
@@ -758,7 +758,7 @@ impl CodeGenerator {
 
             if param.required {
                 // Required parameters: always add
-                if param.rust_type == "String" {
+                if Self::param_uses_as_ref_str(param) {
                     param_building.push(quote! {
                         query_params.push((#param_key, #param_name.as_ref().to_string()));
                     });
@@ -769,7 +769,7 @@ impl CodeGenerator {
                 }
             } else {
                 // Optional parameters: add only if Some
-                if param.rust_type == "String" {
+                if Self::param_uses_as_ref_str(param) {
                     param_building.push(quote! {
                         if let Some(v) = #param_name {
                             query_params.push((#param_key, v.as_ref().to_string()));
@@ -993,43 +993,72 @@ impl CodeGenerator {
         }
     }
 
+    /// True when the parameter's compile-time type is `impl AsRef<str>` and
+    /// we should call `.as_ref()` on it before stringifying. False for any
+    /// $ref-resolved type (T10) or non-String primitive — those just call
+    /// `.to_string()`.
+    fn param_uses_as_ref_str(param: &crate::analysis::ParameterInfo) -> bool {
+        param.schema_ref.is_none() && param.rust_type == "String"
+    }
+
     /// Generate request body serialization based on content type
+    /// Emit statements that mutate `req` to apply the request body. Returns
+    /// `quote!{}` if the operation has no body. Optional bodies (T11) gate the
+    /// application on `Some(_)`; required bodies apply unconditionally.
     fn generate_request_body(&self, op: &OperationInfo) -> TokenStream {
-        if let Some(ref rb) = op.request_body {
-            use crate::analysis::RequestBodyContent;
-            match rb {
-                RequestBodyContent::Json { .. } => {
-                    quote! {
+        let Some(rb) = op.request_body.as_ref() else {
+            return quote! {};
+        };
+        use crate::analysis::RequestBodyContent;
+        let required = op.request_body_required;
+        let (ident, apply): (TokenStream, TokenStream) = match rb {
+            RequestBodyContent::Json { .. } => (
+                quote! { request },
+                quote! {
+                    req = req
                         .body(serde_json::to_vec(&request).map_err(HttpError::serialization_error)?)
-                        .header("content-type", "application/json")
-                    }
-                }
-                RequestBodyContent::FormUrlEncoded { .. } => {
-                    quote! {
+                        .header("content-type", "application/json");
+                },
+            ),
+            RequestBodyContent::FormUrlEncoded { .. } => (
+                quote! { request },
+                quote! {
+                    req = req
                         .body(serde_urlencoded::to_string(&request).map_err(HttpError::serialization_error)?)
-                        .header("content-type", "application/x-www-form-urlencoded")
-                    }
-                }
-                RequestBodyContent::Multipart => {
-                    quote! {
-                        .multipart(form)
-                    }
-                }
-                RequestBodyContent::OctetStream => {
-                    quote! {
+                        .header("content-type", "application/x-www-form-urlencoded");
+                },
+            ),
+            RequestBodyContent::Multipart => (
+                quote! { form },
+                quote! {
+                    req = req.multipart(form);
+                },
+            ),
+            RequestBodyContent::OctetStream => (
+                quote! { body },
+                quote! {
+                    req = req
                         .body(body)
-                        .header("content-type", "application/octet-stream")
-                    }
-                }
-                RequestBodyContent::TextPlain => {
-                    quote! {
+                        .header("content-type", "application/octet-stream");
+                },
+            ),
+            RequestBodyContent::TextPlain => (
+                quote! { body },
+                quote! {
+                    req = req
                         .body(body)
-                        .header("content-type", "text/plain")
-                    }
+                        .header("content-type", "text/plain");
+                },
+            ),
+        };
+        if required {
+            apply
+        } else {
+            quote! {
+                if let Some(#ident) = #ident {
+                    #apply
                 }
             }
-        } else {
-            quote! {}
         }
     }
 
@@ -1258,7 +1287,7 @@ impl CodeGenerator {
                 let param_name_snake = self.sanitize_param_name(&param.name);
                 let param_ident = Self::to_field_ident(&param_name_snake);
 
-                if param.rust_type == "String" {
+                if Self::param_uses_as_ref_str(param) {
                     format_args.push(quote! {
                         __pct_encode_path_segment(#param_ident.as_ref())
                     });

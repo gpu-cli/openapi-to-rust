@@ -35,4 +35,23 @@ pub enum MessageBatchStatus {
     #[serde(rename = "failed")]
     Failed,
 }
+impl MessageBatchStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+impl ::std::fmt::Display for MessageBatchStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for MessageBatchStatus {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 pub type BetaListResponseMessageBatchLastId = String;

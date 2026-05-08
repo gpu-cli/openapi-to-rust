@@ -30,6 +30,25 @@ pub enum ResponseReasoningSummaryPartDoneEventType {
     #[serde(rename = "response.reasoning_summary_part.done")]
     ResponseReasoningSummaryPartDone,
 }
+impl ResponseReasoningSummaryPartDoneEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ResponseReasoningSummaryPartDone => {
+                "response.reasoning_summary_part.done"
+            }
+        }
+    }
+}
+impl ::std::fmt::Display for ResponseReasoningSummaryPartDoneEventType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ResponseReasoningSummaryPartDoneEventType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseReasoningSummaryPartAddedEvent {
     pub part: ReasoningPart,
@@ -40,6 +59,25 @@ pub enum ResponseReasoningSummaryPartAddedEventType {
     #[default]
     #[serde(rename = "response.reasoning_summary_part.added")]
     ResponseReasoningSummaryPartAdded,
+}
+impl ResponseReasoningSummaryPartAddedEventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ResponseReasoningSummaryPartAdded => {
+                "response.reasoning_summary_part.added"
+            }
+        }
+    }
+}
+impl ::std::fmt::Display for ResponseReasoningSummaryPartAddedEventType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ResponseReasoningSummaryPartAddedEventType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReasoningPart {
@@ -53,4 +91,21 @@ pub enum ReasoningPartType {
     #[default]
     #[serde(rename = "summary_text")]
     SummaryText,
+}
+impl ReasoningPartType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SummaryText => "summary_text",
+        }
+    }
+}
+impl ::std::fmt::Display for ReasoningPartType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ReasoningPartType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
 }
