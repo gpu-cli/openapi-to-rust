@@ -211,13 +211,11 @@ fn parse(md: &str) -> Catalog {
                 continue;
             }
             if let Some(field) = parse_field_row(line) {
-                let entry = catalog
-                    .objects
-                    .get_mut(object)
-                    .expect("object inserted on heading");
-                match kind {
-                    TableKind::Fixed => entry.fields.push(field),
-                    TableKind::Patterned => entry.patterned_fields.push(field),
+                if let Some(entry) = catalog.objects.get_mut(object) {
+                    match kind {
+                        TableKind::Fixed => entry.fields.push(field),
+                        TableKind::Patterned => entry.patterned_fields.push(field),
+                    }
                 }
             }
         }

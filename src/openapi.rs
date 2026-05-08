@@ -446,7 +446,10 @@ pub enum SecurityScheme {
     },
     #[serde(rename = "oauth2")]
     OAuth2 {
-        flows: OAuthFlows,
+        // Boxed to keep the SecurityScheme enum's variants similarly sized
+        // (the OAuthFlows tree is ~800 bytes; clippy::large_enum_variant
+        // flagged the disparity).
+        flows: Box<OAuthFlows>,
         #[serde(default)]
         description: Option<String>,
         /// 3.2 §"Security Scheme Object" — well-known metadata URL (D4).
@@ -600,7 +603,7 @@ impl Schema {
     pub fn type_array_contains_null(&self) -> bool {
         match self {
             Schema::TypedMulti { schema_types, .. } => {
-                schema_types.iter().any(|t| *t == SchemaType::Null)
+                schema_types.contains(&SchemaType::Null)
             }
             _ => false,
         }
