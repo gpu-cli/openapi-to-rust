@@ -212,8 +212,82 @@ pub struct SchemaDetails {
     #[serde(rename = "maxLength")]
     pub max_length: Option<u64>,
     pub pattern: Option<String>,
+    #[serde(rename = "exclusiveMinimum")]
+    pub exclusive_minimum: Option<f64>,
+    #[serde(rename = "exclusiveMaximum")]
+    pub exclusive_maximum: Option<f64>,
+    #[serde(rename = "multipleOf")]
+    pub multiple_of: Option<f64>,
+    #[serde(rename = "minItems")]
+    pub min_items: Option<u64>,
+    #[serde(rename = "maxItems")]
+    pub max_items: Option<u64>,
+    #[serde(rename = "uniqueItems")]
+    pub unique_items: Option<bool>,
+    #[serde(rename = "minProperties")]
+    pub min_properties: Option<u64>,
+    #[serde(rename = "maxProperties")]
+    pub max_properties: Option<u64>,
 
-    // Extensions and unknown fields
+    // JSON Schema 2020-12 array keywords (J4, J8).
+    #[serde(rename = "prefixItems")]
+    pub prefix_items: Option<Vec<Schema>>,
+    pub contains: Option<Box<Schema>>,
+    #[serde(rename = "minContains")]
+    pub min_contains: Option<u64>,
+    #[serde(rename = "maxContains")]
+    pub max_contains: Option<u64>,
+
+    // JSON Schema 2020-12 object keywords (J5, J6, J7).
+    #[serde(rename = "patternProperties")]
+    pub pattern_properties: Option<BTreeMap<String, Schema>>,
+    #[serde(rename = "propertyNames")]
+    pub property_names: Option<Box<Schema>>,
+    #[serde(rename = "unevaluatedProperties")]
+    pub unevaluated_properties: Option<AdditionalProperties>,
+    #[serde(rename = "unevaluatedItems")]
+    pub unevaluated_items: Option<AdditionalProperties>,
+    #[serde(rename = "dependentRequired")]
+    pub dependent_required: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(rename = "dependentSchemas")]
+    pub dependent_schemas: Option<BTreeMap<String, Schema>>,
+
+    // JSON Schema 2020-12 content keywords (J8).
+    #[serde(rename = "contentEncoding")]
+    pub content_encoding: Option<String>,
+    #[serde(rename = "contentMediaType")]
+    pub content_media_type: Option<String>,
+    #[serde(rename = "contentSchema")]
+    pub content_schema: Option<Box<Schema>>,
+
+    // JSON Schema 2020-12 conditional keywords.
+    #[serde(rename = "if")]
+    pub if_schema: Option<Box<Schema>>,
+    #[serde(rename = "then")]
+    pub then_schema: Option<Box<Schema>>,
+    #[serde(rename = "else")]
+    pub else_schema: Option<Box<Schema>>,
+    pub not: Option<Box<Schema>>,
+
+    // 3.0 deprecated annotations now first-class (kept since openai-responses fixture is OAS 3.0).
+    pub title: Option<String>,
+    pub deprecated: Option<bool>,
+    #[serde(rename = "readOnly")]
+    pub read_only: Option<bool>,
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+    pub examples: Option<Vec<Value>>,
+    pub example: Option<Value>,
+    /// JSON Schema annotation `$comment`.
+    #[serde(rename = "$comment")]
+    pub comment: Option<String>,
+    #[serde(rename = "$schema")]
+    pub schema_keyword: Option<String>,
+    #[serde(rename = "$defs")]
+    pub defs: Option<BTreeMap<String, Schema>>,
+
+    // Extensions and unknown fields. After J5–J8 above this should be x-*-only
+    // for well-formed OAS 3.1+ specs.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

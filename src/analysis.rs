@@ -3468,25 +3468,21 @@ impl SchemaAnalyzer {
             .unwrap_or(true);
 
         if no_properties {
-            // Check for constraints that would make this a structured type
+            // Check for constraints that would make this a structured type.
+            // After J5–J8, these are typed fields rather than `extra` lookups.
             let has_structural_constraints =
-                // Has required fields (other than just 'type')
                 details.required.as_ref()
                     .map(|req| req.iter().any(|r| r != "type"))
                     .unwrap_or(false)
-                // Has pattern-based property definitions    
-                || details.extra.contains_key("patternProperties")
-                // Has property name schema
-                || details.extra.contains_key("propertyNames")
-                // Has min/max property constraints
-                || details.extra.contains_key("minProperties")
-                || details.extra.contains_key("maxProperties")
-                // Has specific property dependencies
-                || details.extra.contains_key("dependencies")
-                // Has conditional schemas
-                || details.extra.contains_key("if")
-                || details.extra.contains_key("then")
-                || details.extra.contains_key("else");
+                || details.pattern_properties.is_some()
+                || details.property_names.is_some()
+                || details.min_properties.is_some()
+                || details.max_properties.is_some()
+                || details.dependent_required.is_some()
+                || details.dependent_schemas.is_some()
+                || details.if_schema.is_some()
+                || details.then_schema.is_some()
+                || details.else_schema.is_some();
 
             return !has_structural_constraints;
         }
@@ -3513,7 +3509,10 @@ impl SchemaAnalyzer {
 
         if let Some(paths) = &spec.paths {
             for (path, path_item) in paths {
-                self.ingest_path_item_operations(path, path_item, analysis)?;
+                // H11: Path Item may be a $ref to components/pathItems. Resolve here.
+                let resolved = self.resolve_path_item(path_item, &spec)?;
+                let pi: &crate::openapi::PathItem = resolved.as_ref().unwrap_or(path_item);
+                self.ingest_path_item_operations(path, pi, analysis)?;
             }
         }
         // T4: walk webhooks the same way as paths. Per OAS 3.1+, webhooks are
@@ -3529,6 +3528,37 @@ impl SchemaAnalyzer {
             }
         }
         Ok(())
+    }
+
+    /// H11: Resolve a Path Item's `$ref` (3.1+ allows them) against
+    /// `components/pathItems`. Returns Some(resolved) when a ref was followed,
+    /// or None when the input is already inline.
+    fn resolve_path_item(
+        &self,
+        path_item: &crate::openapi::PathItem,
+        spec: &crate::openapi::OpenApiSpec,
+    ) -> Result<Option<crate::openapi::PathItem>> {
+        let Some(reference) = &path_item.reference else {
+            return Ok(None);
+        };
+        let target_name = reference
+            .strip_prefix("#/components/pathItems/")
+            .ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "Path Item $ref must point at #/components/pathItems/{{name}}, got {reference}"
+                ))
+            })?;
+        let pi = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.path_items.as_ref())
+            .and_then(|map| map.get(target_name))
+            .ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "Path Item ref {reference} not found in components/pathItems"
+                ))
+            })?;
+        Ok(Some(pi.clone()))
     }
 
     fn ingest_path_item_operations(
