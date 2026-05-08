@@ -157,6 +157,13 @@ pub struct ParameterInfo {
     pub rust_type: String,
     /// Description from OpenAPI spec
     pub description: Option<String>,
+    /// String enum values when the parameter's inline schema is a string with
+    /// `enum` or `const`. When set, `rust_type` is the synthetic enum type
+    /// name (e.g. `GetItemTheConstant`) and the client generator emits an
+    /// inline enum so the parameter is constrained to the declared values.
+    /// See issue #10 follow-up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 impl Default for DependencyGraph {
@@ -3634,7 +3641,7 @@ impl SchemaAnalyzer {
         if let Some(parameters) = &operation.parameters {
             for param in parameters {
                 let resolved = self.resolve_parameter(param);
-                if let Some(param_info) = self.analyze_parameter(&resolved)? {
+                if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
                     op_info.parameters.push(param_info);
                 }
             }
@@ -3649,7 +3656,7 @@ impl SchemaAnalyzer {
                 .collect();
             for param in path_params {
                 let resolved = self.resolve_parameter(param);
-                if let Some(param_info) = self.analyze_parameter(&resolved)? {
+                if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
                     if !existing_keys
                         .contains(&(param_info.name.clone(), param_info.location.clone()))
                     {
@@ -3740,17 +3747,26 @@ impl SchemaAnalyzer {
         std::borrow::Cow::Borrowed(param)
     }
 
-    /// Analyze a parameter
+    /// Analyze a parameter.
+    ///
+    /// `operation_id` is used to generate a unique synthetic enum type name
+    /// when the parameter's inline schema is a string with `enum` or `const`
+    /// (e.g. `GetItemTheConstant`). The client generator emits the enum
+    /// alongside the operation methods. See issue #10 follow-up.
     fn analyze_parameter(
         &self,
         param: &crate::openapi::Parameter,
+        operation_id: &str,
     ) -> Result<Option<ParameterInfo>> {
+        use heck::ToPascalCase;
+
         let name = param.name.as_deref().unwrap_or("");
         let location = param.location.as_deref().unwrap_or("");
         let required = param.required.unwrap_or(false);
 
         let mut rust_type = "String".to_string();
         let mut schema_ref = None;
+        let mut enum_values: Option<Vec<String>> = None;
 
         if let Some(schema) = &param.schema {
             if let Some(ref_str) = schema.reference() {
@@ -3764,6 +3780,20 @@ impl SchemaAnalyzer {
                     _ => "String",
                 }
                 .to_string();
+
+                if matches!(schema_type, crate::openapi::SchemaType::String) {
+                    let details = schema.details();
+                    if details.is_string_enum() {
+                        if let Some(values) = details.string_enum_values() {
+                            if !values.is_empty() {
+                                let op_pascal = operation_id.replace('.', "_").to_pascal_case();
+                                let param_pascal = name.to_pascal_case();
+                                rust_type = format!("{op_pascal}{param_pascal}");
+                                enum_values = Some(values);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3774,6 +3804,7 @@ impl SchemaAnalyzer {
             schema_ref,
             rust_type,
             description: param.description.clone(),
+            enum_values,
         }))
     }
 }

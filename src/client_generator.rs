@@ -147,11 +147,12 @@
 //! 5. Handles query parameters and request bodies
 //! 6. Configures middleware stack based on generator config
 
-use crate::analysis::{OperationInfo, SchemaAnalysis};
+use crate::analysis::{OperationInfo, ParameterInfo, SchemaAnalysis};
 use crate::generator::CodeGenerator;
 use heck::ToSnakeCase;
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
+use std::collections::BTreeMap;
 
 impl CodeGenerator {
     /// Generate the HTTP client struct with middleware support
@@ -374,6 +375,8 @@ impl CodeGenerator {
     /// response with a body schema) BEFORE the `impl HttpClient` block so the
     /// generated method signatures can reference them.
     pub fn generate_operation_methods(&self, analysis: &SchemaAnalysis) -> TokenStream {
+        let param_enums = self.generate_param_enum_types(analysis);
+
         let op_error_enums: Vec<TokenStream> = analysis
             .operations
             .values()
@@ -387,10 +390,98 @@ impl CodeGenerator {
             .collect();
 
         quote! {
+            #param_enums
+
             #(#op_error_enums)*
 
             impl HttpClient {
                 #(#methods)*
+            }
+        }
+    }
+
+    /// Emit inline enum types for parameters whose schema is `type: string`
+    /// with `enum` or `const`. The generated enum implements `Display` so it
+    /// drops into the existing `format!`-based path/query templating without
+    /// any special-casing at the call site. See issue #10 follow-up.
+    fn generate_param_enum_types(&self, analysis: &SchemaAnalysis) -> TokenStream {
+        let mut by_name: BTreeMap<String, &ParameterInfo> = BTreeMap::new();
+        for op in analysis.operations.values() {
+            for param in &op.parameters {
+                if param.enum_values.is_some() {
+                    by_name.entry(param.rust_type.clone()).or_insert(param);
+                }
+            }
+        }
+
+        if by_name.is_empty() {
+            return quote! {};
+        }
+
+        let defs: Vec<TokenStream> = by_name
+            .values()
+            .map(|param| self.generate_single_param_enum(param))
+            .collect();
+
+        quote! { #(#defs)* }
+    }
+
+    fn generate_single_param_enum(&self, param: &ParameterInfo) -> TokenStream {
+        let Some(values) = param.enum_values.as_deref() else {
+            return quote! {};
+        };
+
+        let enum_ident = format_ident!("{}", param.rust_type);
+
+        let variants: Vec<TokenStream> = values
+            .iter()
+            .map(|value| {
+                let variant_ident = format_ident!("{}", self.to_rust_enum_variant(value));
+                quote! {
+                    #[serde(rename = #value)]
+                    #variant_ident,
+                }
+            })
+            .collect();
+
+        let display_arms: Vec<TokenStream> = values
+            .iter()
+            .map(|value| {
+                let variant_ident = format_ident!("{}", self.to_rust_enum_variant(value));
+                quote! { Self::#variant_ident => #value, }
+            })
+            .collect();
+
+        let doc = format!(
+            "Allowed values for the `{}` {} parameter.",
+            param.name, param.location
+        );
+
+        quote! {
+            #[doc = #doc]
+            #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+            pub enum #enum_ident {
+                #(#variants)*
+            }
+
+            impl #enum_ident {
+                pub fn as_str(&self) -> &'static str {
+                    match self {
+                        #(#display_arms)*
+                    }
+                }
+            }
+
+            impl std::fmt::Display for #enum_ident {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str(self.as_str())
+                }
+            }
+
+            impl AsRef<str> for #enum_ident {
+                fn as_ref(&self) -> &str {
+                    self.as_str()
+                }
             }
         }
     }
