@@ -961,6 +961,14 @@ impl CodeGenerator {
 
     /// Get the Rust type for a parameter
     fn get_param_rust_type(&self, param: &crate::analysis::ParameterInfo) -> TokenStream {
+        // T10: $ref-typed parameters used to lose their type because we only
+        // consulted `rust_type` (which stays "String"). Now: prefer the
+        // resolved schema reference if present.
+        if let Some(ref schema_name) = param.schema_ref {
+            let rust_name = self.to_rust_type_name(schema_name);
+            let ident = syn::Ident::new(&rust_name, proc_macro2::Span::call_site());
+            return quote! { #ident };
+        }
         let type_str = &param.rust_type;
         match type_str.as_str() {
             "String" => quote! { impl AsRef<str> },

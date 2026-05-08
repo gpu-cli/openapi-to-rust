@@ -3506,34 +3506,54 @@ impl SchemaAnalyzer {
 
         if let Some(paths) = &spec.paths {
             for (path, path_item) in paths {
-                for (method, operation) in path_item.operations() {
-                    // Generate operation ID if missing
-                    let operation_id = operation
-                        .operation_id
-                        .clone()
-                        .unwrap_or_else(|| Self::generate_operation_id(method, path));
-
-                    let op_info = self.analyze_single_operation(
-                        &operation_id,
-                        method,
-                        path,
-                        operation,
-                        path_item.parameters.as_ref(),
-                        analysis,
-                    )?;
-                    // T6: detect operationId collisions instead of silently overwriting.
-                    // Per OAS 3.x §"Operation Object", operationId is unique among all
-                    // operations described in the document.
-                    if let Some(existing) = analysis.operations.get(&operation_id) {
-                        return Err(GeneratorError::InvalidSchema(format!(
-                            "duplicate operationId `{}` — first at `{} {}`, then at `{} {}`. \
-                             OpenAPI requires operationId to be unique across the document.",
-                            operation_id, existing.method, existing.path, method, path
-                        )));
-                    }
-                    analysis.operations.insert(operation_id, op_info);
-                }
+                self.ingest_path_item_operations(path, path_item, analysis)?;
             }
+        }
+        // T4: walk webhooks the same way as paths. Per OAS 3.1+, webhooks are
+        // server→consumer callbacks: their request bodies describe payloads
+        // the *server* sends *to* the consumer. We currently emit them as
+        // ordinary operations so their request/response types land in the
+        // generated client; a future bead may add a typed Webhook enum and
+        // dispatcher.
+        if let Some(webhooks) = &spec.webhooks {
+            for (name, path_item) in webhooks {
+                let synthetic_path = format!("__webhook__/{name}");
+                self.ingest_path_item_operations(&synthetic_path, path_item, analysis)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ingest_path_item_operations(
+        &mut self,
+        path: &str,
+        path_item: &crate::openapi::PathItem,
+        analysis: &mut SchemaAnalysis,
+    ) -> Result<()> {
+        for (method, operation) in path_item.operations() {
+            // Generate operation ID if missing
+            let operation_id = operation
+                .operation_id
+                .clone()
+                .unwrap_or_else(|| Self::generate_operation_id(method, path));
+
+            let op_info = self.analyze_single_operation(
+                &operation_id,
+                method,
+                path,
+                operation,
+                path_item.parameters.as_ref(),
+                analysis,
+            )?;
+            // T6: detect operationId collisions instead of silently overwriting.
+            if let Some(existing) = analysis.operations.get(&operation_id) {
+                return Err(GeneratorError::InvalidSchema(format!(
+                    "duplicate operationId `{}` — first at `{} {}`, then at `{} {}`. \
+                     OpenAPI requires operationId to be unique across the document.",
+                    operation_id, existing.method, existing.path, method, path
+                )));
+            }
+            analysis.operations.insert(operation_id, op_info);
         }
         Ok(())
     }
@@ -3638,6 +3658,20 @@ impl SchemaAnalyzer {
         // Extract response schemas
         if let Some(responses) = &operation.responses {
             for (status_code, response) in responses {
+                // T15: SSE auto-detection. If any response declares
+                // `text/event-stream`, mark the operation as streaming. The
+                // user can still override via config; here we lift the spec
+                // signal so a `stream: true` parameter and an event-stream
+                // content type produce a streaming variant by default.
+                if let Some(content) = response.content.as_ref() {
+                    if content
+                        .keys()
+                        .any(|ct| ct.starts_with("text/event-stream"))
+                    {
+                        op_info.supports_streaming = true;
+                    }
+                }
+
                 if let Some(schema) = response.json_schema() {
                     if let Some(schema_ref) = schema.reference() {
                         // Named schema reference
@@ -3658,6 +3692,21 @@ impl SchemaAnalyzer {
                         op_info
                             .response_schemas
                             .insert(status_code.clone(), synthetic_name);
+                    }
+                }
+            }
+        }
+
+        // T15: detect a `stream` boolean parameter on the operation; pair it
+        // with the SSE response signal above to populate stream_parameter.
+        if op_info.supports_streaming
+            && let Some(parameters) = &operation.parameters
+        {
+            for param in parameters {
+                if let Some(name) = param.name.as_deref() {
+                    if name.eq_ignore_ascii_case("stream") {
+                        op_info.stream_parameter = Some(name.to_string());
+                        break;
                     }
                 }
             }
