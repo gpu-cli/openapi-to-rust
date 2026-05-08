@@ -11,7 +11,7 @@ pub struct OpenApiSpec {
     #[serde(rename = "jsonSchemaDialect", default)]
     pub json_schema_dialect: Option<String>,
     #[serde(default)]
-    pub servers: Option<Value>,
+    pub servers: Option<Vec<Server>>,
     #[serde(default)]
     pub paths: Option<BTreeMap<String, PathItem>>,
     #[serde(default)]
@@ -19,11 +19,11 @@ pub struct OpenApiSpec {
     #[serde(default)]
     pub components: Option<Components>,
     #[serde(default)]
-    pub security: Option<Value>,
+    pub security: Option<Vec<BTreeMap<String, Vec<String>>>>,
     #[serde(default)]
-    pub tags: Option<Value>,
+    pub tags: Option<Vec<Tag>>,
     #[serde(rename = "externalDocs", default)]
-    pub external_docs: Option<Value>,
+    pub external_docs: Option<ExternalDocs>,
     /// 3.2 §"$self" — see Appendix F base-URI rules. Captured but not yet used.
     #[serde(rename = "$self", default)]
     pub self_uri: Option<String>,
@@ -59,17 +59,17 @@ pub struct Components {
     #[serde(default)]
     pub parameters: Option<BTreeMap<String, Parameter>>,
     #[serde(default)]
-    pub examples: Option<BTreeMap<String, Value>>,
+    pub examples: Option<BTreeMap<String, Example>>,
     #[serde(rename = "requestBodies", default)]
     pub request_bodies: Option<BTreeMap<String, RequestBody>>,
     #[serde(default)]
-    pub headers: Option<BTreeMap<String, Value>>,
+    pub headers: Option<BTreeMap<String, Header>>,
     #[serde(rename = "securitySchemes", default)]
-    pub security_schemes: Option<BTreeMap<String, Value>>,
+    pub security_schemes: Option<BTreeMap<String, SecurityScheme>>,
     #[serde(default)]
-    pub links: Option<BTreeMap<String, Value>>,
+    pub links: Option<BTreeMap<String, Link>>,
     #[serde(default)]
-    pub callbacks: Option<BTreeMap<String, Value>>,
+    pub callbacks: Option<BTreeMap<String, Callback>>,
     /// 3.1+ §Components — reusable Path Items.
     #[serde(rename = "pathItems", default)]
     pub path_items: Option<BTreeMap<String, PathItem>>,
@@ -223,6 +223,272 @@ pub struct SchemaDetails {
 pub enum AdditionalProperties {
     Boolean(bool),
     Schema(Box<Schema>),
+}
+
+/// OpenAPI Example Object (H6).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Example {
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Singular embedded value. Mutually exclusive with `external_value`.
+    #[serde(default)]
+    pub value: Option<Value>,
+    #[serde(rename = "externalValue", default)]
+    pub external_value: Option<String>,
+    /// 3.2 §"Example Object" — typed pre-serialization data.
+    #[serde(rename = "dataValue", default)]
+    pub data_value: Option<Value>,
+    /// 3.2 §"Example Object" — already-serialized form.
+    #[serde(rename = "serializedValue", default)]
+    pub serialized_value: Option<String>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Link Object (H7).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Link {
+    #[serde(rename = "operationRef", default)]
+    pub operation_ref: Option<String>,
+    #[serde(rename = "operationId", default)]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<BTreeMap<String, Value>>,
+    #[serde(rename = "requestBody", default)]
+    pub request_body: Option<Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub server: Option<Server>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Callback Object (H8). A map keyed by runtime-expression URL
+/// templates, with Path Item values.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Callback(pub BTreeMap<String, PathItem>);
+
+/// OpenAPI Encoding Object (H4). Used inside `multipart/form-data` and
+/// `application/x-www-form-urlencoded` Media Type bodies.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Encoding {
+    #[serde(rename = "contentType", default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub headers: Option<BTreeMap<String, Header>>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub explode: Option<bool>,
+    #[serde(rename = "allowReserved", default)]
+    pub allow_reserved: Option<bool>,
+    /// 3.2 §"Encoding Object" — nested encoding for arrays of items.
+    #[serde(rename = "itemEncoding", default)]
+    pub item_encoding: Option<Box<Encoding>>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Header Object (H5). Structurally a Parameter minus the `name`
+/// and `in` fields. Used in Response.headers, Encoding.headers, and
+/// Components.headers.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Header {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: Option<bool>,
+    #[serde(default)]
+    pub deprecated: Option<bool>,
+    #[serde(rename = "allowEmptyValue", default)]
+    pub allow_empty_value: Option<bool>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub explode: Option<bool>,
+    #[serde(rename = "allowReserved", default)]
+    pub allow_reserved: Option<bool>,
+    #[serde(default)]
+    pub schema: Option<Schema>,
+    #[serde(default)]
+    pub content: Option<BTreeMap<String, MediaType>>,
+    #[serde(default)]
+    pub example: Option<Value>,
+    #[serde(default)]
+    pub examples: Option<Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Security Scheme Object (H2). Covers all 3.x scheme types:
+/// apiKey, http (basic/bearer/digest), oauth2 (with flows), openIdConnect,
+/// and 3.1+ mutualTLS.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum SecurityScheme {
+    #[serde(rename = "apiKey")]
+    ApiKey {
+        name: String,
+        #[serde(rename = "in")]
+        location: String, // "query" | "header" | "cookie"
+        #[serde(default)]
+        description: Option<String>,
+        /// 3.2 §"Security Scheme Object" — D10.
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "http")]
+    Http {
+        scheme: String, // "basic" | "bearer" | "digest" | …
+        #[serde(rename = "bearerFormat", default)]
+        bearer_format: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "mutualTLS")]
+    MutualTls {
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "oauth2")]
+    OAuth2 {
+        flows: OAuthFlows,
+        #[serde(default)]
+        description: Option<String>,
+        /// 3.2 §"Security Scheme Object" — well-known metadata URL (D4).
+        #[serde(rename = "oauth2MetadataUrl", default)]
+        oauth2_metadata_url: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "openIdConnect")]
+    OpenIdConnect {
+        #[serde(rename = "openIdConnectUrl")]
+        open_id_connect_url: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OAuthFlows {
+    #[serde(default)]
+    pub implicit: Option<OAuthFlow>,
+    #[serde(default)]
+    pub password: Option<OAuthFlow>,
+    #[serde(rename = "clientCredentials", default)]
+    pub client_credentials: Option<OAuthFlow>,
+    #[serde(rename = "authorizationCode", default)]
+    pub authorization_code: Option<OAuthFlow>,
+    /// 3.2 §"OAuth Flows Object" — device authorization flow (D4).
+    #[serde(rename = "deviceAuthorization", default)]
+    pub device_authorization: Option<OAuthFlow>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OAuthFlow {
+    #[serde(rename = "authorizationUrl", default)]
+    pub authorization_url: Option<String>,
+    #[serde(rename = "tokenUrl", default)]
+    pub token_url: Option<String>,
+    #[serde(rename = "refreshUrl", default)]
+    pub refresh_url: Option<String>,
+    /// 3.2 §"OAuth Flow Object" — required for `deviceAuthorization` (D4).
+    #[serde(rename = "deviceAuthorizationUrl", default)]
+    pub device_authorization_url: Option<String>,
+    pub scopes: BTreeMap<String, String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI External Documentation Object (H10).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExternalDocs {
+    pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Tag Object (H9 + D5 — 3.2 added summary/parent/kind).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Tag {
+    pub name: String,
+    /// 3.2 §"Tag Object" — short summary of the tag.
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 3.2 §"Tag Object" — name of a parent tag for hierarchical organisation.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// 3.2 §"Tag Object" — categorisation hint (e.g. "feature", "audience",
+    /// "compliance"). Free-form string; consumers MAY define their own
+    /// vocabulary.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(rename = "externalDocs", default)]
+    pub external_docs: Option<ExternalDocs>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Server Object (H1). Multiple servers, server variables, and
+/// 3.2's `name` field are all modeled.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Server {
+    pub url: String,
+    /// 3.2 §"Server Object" — server identifier for runtime selection (D8).
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub variables: Option<BTreeMap<String, ServerVariable>>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerVariable {
+    /// REQUIRED in 3.0/3.1. In 3.2 this MAY be omitted when `enum` is present.
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(rename = "enum", default)]
+    pub enum_values: Option<Vec<String>>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -477,7 +743,7 @@ pub struct PathItem {
     pub additional_operations: Option<BTreeMap<String, Operation>>,
     pub parameters: Option<Vec<Parameter>>,
     #[serde(default)]
-    pub servers: Option<Value>,
+    pub servers: Option<Vec<Server>>,
     #[serde(rename = "$ref", default)]
     pub reference: Option<String>,
     #[serde(flatten, default)]
@@ -543,13 +809,13 @@ pub struct Operation {
     pub request_body: Option<RequestBody>,
     pub responses: Option<BTreeMap<String, Response>>,
     #[serde(default)]
-    pub callbacks: Option<Value>,
+    pub callbacks: Option<BTreeMap<String, Callback>>,
     #[serde(default)]
-    pub security: Option<Value>,
+    pub security: Option<Vec<BTreeMap<String, Vec<String>>>>,
     #[serde(default)]
-    pub servers: Option<Value>,
+    pub servers: Option<Vec<Server>>,
     #[serde(rename = "externalDocs", default)]
-    pub external_docs: Option<Value>,
+    pub external_docs: Option<ExternalDocs>,
     #[serde(flatten, default)]
     pub extensions: Extensions,
 }
@@ -580,7 +846,7 @@ pub struct Parameter {
     #[serde(default)]
     pub example: Option<Value>,
     #[serde(default)]
-    pub examples: Option<Value>,
+    pub examples: Option<BTreeMap<String, Example>>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(rename = "$ref", default)]
@@ -690,7 +956,7 @@ pub struct Response {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub headers: Option<Value>,
+    pub headers: Option<BTreeMap<String, Header>>,
     #[serde(default)]
     pub content: Option<BTreeMap<String, MediaType>>,
     #[serde(default)]
@@ -724,9 +990,21 @@ pub struct MediaType {
     #[serde(default)]
     pub example: Option<Value>,
     #[serde(default)]
-    pub examples: Option<Value>,
+    pub examples: Option<BTreeMap<String, Example>>,
     #[serde(default)]
-    pub encoding: Option<Value>,
+    pub encoding: Option<BTreeMap<String, Encoding>>,
+    /// 3.2 §"Media Type Object" — schema for each item when streaming
+    /// (D3). Common in `text/event-stream` and JSON-lines payloads.
+    #[serde(rename = "itemSchema", default)]
+    pub item_schema: Option<Schema>,
+    /// 3.2 §"Media Type Object" — encoding for the leading prefix of a
+    /// streamed body (D3).
+    #[serde(rename = "prefixEncoding", default)]
+    pub prefix_encoding: Option<Vec<Encoding>>,
+    /// 3.2 §"Media Type Object" — encoding applied to each streamed item
+    /// (D3).
+    #[serde(rename = "itemEncoding", default)]
+    pub item_encoding: Option<Encoding>,
     #[serde(rename = "$ref", default)]
     pub reference: Option<String>,
     #[serde(flatten, default)]
