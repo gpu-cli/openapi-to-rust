@@ -16,3 +16,8 @@
 /tests/conformance/coverage-report.md
 /tests/conformance/json-schema-2020-12-report.md
 /tests/conformance/apis-guru-report.md
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
