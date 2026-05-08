@@ -1432,7 +1432,7 @@ impl CodeGenerator {
         }
     }
 
-    fn to_rust_enum_variant(&self, s: &str) -> String {
+    pub(crate) fn to_rust_enum_variant(&self, s: &str) -> String {
         // Convert string to valid Rust enum variant (PascalCase)
         let mut result = String::new();
         let mut next_upper = true;
