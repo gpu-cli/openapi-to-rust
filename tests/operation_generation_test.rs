@@ -564,8 +564,8 @@ fn test_doc_comment_generation() {
     let result = generator.generate_operation_methods(&analysis);
     let result_str = result.to_string();
 
-    // Verify doc comment contains HTTP method and path
-    assert!(result_str.contains("# [doc = \"POST /api/v1/test\"]"));
+    // T13: rustdoc now wraps the method+path in backticks for nicer rendering.
+    assert!(result_str.contains("`POST /api/v1/test`"));
 }
 
 #[test]
