@@ -602,9 +602,7 @@ impl Schema {
     /// (3.1 canonical nullability via `type: ["X", "null"]`.)
     pub fn type_array_contains_null(&self) -> bool {
         match self {
-            Schema::TypedMulti { schema_types, .. } => {
-                schema_types.contains(&SchemaType::Null)
-            }
+            Schema::TypedMulti { schema_types, .. } => schema_types.contains(&SchemaType::Null),
             _ => false,
         }
     }
