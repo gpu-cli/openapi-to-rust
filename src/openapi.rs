@@ -1,3 +1,4 @@
+use crate::extensions::Extensions;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,27 +8,76 @@ use std::collections::BTreeMap;
 pub struct OpenApiSpec {
     pub openapi: String,
     pub info: Info,
+    #[serde(rename = "jsonSchemaDialect", default)]
+    pub json_schema_dialect: Option<String>,
+    #[serde(default)]
+    pub servers: Option<Vec<Server>>,
+    #[serde(default)]
     pub paths: Option<BTreeMap<String, PathItem>>,
+    #[serde(default)]
+    pub webhooks: Option<BTreeMap<String, PathItem>>,
+    #[serde(default)]
     pub components: Option<Components>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub security: Option<Vec<BTreeMap<String, Vec<String>>>>,
+    #[serde(default)]
+    pub tags: Option<Vec<Tag>>,
+    #[serde(rename = "externalDocs", default)]
+    pub external_docs: Option<ExternalDocs>,
+    /// 3.2 §"$self" — see Appendix F base-URI rules. Captured but not yet used.
+    #[serde(rename = "$self", default)]
+    pub self_uri: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Info {
     pub title: String,
     #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "termsOfService", default)]
+    pub terms_of_service: Option<String>,
+    #[serde(default)]
+    pub contact: Option<Value>,
+    #[serde(default)]
+    pub license: Option<Value>,
+    #[serde(default)]
     pub version: Option<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Components {
+    #[serde(default)]
     pub schemas: Option<BTreeMap<String, Schema>>,
+    #[serde(default)]
+    pub responses: Option<BTreeMap<String, Response>>,
+    #[serde(default)]
     pub parameters: Option<BTreeMap<String, Parameter>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub examples: Option<BTreeMap<String, Example>>,
+    #[serde(rename = "requestBodies", default)]
+    pub request_bodies: Option<BTreeMap<String, RequestBody>>,
+    #[serde(default)]
+    pub headers: Option<BTreeMap<String, Header>>,
+    #[serde(rename = "securitySchemes", default)]
+    pub security_schemes: Option<BTreeMap<String, SecurityScheme>>,
+    #[serde(default)]
+    pub links: Option<BTreeMap<String, Link>>,
+    #[serde(default)]
+    pub callbacks: Option<BTreeMap<String, Callback>>,
+    /// 3.1+ §Components — reusable Path Items.
+    #[serde(rename = "pathItems", default)]
+    pub path_items: Option<BTreeMap<String, PathItem>>,
+    /// 3.2 §Components — reusable Media Types.
+    #[serde(rename = "mediaTypes", default)]
+    pub media_types: Option<BTreeMap<String, MediaType>>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -40,10 +90,21 @@ pub enum Schema {
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
-    /// Recursive reference (OpenAPI 3.1)
+    /// Recursive reference (older draft, kept for OAS 3.0 compatibility)
     RecursiveRef {
         #[serde(rename = "$recursiveRef")]
         recursive_ref: String,
+        #[serde(flatten)]
+        extra: BTreeMap<String, Value>,
+    },
+    /// Dynamic reference per JSON Schema 2020-12 (OAS 3.1+).
+    /// `$dynamicRef` resolves against the nearest enclosing `$dynamicAnchor`.
+    /// J1: modeled today; full dynamic resolution at analysis time is a
+    /// follow-up. Self-references via `$dynamicRef: "#x"` are treated as
+    /// recursive references to the schema bearing `$dynamicAnchor: "x"`.
+    DynamicRef {
+        #[serde(rename = "$dynamicRef")]
+        dynamic_ref: String,
         #[serde(flatten)]
         extra: BTreeMap<String, Value>,
     },
@@ -65,7 +126,17 @@ pub enum Schema {
         #[serde(flatten)]
         details: SchemaDetails,
     },
-    /// Schema with explicit type
+    /// Schema with `type` as an array (OpenAPI 3.1 / JSON Schema 2020-12).
+    /// The canonical 3.1 way to express a nullable type is
+    /// `type: ["string", "null"]`. Listed before `Typed` so the array form
+    /// matches first.
+    TypedMulti {
+        #[serde(rename = "type")]
+        schema_types: Vec<SchemaType>,
+        #[serde(flatten)]
+        details: SchemaDetails,
+    },
+    /// Schema with a single explicit type
     Typed {
         #[serde(rename = "type")]
         schema_type: SchemaType,
@@ -99,14 +170,20 @@ pub enum SchemaType {
     Null,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SchemaDetails {
     pub description: Option<String>,
     pub nullable: Option<bool>,
 
-    // OpenAPI 3.1 recursive support
+    // OpenAPI 3.0 recursive support (obsoleted by JSON Schema 2020-12).
     #[serde(rename = "$recursiveAnchor")]
     pub recursive_anchor: Option<bool>,
+
+    // JSON Schema 2020-12 dynamic anchors (J1).
+    #[serde(rename = "$dynamicAnchor")]
+    pub dynamic_anchor: Option<String>,
+    #[serde(rename = "$id")]
+    pub schema_id: Option<String>,
 
     // String-specific
     #[serde(rename = "enum")]
@@ -135,8 +212,82 @@ pub struct SchemaDetails {
     #[serde(rename = "maxLength")]
     pub max_length: Option<u64>,
     pub pattern: Option<String>,
+    #[serde(rename = "exclusiveMinimum")]
+    pub exclusive_minimum: Option<f64>,
+    #[serde(rename = "exclusiveMaximum")]
+    pub exclusive_maximum: Option<f64>,
+    #[serde(rename = "multipleOf")]
+    pub multiple_of: Option<f64>,
+    #[serde(rename = "minItems")]
+    pub min_items: Option<u64>,
+    #[serde(rename = "maxItems")]
+    pub max_items: Option<u64>,
+    #[serde(rename = "uniqueItems")]
+    pub unique_items: Option<bool>,
+    #[serde(rename = "minProperties")]
+    pub min_properties: Option<u64>,
+    #[serde(rename = "maxProperties")]
+    pub max_properties: Option<u64>,
 
-    // Extensions and unknown fields
+    // JSON Schema 2020-12 array keywords (J4, J8).
+    #[serde(rename = "prefixItems")]
+    pub prefix_items: Option<Vec<Schema>>,
+    pub contains: Option<Box<Schema>>,
+    #[serde(rename = "minContains")]
+    pub min_contains: Option<u64>,
+    #[serde(rename = "maxContains")]
+    pub max_contains: Option<u64>,
+
+    // JSON Schema 2020-12 object keywords (J5, J6, J7).
+    #[serde(rename = "patternProperties")]
+    pub pattern_properties: Option<BTreeMap<String, Schema>>,
+    #[serde(rename = "propertyNames")]
+    pub property_names: Option<Box<Schema>>,
+    #[serde(rename = "unevaluatedProperties")]
+    pub unevaluated_properties: Option<AdditionalProperties>,
+    #[serde(rename = "unevaluatedItems")]
+    pub unevaluated_items: Option<AdditionalProperties>,
+    #[serde(rename = "dependentRequired")]
+    pub dependent_required: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(rename = "dependentSchemas")]
+    pub dependent_schemas: Option<BTreeMap<String, Schema>>,
+
+    // JSON Schema 2020-12 content keywords (J8).
+    #[serde(rename = "contentEncoding")]
+    pub content_encoding: Option<String>,
+    #[serde(rename = "contentMediaType")]
+    pub content_media_type: Option<String>,
+    #[serde(rename = "contentSchema")]
+    pub content_schema: Option<Box<Schema>>,
+
+    // JSON Schema 2020-12 conditional keywords.
+    #[serde(rename = "if")]
+    pub if_schema: Option<Box<Schema>>,
+    #[serde(rename = "then")]
+    pub then_schema: Option<Box<Schema>>,
+    #[serde(rename = "else")]
+    pub else_schema: Option<Box<Schema>>,
+    pub not: Option<Box<Schema>>,
+
+    // 3.0 deprecated annotations now first-class (kept since openai-responses fixture is OAS 3.0).
+    pub title: Option<String>,
+    pub deprecated: Option<bool>,
+    #[serde(rename = "readOnly")]
+    pub read_only: Option<bool>,
+    #[serde(rename = "writeOnly")]
+    pub write_only: Option<bool>,
+    pub examples: Option<Vec<Value>>,
+    pub example: Option<Value>,
+    /// JSON Schema annotation `$comment`.
+    #[serde(rename = "$comment")]
+    pub comment: Option<String>,
+    #[serde(rename = "$schema")]
+    pub schema_keyword: Option<String>,
+    #[serde(rename = "$defs")]
+    pub defs: Option<BTreeMap<String, Schema>>,
+
+    // Extensions and unknown fields. After J5–J8 above this should be x-*-only
+    // for well-formed OAS 3.1+ specs.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -148,71 +299,322 @@ pub enum AdditionalProperties {
     Schema(Box<Schema>),
 }
 
+/// OpenAPI Example Object (H6).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Example {
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Singular embedded value. Mutually exclusive with `external_value`.
+    #[serde(default)]
+    pub value: Option<Value>,
+    #[serde(rename = "externalValue", default)]
+    pub external_value: Option<String>,
+    /// 3.2 §"Example Object" — typed pre-serialization data.
+    #[serde(rename = "dataValue", default)]
+    pub data_value: Option<Value>,
+    /// 3.2 §"Example Object" — already-serialized form.
+    #[serde(rename = "serializedValue", default)]
+    pub serialized_value: Option<String>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Link Object (H7).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Link {
+    #[serde(rename = "operationRef", default)]
+    pub operation_ref: Option<String>,
+    #[serde(rename = "operationId", default)]
+    pub operation_id: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<BTreeMap<String, Value>>,
+    #[serde(rename = "requestBody", default)]
+    pub request_body: Option<Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub server: Option<Server>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Callback Object (H8). A map keyed by runtime-expression URL
+/// templates, with Path Item values.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Callback(pub BTreeMap<String, PathItem>);
+
+/// OpenAPI Encoding Object (H4). Used inside `multipart/form-data` and
+/// `application/x-www-form-urlencoded` Media Type bodies.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Encoding {
+    #[serde(rename = "contentType", default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub headers: Option<BTreeMap<String, Header>>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub explode: Option<bool>,
+    #[serde(rename = "allowReserved", default)]
+    pub allow_reserved: Option<bool>,
+    /// 3.2 §"Encoding Object" — nested encoding for arrays of items.
+    #[serde(rename = "itemEncoding", default)]
+    pub item_encoding: Option<Box<Encoding>>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Header Object (H5). Structurally a Parameter minus the `name`
+/// and `in` fields. Used in Response.headers, Encoding.headers, and
+/// Components.headers.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Header {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub required: Option<bool>,
+    #[serde(default)]
+    pub deprecated: Option<bool>,
+    #[serde(rename = "allowEmptyValue", default)]
+    pub allow_empty_value: Option<bool>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub explode: Option<bool>,
+    #[serde(rename = "allowReserved", default)]
+    pub allow_reserved: Option<bool>,
+    #[serde(default)]
+    pub schema: Option<Schema>,
+    #[serde(default)]
+    pub content: Option<BTreeMap<String, MediaType>>,
+    #[serde(default)]
+    pub example: Option<Value>,
+    #[serde(default)]
+    pub examples: Option<Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Security Scheme Object (H2). Covers all 3.x scheme types:
+/// apiKey, http (basic/bearer/digest), oauth2 (with flows), openIdConnect,
+/// and 3.1+ mutualTLS.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum SecurityScheme {
+    #[serde(rename = "apiKey")]
+    ApiKey {
+        name: String,
+        #[serde(rename = "in")]
+        location: String, // "query" | "header" | "cookie"
+        #[serde(default)]
+        description: Option<String>,
+        /// 3.2 §"Security Scheme Object" — D10.
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "http")]
+    Http {
+        scheme: String, // "basic" | "bearer" | "digest" | …
+        #[serde(rename = "bearerFormat", default)]
+        bearer_format: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "mutualTLS")]
+    MutualTls {
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "oauth2")]
+    OAuth2 {
+        // Boxed to keep the SecurityScheme enum's variants similarly sized
+        // (the OAuthFlows tree is ~800 bytes; clippy::large_enum_variant
+        // flagged the disparity).
+        flows: Box<OAuthFlows>,
+        #[serde(default)]
+        description: Option<String>,
+        /// 3.2 §"Security Scheme Object" — well-known metadata URL (D4).
+        #[serde(rename = "oauth2MetadataUrl", default)]
+        oauth2_metadata_url: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+    #[serde(rename = "openIdConnect")]
+    OpenIdConnect {
+        #[serde(rename = "openIdConnectUrl")]
+        open_id_connect_url: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        deprecated: Option<bool>,
+        #[serde(flatten, default)]
+        extensions: Extensions,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OAuthFlows {
+    #[serde(default)]
+    pub implicit: Option<OAuthFlow>,
+    #[serde(default)]
+    pub password: Option<OAuthFlow>,
+    #[serde(rename = "clientCredentials", default)]
+    pub client_credentials: Option<OAuthFlow>,
+    #[serde(rename = "authorizationCode", default)]
+    pub authorization_code: Option<OAuthFlow>,
+    /// 3.2 §"OAuth Flows Object" — device authorization flow (D4).
+    #[serde(rename = "deviceAuthorization", default)]
+    pub device_authorization: Option<OAuthFlow>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OAuthFlow {
+    #[serde(rename = "authorizationUrl", default)]
+    pub authorization_url: Option<String>,
+    #[serde(rename = "tokenUrl", default)]
+    pub token_url: Option<String>,
+    #[serde(rename = "refreshUrl", default)]
+    pub refresh_url: Option<String>,
+    /// 3.2 §"OAuth Flow Object" — required for `deviceAuthorization` (D4).
+    #[serde(rename = "deviceAuthorizationUrl", default)]
+    pub device_authorization_url: Option<String>,
+    pub scopes: BTreeMap<String, String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI External Documentation Object (H10).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExternalDocs {
+    pub url: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Tag Object (H9 + D5 — 3.2 added summary/parent/kind).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Tag {
+    pub name: String,
+    /// 3.2 §"Tag Object" — short summary of the tag.
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 3.2 §"Tag Object" — name of a parent tag for hierarchical organisation.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// 3.2 §"Tag Object" — categorisation hint (e.g. "feature", "audience",
+    /// "compliance"). Free-form string; consumers MAY define their own
+    /// vocabulary.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(rename = "externalDocs", default)]
+    pub external_docs: Option<ExternalDocs>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+/// OpenAPI Server Object (H1). Multiple servers, server variables, and
+/// 3.2's `name` field are all modeled.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Server {
+    pub url: String,
+    /// 3.2 §"Server Object" — server identifier for runtime selection (D8).
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub variables: Option<BTreeMap<String, ServerVariable>>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerVariable {
+    /// REQUIRED in 3.0/3.1. In 3.2 this MAY be omitted when `enum` is present.
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(rename = "enum", default)]
+    pub enum_values: Option<Vec<String>>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Discriminator {
     #[serde(rename = "propertyName")]
     pub property_name: String,
+    #[serde(default)]
     pub mapping: Option<BTreeMap<String, String>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    /// 3.2 §"Discriminator Object" — fallback mapping target when the
+    /// discriminator value is unknown (D9). Captured today; a future bead
+    /// will emit a `_Other(Value)` enum variant when this is set.
+    #[serde(rename = "defaultMapping", default)]
+    pub default_mapping: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 impl Schema {
-    /// Get the schema type if explicitly set
+    /// Get the schema type if explicitly set. For `Schema::TypedMulti` the
+    /// "primary" non-null type is returned; if the array contained only `null`
+    /// then `Some(&SchemaType::Null)` is returned.
     pub fn schema_type(&self) -> Option<&SchemaType> {
         match self {
             Schema::Typed { schema_type, .. } => Some(schema_type),
+            Schema::TypedMulti { schema_types, .. } => schema_types
+                .iter()
+                .find(|t| **t != SchemaType::Null)
+                .or_else(|| schema_types.first()),
             _ => None,
+        }
+    }
+
+    /// True when the schema's type set explicitly contains `null`.
+    /// (3.1 canonical nullability via `type: ["X", "null"]`.)
+    pub fn type_array_contains_null(&self) -> bool {
+        match self {
+            Schema::TypedMulti { schema_types, .. } => schema_types.contains(&SchemaType::Null),
+            _ => false,
         }
     }
 
     /// Get schema details
     pub fn details(&self) -> &SchemaDetails {
+        static EMPTY_DETAILS: Lazy<SchemaDetails> = Lazy::new(SchemaDetails::default);
         match self {
             Schema::Typed { details, .. } => details,
-            Schema::Reference { .. } => {
-                static EMPTY_DETAILS: Lazy<SchemaDetails> = Lazy::new(|| SchemaDetails {
-                    description: None,
-                    nullable: None,
-                    recursive_anchor: None,
-                    enum_values: None,
-                    format: None,
-                    default: None,
-                    const_value: None,
-                    properties: None,
-                    required: None,
-                    additional_properties: None,
-                    items: None,
-                    minimum: None,
-                    maximum: None,
-                    min_length: None,
-                    max_length: None,
-                    pattern: None,
-                    extra: BTreeMap::new(),
-                });
+            Schema::TypedMulti { details, .. } => details,
+            Schema::Reference { .. } | Schema::RecursiveRef { .. } | Schema::DynamicRef { .. } => {
                 &EMPTY_DETAILS
-            }
-            Schema::RecursiveRef { .. } => {
-                static EMPTY_DETAILS_RECURSIVE: Lazy<SchemaDetails> = Lazy::new(|| SchemaDetails {
-                    description: None,
-                    nullable: None,
-                    recursive_anchor: None,
-                    enum_values: None,
-                    format: None,
-                    default: None,
-                    const_value: None,
-                    properties: None,
-                    required: None,
-                    additional_properties: None,
-                    items: None,
-                    minimum: None,
-                    maximum: None,
-                    min_length: None,
-                    max_length: None,
-                    pattern: None,
-                    extra: BTreeMap::new(),
-                });
-                &EMPTY_DETAILS_RECURSIVE
             }
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
@@ -225,13 +627,15 @@ impl Schema {
     pub fn details_mut(&mut self) -> &mut SchemaDetails {
         match self {
             Schema::Typed { details, .. } => details,
+            Schema::TypedMulti { details, .. } => details,
             Schema::Reference { .. } => {
-                // Cannot mutate reference details
                 panic!("Cannot get mutable details for reference schema")
             }
             Schema::RecursiveRef { .. } => {
-                // Cannot mutate recursive reference details
                 panic!("Cannot get mutable details for recursive reference schema")
+            }
+            Schema::DynamicRef { .. } => {
+                panic!("Cannot get mutable details for dynamic reference schema")
             }
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
@@ -320,6 +724,7 @@ impl Schema {
     pub fn inferred_type(&self) -> Option<SchemaType> {
         match self {
             Schema::Typed { schema_type, .. } => Some(schema_type.clone()),
+            Schema::TypedMulti { .. } => self.schema_type().cloned(),
             Schema::Untyped { details } => {
                 // Infer from structure
                 if details.properties.is_some() {
@@ -386,32 +791,41 @@ impl SchemaDetails {
     }
 }
 
-/// OpenAPI Path Item Object  
+/// OpenAPI Path Item Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PathItem {
-    #[serde(rename = "get")]
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub get: Option<Operation>,
-    #[serde(rename = "put")]
     pub put: Option<Operation>,
-    #[serde(rename = "post")]
     pub post: Option<Operation>,
-    #[serde(rename = "delete")]
     pub delete: Option<Operation>,
-    #[serde(rename = "options")]
     pub options: Option<Operation>,
-    #[serde(rename = "head")]
     pub head: Option<Operation>,
-    #[serde(rename = "patch")]
     pub patch: Option<Operation>,
-    #[serde(rename = "trace")]
     pub trace: Option<Operation>,
+    /// 3.2 §"Path Item Object" — `QUERY` HTTP method (D1). Originally
+    /// proposed for safe, idempotent reads with a body.
+    pub query: Option<Operation>,
+    /// 3.2 §"Path Item Object" — extension map for HTTP methods beyond the
+    /// well-known ones (e.g. WebDAV's PROPFIND, SEARCH; LINK/UNLINK). Keys
+    /// are uppercase method names (D1).
+    #[serde(rename = "additionalOperations", default)]
+    pub additional_operations: Option<BTreeMap<String, Operation>>,
     pub parameters: Option<Vec<Parameter>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub servers: Option<Vec<Server>>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 impl PathItem {
-    /// Get all operations in this path item
+    /// Get all operations in this path item, including 3.2's `query`
+    /// (D1) and any custom verbs declared in `additionalOperations`.
     pub fn operations(&self) -> Vec<(&str, &Operation)> {
         let mut ops = Vec::new();
         if let Some(ref op) = self.get {
@@ -438,6 +852,14 @@ impl PathItem {
         if let Some(ref op) = self.trace {
             ops.push(("trace", op));
         }
+        if let Some(ref op) = self.query {
+            ops.push(("query", op));
+        }
+        if let Some(map) = &self.additional_operations {
+            for (verb, op) in map {
+                ops.push((verb.as_str(), op));
+            }
+        }
         ops
     }
 }
@@ -445,39 +867,79 @@ impl PathItem {
 /// OpenAPI Operation Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Operation {
-    #[serde(rename = "operationId")]
+    #[serde(rename = "operationId", default)]
     pub operation_id: Option<String>,
+    #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub deprecated: Option<bool>,
     pub parameters: Option<Vec<Parameter>>,
     #[serde(rename = "requestBody")]
     pub request_body: Option<RequestBody>,
     pub responses: Option<BTreeMap<String, Response>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub callbacks: Option<BTreeMap<String, Callback>>,
+    #[serde(default)]
+    pub security: Option<Vec<BTreeMap<String, Vec<String>>>>,
+    #[serde(default)]
+    pub servers: Option<Vec<Server>>,
+    #[serde(rename = "externalDocs", default)]
+    pub external_docs: Option<ExternalDocs>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 /// OpenAPI Parameter Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Parameter {
+    #[serde(default)]
     pub name: Option<String>,
-    #[serde(rename = "in")]
+    #[serde(rename = "in", default)]
     pub location: Option<String>,
+    #[serde(default)]
     pub required: Option<bool>,
+    #[serde(default)]
+    pub deprecated: Option<bool>,
+    #[serde(rename = "allowEmptyValue", default)]
+    pub allow_empty_value: Option<bool>,
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub explode: Option<bool>,
+    #[serde(rename = "allowReserved", default)]
+    pub allow_reserved: Option<bool>,
+    #[serde(default)]
     pub schema: Option<Schema>,
+    #[serde(default)]
+    pub content: Option<BTreeMap<String, MediaType>>,
+    #[serde(default)]
+    pub example: Option<Value>,
+    #[serde(default)]
+    pub examples: Option<BTreeMap<String, Example>>,
+    #[serde(default)]
     pub description: Option<String>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 /// OpenAPI Request Body Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequestBody {
     pub content: Option<BTreeMap<String, MediaType>>,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub required: Option<bool>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 /// Returns true for media types whose payload is JSON.
@@ -564,10 +1026,18 @@ impl RequestBody {
 /// OpenAPI Response Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Response {
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub headers: Option<BTreeMap<String, Header>>,
+    #[serde(default)]
     pub content: Option<BTreeMap<String, MediaType>>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub links: Option<Value>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 impl Response {
@@ -588,9 +1058,30 @@ impl Response {
 /// OpenAPI Media Type Object
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MediaType {
+    #[serde(default)]
     pub schema: Option<Schema>,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub example: Option<Value>,
+    #[serde(default)]
+    pub examples: Option<BTreeMap<String, Example>>,
+    #[serde(default)]
+    pub encoding: Option<BTreeMap<String, Encoding>>,
+    /// 3.2 §"Media Type Object" — schema for each item when streaming
+    /// (D3). Common in `text/event-stream` and JSON-lines payloads.
+    #[serde(rename = "itemSchema", default)]
+    pub item_schema: Option<Schema>,
+    /// 3.2 §"Media Type Object" — encoding for the leading prefix of a
+    /// streamed body (D3).
+    #[serde(rename = "prefixEncoding", default)]
+    pub prefix_encoding: Option<Vec<Encoding>>,
+    /// 3.2 §"Media Type Object" — encoding applied to each streamed item
+    /// (D3).
+    #[serde(rename = "itemEncoding", default)]
+    pub item_encoding: Option<Encoding>,
+    #[serde(rename = "$ref", default)]
+    pub reference: Option<String>,
+    #[serde(flatten, default)]
+    pub extensions: Extensions,
 }
 
 #[cfg(test)]

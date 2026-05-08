@@ -1,0 +1,19 @@
+# coverage: [objects.Schema.$dynamicRef, objects.Schema.$dynamicAnchor]
+# fails_at: L3
+# reason: only obsolete $recursiveRef/$recursiveAnchor modeled
+openapi: 3.1.0
+info: { title: $dynamicRef Demo, version: 1.0.0 }
+jsonSchemaDialect: https://json-schema.org/draft/2020-12/schema
+components:
+  schemas:
+    Tree:
+      $id: "/schemas/tree"
+      $dynamicAnchor: node
+      type: object
+      properties:
+        value: { type: integer }
+        children:
+          type: array
+          items:
+            $dynamicRef: "#node"
+paths: {}

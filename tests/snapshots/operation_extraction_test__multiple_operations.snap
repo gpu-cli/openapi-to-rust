@@ -9,6 +9,7 @@ deleteItem:
   summary: ~
   description: ~
   request_body: ~
+  request_body_required: false
   response_schemas: {}
   parameters:
     - name: id
@@ -26,6 +27,7 @@ duplicateItem:
   summary: ~
   description: ~
   request_body: ~
+  request_body_required: false
   response_schemas:
     "201": Item
   parameters:
@@ -44,6 +46,7 @@ getItem:
   summary: ~
   description: ~
   request_body: ~
+  request_body_required: false
   response_schemas:
     "200": Item
   parameters:
@@ -64,6 +67,7 @@ updateItem:
   request_body:
     kind: Json
     schema_name: UpdateItemRequest
+  request_body_required: true
   response_schemas:
     "200": Item
   parameters:

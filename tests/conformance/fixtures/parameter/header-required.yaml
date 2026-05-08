@@ -1,0 +1,25 @@
+# coverage: [objects.Parameter.in.header]
+# reason: T1 wires header request parameters through codegen — required headers go on the wire
+openapi: 3.1.0
+info: { title: Header Param Demo, version: 1.0.0 }
+paths:
+  /things:
+    post:
+      operationId: createThing
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+              required: [name]
+      responses:
+        "201":
+          description: created

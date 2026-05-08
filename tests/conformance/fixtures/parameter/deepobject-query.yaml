@@ -1,0 +1,21 @@
+# coverage: [objects.Parameter.style.deepObject, objects.Parameter.in.query]
+# fails_at: L3
+# reason: style/explode are typed since F1, but codegen still collapses object query params to String
+openapi: 3.1.0
+info: { title: DeepObject Demo, version: 1.0.0 }
+paths:
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: filter
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            type: object
+            properties:
+              kind: { type: string }
+              region: { type: string }
+      responses:
+        "200": { description: ok }

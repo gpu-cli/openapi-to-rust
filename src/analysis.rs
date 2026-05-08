@@ -97,7 +97,7 @@ pub struct DetectedPatterns {
 }
 
 /// Information about an OpenAPI operation
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct OperationInfo {
     /// Operation ID
     pub operation_id: String,
@@ -111,6 +111,9 @@ pub struct OperationInfo {
     pub description: Option<String>,
     /// Request body content type and schema (if any)
     pub request_body: Option<RequestBodyContent>,
+    /// Whether `requestBody.required` was true. Drives whether the generated
+    /// method takes a `Body` argument or `Option<Body>` (T11).
+    pub request_body_required: bool,
     /// Response schemas by status code
     pub response_schemas: BTreeMap<String, String>,
     /// Parameters (path, query, header)
@@ -639,19 +642,18 @@ impl SchemaAnalyzer {
     }
 
     fn extract_schemas(spec: &OpenApiSpec) -> Result<BTreeMap<String, Schema>> {
-        let schemas = spec
-            .components
-            .as_ref()
-            .and_then(|c| c.schemas.as_ref())
-            .ok_or_else(|| {
-                GeneratorError::InvalidSchema("No schemas found in OpenAPI spec".to_string())
-            })?;
-
-        // Convert BTreeMap to BTreeMap for deterministic iteration order
+        // OAS 3.1+ requires only one of `paths`, `webhooks`, or `components`.
+        // A document may legitimately have no `components.schemas` (e.g. a
+        // webhooks-only or paths-only spec). Return an empty map in that case
+        // and let downstream codegen handle "no types to emit" gracefully.
+        let schemas = spec.components.as_ref().and_then(|c| c.schemas.as_ref());
         Ok(schemas
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect())
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default())
     }
 
     pub fn analyze(&mut self) -> Result<SchemaAnalysis> {
@@ -1041,7 +1043,8 @@ impl SchemaAnalyzer {
     ) -> Result<AnalyzedSchema> {
         let details = schema.details();
         let description = details.description.clone();
-        let nullable = details.is_nullable();
+        // Combine 3.0-style `nullable: true` with 3.1's `type: ["X", "null"]`.
+        let nullable = details.is_nullable() || schema.type_array_contains_null();
         let mut dependencies = HashSet::new();
 
         let schema_type = match schema {
@@ -1053,16 +1056,22 @@ impl SchemaAnalyzer {
                 dependencies.insert(target.clone());
                 SchemaType::Reference { target }
             }
-            Schema::RecursiveRef { recursive_ref, .. } => {
-                // Handle recursive references
+            Schema::RecursiveRef { recursive_ref, .. }
+            | Schema::DynamicRef {
+                dynamic_ref: recursive_ref,
+                ..
+            } => {
+                // Handle recursive / dynamic references. J1: full $dynamicRef
+                // resolution against $dynamicAnchor scopes is a follow-up; for
+                // now we treat them like recursive refs (self-reference when
+                // it's a fragment to the same schema, otherwise resolve via
+                // schema name).
                 if recursive_ref == "#" {
-                    // Self-reference to the current schema
                     dependencies.insert(schema_name.to_string());
                     SchemaType::Reference {
                         target: schema_name.to_string(),
                     }
                 } else {
-                    // Handle other recursive reference patterns
                     let target = self
                         .extract_schema_name(recursive_ref)
                         .unwrap_or(schema_name)
@@ -1071,8 +1080,12 @@ impl SchemaAnalyzer {
                     SchemaType::Reference { target }
                 }
             }
-            Schema::Typed { schema_type, .. } => {
-                match schema_type {
+            Schema::Typed { .. } | Schema::TypedMulti { .. } => {
+                let primary = schema
+                    .schema_type()
+                    .cloned()
+                    .unwrap_or(OpenApiSchemaType::Object);
+                match primary {
                     OpenApiSchemaType::String => {
                         if let Some(values) = details.string_enum_values() {
                             SchemaType::StringEnum { values }
@@ -3181,7 +3194,8 @@ impl SchemaAnalyzer {
                     Some(&Discriminator {
                         property_name: disc_field,
                         mapping: None,
-                        extra: BTreeMap::new(),
+                        default_mapping: None,
+                        extensions: crate::extensions::Extensions::default(),
                     }),
                     context_name,
                     dependencies,
@@ -3451,25 +3465,22 @@ impl SchemaAnalyzer {
             .unwrap_or(true);
 
         if no_properties {
-            // Check for constraints that would make this a structured type
-            let has_structural_constraints =
-                // Has required fields (other than just 'type')
-                details.required.as_ref()
-                    .map(|req| req.iter().any(|r| r != "type"))
-                    .unwrap_or(false)
-                // Has pattern-based property definitions    
-                || details.extra.contains_key("patternProperties")
-                // Has property name schema
-                || details.extra.contains_key("propertyNames")
-                // Has min/max property constraints
-                || details.extra.contains_key("minProperties")
-                || details.extra.contains_key("maxProperties")
-                // Has specific property dependencies
-                || details.extra.contains_key("dependencies")
-                // Has conditional schemas
-                || details.extra.contains_key("if")
-                || details.extra.contains_key("then")
-                || details.extra.contains_key("else");
+            // Check for constraints that would make this a structured type.
+            // After J5–J8, these are typed fields rather than `extra` lookups.
+            let has_structural_constraints = details
+                .required
+                .as_ref()
+                .map(|req| req.iter().any(|r| r != "type"))
+                .unwrap_or(false)
+                || details.pattern_properties.is_some()
+                || details.property_names.is_some()
+                || details.min_properties.is_some()
+                || details.max_properties.is_some()
+                || details.dependent_required.is_some()
+                || details.dependent_schemas.is_some()
+                || details.if_schema.is_some()
+                || details.then_schema.is_some()
+                || details.else_schema.is_some();
 
             return !has_structural_constraints;
         }
@@ -3496,24 +3507,88 @@ impl SchemaAnalyzer {
 
         if let Some(paths) = &spec.paths {
             for (path, path_item) in paths {
-                for (method, operation) in path_item.operations() {
-                    // Generate operation ID if missing
-                    let operation_id = operation
-                        .operation_id
-                        .clone()
-                        .unwrap_or_else(|| Self::generate_operation_id(method, path));
-
-                    let op_info = self.analyze_single_operation(
-                        &operation_id,
-                        method,
-                        path,
-                        operation,
-                        path_item.parameters.as_ref(),
-                        analysis,
-                    )?;
-                    analysis.operations.insert(operation_id, op_info);
-                }
+                // H11: Path Item may be a $ref to components/pathItems. Resolve here.
+                let resolved = self.resolve_path_item(path_item, &spec)?;
+                let pi: &crate::openapi::PathItem = resolved.as_ref().unwrap_or(path_item);
+                self.ingest_path_item_operations(path, pi, analysis)?;
             }
+        }
+        // T4: walk webhooks the same way as paths. Per OAS 3.1+, webhooks are
+        // server→consumer callbacks: their request bodies describe payloads
+        // the *server* sends *to* the consumer. We currently emit them as
+        // ordinary operations so their request/response types land in the
+        // generated client; a future bead may add a typed Webhook enum and
+        // dispatcher.
+        if let Some(webhooks) = &spec.webhooks {
+            for (name, path_item) in webhooks {
+                let synthetic_path = format!("__webhook__/{name}");
+                self.ingest_path_item_operations(&synthetic_path, path_item, analysis)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// H11: Resolve a Path Item's `$ref` (3.1+ allows them) against
+    /// `components/pathItems`. Returns Some(resolved) when a ref was followed,
+    /// or None when the input is already inline.
+    fn resolve_path_item(
+        &self,
+        path_item: &crate::openapi::PathItem,
+        spec: &crate::openapi::OpenApiSpec,
+    ) -> Result<Option<crate::openapi::PathItem>> {
+        let Some(reference) = &path_item.reference else {
+            return Ok(None);
+        };
+        let target_name = reference
+            .strip_prefix("#/components/pathItems/")
+            .ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "Path Item $ref must point at #/components/pathItems/{{name}}, got {reference}"
+                ))
+            })?;
+        let pi = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.path_items.as_ref())
+            .and_then(|map| map.get(target_name))
+            .ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "Path Item ref {reference} not found in components/pathItems"
+                ))
+            })?;
+        Ok(Some(pi.clone()))
+    }
+
+    fn ingest_path_item_operations(
+        &mut self,
+        path: &str,
+        path_item: &crate::openapi::PathItem,
+        analysis: &mut SchemaAnalysis,
+    ) -> Result<()> {
+        for (method, operation) in path_item.operations() {
+            // Generate operation ID if missing
+            let operation_id = operation
+                .operation_id
+                .clone()
+                .unwrap_or_else(|| Self::generate_operation_id(method, path));
+
+            let op_info = self.analyze_single_operation(
+                &operation_id,
+                method,
+                path,
+                operation,
+                path_item.parameters.as_ref(),
+                analysis,
+            )?;
+            // T6: detect operationId collisions instead of silently overwriting.
+            if let Some(existing) = analysis.operations.get(&operation_id) {
+                return Err(GeneratorError::InvalidSchema(format!(
+                    "duplicate operationId `{}` — first at `{} {}`, then at `{} {}`. \
+                     OpenAPI requires operationId to be unique across the document.",
+                    operation_id, existing.method, existing.path, method, path
+                )));
+            }
+            analysis.operations.insert(operation_id, op_info);
         }
         Ok(())
     }
@@ -3574,6 +3649,12 @@ impl SchemaAnalyzer {
             summary: operation.summary.clone(),
             description: operation.description.clone(),
             request_body: None,
+            // Per OAS 3.x §"Request Body Object", `required` defaults to false.
+            request_body_required: operation
+                .request_body
+                .as_ref()
+                .and_then(|rb| rb.required)
+                .unwrap_or(false),
             response_schemas: BTreeMap::new(),
             parameters: Vec::new(),
             supports_streaming: false, // Will be determined by StreamingConfig, not spec
@@ -3612,6 +3693,17 @@ impl SchemaAnalyzer {
         // Extract response schemas
         if let Some(responses) = &operation.responses {
             for (status_code, response) in responses {
+                // T15: SSE auto-detection. If any response declares
+                // `text/event-stream`, mark the operation as streaming. The
+                // user can still override via config; here we lift the spec
+                // signal so a `stream: true` parameter and an event-stream
+                // content type produce a streaming variant by default.
+                if let Some(content) = response.content.as_ref() {
+                    if content.keys().any(|ct| ct.starts_with("text/event-stream")) {
+                        op_info.supports_streaming = true;
+                    }
+                }
+
                 if let Some(schema) = response.json_schema() {
                     if let Some(schema_ref) = schema.reference() {
                         // Named schema reference
@@ -3632,6 +3724,21 @@ impl SchemaAnalyzer {
                         op_info
                             .response_schemas
                             .insert(status_code.clone(), synthetic_name);
+                    }
+                }
+            }
+        }
+
+        // T15: detect a `stream` boolean parameter on the operation; pair it
+        // with the SSE response signal above to populate stream_parameter.
+        if op_info.supports_streaming
+            && let Some(parameters) = &operation.parameters
+        {
+            for param in parameters {
+                if let Some(name) = param.name.as_deref() {
+                    if name.eq_ignore_ascii_case("stream") {
+                        op_info.stream_parameter = Some(name.to_string());
+                        break;
                     }
                 }
             }
@@ -3737,7 +3844,7 @@ impl SchemaAnalyzer {
         &'a self,
         param: &'a crate::openapi::Parameter,
     ) -> std::borrow::Cow<'a, crate::openapi::Parameter> {
-        if let Some(ref_str) = param.extra.get("$ref").and_then(|v| v.as_str()) {
+        if let Some(ref_str) = param.reference.as_deref() {
             if let Some(param_name) = ref_str.strip_prefix("#/components/parameters/") {
                 if let Some(resolved) = self.component_parameters.get(param_name) {
                     return std::borrow::Cow::Borrowed(resolved);

@@ -3,6 +3,7 @@ pub mod cli;
 pub mod client_generator;
 pub mod config;
 pub mod error;
+pub mod extensions;
 pub mod generator;
 pub mod http_config;
 pub mod http_error;

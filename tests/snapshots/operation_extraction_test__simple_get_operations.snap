@@ -9,6 +9,7 @@ listItems:
   summary: ~
   description: ~
   request_body: ~
+  request_body_required: false
   response_schemas:
     "200": ListItemsResponse
   parameters: []

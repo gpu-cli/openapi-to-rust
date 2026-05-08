@@ -43,6 +43,9 @@ impl CodeGenerator {
                 Put,
                 Patch,
                 Delete,
+                Head,
+                Options,
+                Trace,
             }
 
             impl HttpMethod {
@@ -53,6 +56,9 @@ impl CodeGenerator {
                         Self::Put => "PUT",
                         Self::Patch => "PATCH",
                         Self::Delete => "DELETE",
+                        Self::Head => "HEAD",
+                        Self::Options => "OPTIONS",
+                        Self::Trace => "TRACE",
                     }
                 }
             }
@@ -160,13 +166,19 @@ impl CodeGenerator {
 
         for op in sorted_ops {
             let id = &op.operation_id;
-            let method = match op.method.as_str() {
+            let method = match op.method.to_uppercase().as_str() {
                 "GET" => quote! { HttpMethod::Get },
                 "POST" => quote! { HttpMethod::Post },
                 "PUT" => quote! { HttpMethod::Put },
                 "PATCH" => quote! { HttpMethod::Patch },
                 "DELETE" => quote! { HttpMethod::Delete },
-                _ => quote! { HttpMethod::Get },
+                "HEAD" => quote! { HttpMethod::Head },
+                "OPTIONS" => quote! { HttpMethod::Options },
+                "TRACE" => quote! { HttpMethod::Trace },
+                other => panic!(
+                    "unsupported HTTP method `{other}` for op `{}`",
+                    op.operation_id
+                ),
             };
             let path = &op.path;
 

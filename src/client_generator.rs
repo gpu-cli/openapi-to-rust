@@ -215,6 +215,27 @@ impl CodeGenerator {
             }
         };
 
+        // Path-segment percent encoder, used by url construction (T5).
+        // Encodes per RFC3986 §3.3: only ALPHA, DIGIT, and `-._~` pass through;
+        // everything else becomes `%XX`.
+        let path_encoder = quote! {
+            fn __pct_encode_path_segment(s: &str) -> String {
+                let mut out = String::with_capacity(s.len());
+                for &b in s.as_bytes() {
+                    match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                            out.push(b as char);
+                        }
+                        _ => {
+                            out.push('%');
+                            out.push_str(&format!("{:02X}", b));
+                        }
+                    }
+                }
+                out
+            }
+        };
+
         // Combine all parts
         quote! {
             #retry_config_struct
@@ -226,6 +247,7 @@ impl CodeGenerator {
             }
 
             #default_impl
+            #path_encoder
         }
     }
 
@@ -567,11 +589,13 @@ impl CodeGenerator {
     /// Generate a single operation method
     fn generate_single_operation_method(&self, op: &OperationInfo) -> TokenStream {
         let method_name = self.get_method_name(op);
-        let http_method = self.get_http_method(op);
+        let http_method_call = self.http_method_call(op);
         let path = &op.path;
         let request_param = self.generate_request_param(op);
         let request_body = self.generate_request_body(op);
         let query_params = self.generate_query_params(op);
+        let header_params = self.generate_header_params(op);
+        let auth_application = self.generate_auth_application();
         let response_type = self.get_response_type(op);
         let has_response_body = self.get_success_response_schema(op).is_some();
         let op_error_type = self.op_error_type_token(op);
@@ -587,16 +611,15 @@ impl CodeGenerator {
             ) -> Result<#response_type, ApiOpError<#op_error_type>> {
                 #url_construction
 
-                let mut req = self.http_client
-                    .#http_method(request_url)
+                let mut req = #http_method_call
                     #request_body;
 
                 #query_params
+                #header_params
 
-                // Add API key if configured
-                if let Some(api_key) = &self.api_key {
-                    req = req.bearer_auth(api_key);
-                }
+                // Apply configured authentication (T3). Was previously
+                // hardcoded to bearer_auth regardless of GeneratorConfig.
+                #auth_application
 
                 // Add custom headers
                 for (name, value) in &self.custom_headers {
@@ -606,6 +629,108 @@ impl CodeGenerator {
                 let response = req.send().await?;
                 #error_handling
             }
+        }
+    }
+
+    /// T3: emit the auth-token application based on the configured AuthConfig.
+    /// Default (no config) is Bearer on Authorization. ApiKey emits a custom
+    /// header. Custom honors header_value_prefix.
+    fn generate_auth_application(&self) -> TokenStream {
+        use crate::http_config::AuthConfig;
+        match &self.config().auth_config {
+            Some(AuthConfig::Bearer { header_name }) if header_name == "Authorization" => quote! {
+                if let Some(api_key) = &self.api_key {
+                    req = req.bearer_auth(api_key);
+                }
+            },
+            Some(AuthConfig::Bearer { header_name }) => {
+                let h = header_name.clone();
+                quote! {
+                    if let Some(api_key) = &self.api_key {
+                        req = req.header(#h, format!("Bearer {}", api_key));
+                    }
+                }
+            }
+            Some(AuthConfig::ApiKey { header_name }) => {
+                let h = header_name.clone();
+                quote! {
+                    if let Some(api_key) = &self.api_key {
+                        req = req.header(#h, api_key.as_str());
+                    }
+                }
+            }
+            Some(AuthConfig::Custom {
+                header_name,
+                header_value_prefix,
+            }) => {
+                let h = header_name.clone();
+                let prefix = header_value_prefix.clone().unwrap_or_default();
+                if prefix.is_empty() {
+                    quote! {
+                        if let Some(api_key) = &self.api_key {
+                            req = req.header(#h, api_key.as_str());
+                        }
+                    }
+                } else {
+                    let format_str = format!("{}{{}}", prefix);
+                    quote! {
+                        if let Some(api_key) = &self.api_key {
+                            req = req.header(#h, format!(#format_str, api_key));
+                        }
+                    }
+                }
+            }
+            None => quote! {
+                if let Some(api_key) = &self.api_key {
+                    req = req.bearer_auth(api_key);
+                }
+            },
+        }
+    }
+
+    /// Generate header-parameter handling. Emits `req = req.header(name, ...)`
+    /// for each `in: header` parameter — required headers unconditionally,
+    /// optional ones gated on `Some(_)`.
+    fn generate_header_params(&self, op: &OperationInfo) -> TokenStream {
+        let header_params: Vec<_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == "header")
+            .collect();
+        if header_params.is_empty() {
+            return quote! {};
+        }
+        let mut emit = Vec::new();
+        for param in header_params {
+            let param_name_snake = self.sanitize_param_name(&param.name);
+            let param_ident = Self::to_field_ident(&param_name_snake);
+            let header_name = &param.name;
+            if param.required {
+                if param.rust_type == "String" {
+                    emit.push(quote! {
+                        req = req.header(#header_name, #param_ident.as_ref());
+                    });
+                } else {
+                    emit.push(quote! {
+                        req = req.header(#header_name, #param_ident.to_string());
+                    });
+                }
+            } else if param.rust_type == "String" {
+                emit.push(quote! {
+                    if let Some(v) = #param_ident {
+                        req = req.header(#header_name, v.as_ref());
+                    }
+                });
+            } else {
+                emit.push(quote! {
+                    if let Some(v) = #param_ident {
+                        req = req.header(#header_name, v.to_string());
+                    }
+                });
+            }
+        }
+        quote! {
+            #(#emit)*
         }
     }
 
@@ -672,15 +797,40 @@ impl CodeGenerator {
         }
     }
 
-    /// Generate documentation comment for the operation
+    /// Generate the rustdoc block for an operation, surfacing summary,
+    /// description, the HTTP method+path, and any tags from the OAS spec
+    /// (T13). Also marks the method `#[deprecated]` if the operation is.
     fn generate_operation_doc_comment(&self, op: &OperationInfo) -> TokenStream {
         let method = op.method.to_uppercase();
         let path = &op.path;
-        let doc = format!("{} {}", method, path);
-
-        quote! {
-            #[doc = #doc]
+        let mut docs: Vec<String> = Vec::new();
+        if let Some(s) = &op.summary {
+            if !s.is_empty() {
+                docs.push(s.clone());
+                docs.push(String::new());
+            }
         }
+        if let Some(d) = &op.description {
+            if !d.is_empty() {
+                for line in d.lines() {
+                    docs.push(line.to_string());
+                }
+                docs.push(String::new());
+            }
+        }
+        docs.push(format!("`{} {}`", method, path));
+        let doc_attrs: Vec<TokenStream> = docs
+            .iter()
+            .map(|line| {
+                let prefixed = if line.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {line}")
+                };
+                quote! { #[doc = #prefixed] }
+            })
+            .collect();
+        quote! { #(#doc_attrs)* }
     }
 
     /// Get the method name from the operation
@@ -700,21 +850,42 @@ impl CodeGenerator {
         syn::Ident::new(&name, proc_macro2::Span::call_site())
     }
 
-    /// Get the HTTP method
-    fn get_http_method(&self, op: &OperationInfo) -> syn::Ident {
-        let method = match op.method.to_uppercase().as_str() {
-            "GET" => "get",
-            "POST" => "post",
-            "PUT" => "put",
-            "DELETE" => "delete",
-            "PATCH" => "patch",
-            _ => "get", // Default fallback
-        };
-
-        syn::Ident::new(method, proc_macro2::Span::call_site())
+    /// Build the request-builder expression for the operation's HTTP method.
+    /// Named reqwest methods (`.get`/`.post`/…) are used where available;
+    /// OPTIONS and TRACE go through `Client::request(Method::OPTIONS, _)` since
+    /// reqwest doesn't expose those as named methods.
+    fn http_method_call(&self, op: &OperationInfo) -> TokenStream {
+        match op.method.to_uppercase().as_str() {
+            "GET" => quote! { self.http_client.get(request_url) },
+            "POST" => quote! { self.http_client.post(request_url) },
+            "PUT" => quote! { self.http_client.put(request_url) },
+            "DELETE" => quote! { self.http_client.delete(request_url) },
+            "PATCH" => quote! { self.http_client.patch(request_url) },
+            "HEAD" => quote! { self.http_client.head(request_url) },
+            "OPTIONS" => quote! {
+                self.http_client.request(reqwest::Method::OPTIONS, request_url)
+            },
+            "TRACE" => quote! {
+                self.http_client.request(reqwest::Method::TRACE, request_url)
+            },
+            // D1: 3.2 `QUERY` verb + any custom verb from
+            // PathItem.additionalOperations. reqwest's Method::from_bytes
+            // accepts arbitrary uppercase tokens that match the RFC7230
+            // method grammar.
+            other => {
+                let upper = other.to_string();
+                quote! {
+                    self.http_client.request(
+                        reqwest::Method::from_bytes(#upper.as_bytes())
+                            .expect("invalid HTTP method"),
+                        request_url,
+                    )
+                }
+            }
+        }
     }
 
-    /// Generate request parameters including path parameters, query parameters, and request body
+    /// Generate request parameters including path, query, header, and request body.
     fn generate_request_param(&self, op: &OperationInfo) -> TokenStream {
         let mut params = Vec::new();
 
@@ -744,26 +915,50 @@ impl CodeGenerator {
             }
         }
 
-        // Add request body parameter based on content type
+        // Add header parameters. Required headers are bare; optional ones are
+        // Option<T>. Per OAS 3.x §"Parameter Object", header names matching
+        // `Accept`, `Content-Type`, and `Authorization` are forbidden — those
+        // are described by other mechanisms — but we leave that validation to
+        // analysis.
+        for param in &op.parameters {
+            if param.location == "header" {
+                let param_name_snake = self.sanitize_param_name(&param.name);
+                let param_name = Self::to_field_ident(&param_name_snake);
+                let param_type = self.get_param_rust_type(param);
+                if param.required {
+                    params.push(quote! { #param_name: #param_type });
+                } else {
+                    params.push(quote! { #param_name: Option<#param_type> });
+                }
+            }
+        }
+
+        // Add request body parameter based on content type. Optional bodies
+        // (`requestBody.required` is false or absent) become `Option<T>` per T11.
         if let Some(ref rb) = op.request_body {
             use crate::analysis::RequestBodyContent;
-            match rb {
+            let required = op.request_body_required;
+            let body_type = match rb {
                 RequestBodyContent::Json { schema_name }
                 | RequestBodyContent::FormUrlEncoded { schema_name } => {
                     let rust_type_name = self.to_rust_type_name(schema_name);
                     let request_ident =
                         syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
-                    params.push(quote! { request: #request_ident });
+                    quote! { #request_ident }
                 }
-                RequestBodyContent::Multipart => {
-                    params.push(quote! { form: reqwest::multipart::Form });
-                }
-                RequestBodyContent::OctetStream => {
-                    params.push(quote! { body: Vec<u8> });
-                }
-                RequestBodyContent::TextPlain => {
-                    params.push(quote! { body: String });
-                }
+                RequestBodyContent::Multipart => quote! { reqwest::multipart::Form },
+                RequestBodyContent::OctetStream => quote! { Vec<u8> },
+                RequestBodyContent::TextPlain => quote! { String },
+            };
+            let body_ident = match rb {
+                RequestBodyContent::Multipart => quote! { form },
+                RequestBodyContent::OctetStream | RequestBodyContent::TextPlain => quote! { body },
+                _ => quote! { request },
+            };
+            if required {
+                params.push(quote! { #body_ident: #body_type });
+            } else {
+                params.push(quote! { #body_ident: Option<#body_type> });
             }
         }
 
@@ -776,6 +971,14 @@ impl CodeGenerator {
 
     /// Get the Rust type for a parameter
     fn get_param_rust_type(&self, param: &crate::analysis::ParameterInfo) -> TokenStream {
+        // T10: $ref-typed parameters used to lose their type because we only
+        // consulted `rust_type` (which stays "String"). Now: prefer the
+        // resolved schema reference if present.
+        if let Some(ref schema_name) = param.schema_ref {
+            let rust_name = self.to_rust_type_name(schema_name);
+            let ident = syn::Ident::new(&rust_name, proc_macro2::Span::call_site());
+            return quote! { #ident };
+        }
         let type_str = &param.rust_type;
         match type_str.as_str() {
             "String" => quote! { impl AsRef<str> },
@@ -933,14 +1136,21 @@ impl CodeGenerator {
                 let payload_ty = syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
                 let enum_ident = self.op_error_enum_ident(op);
 
+                // T8: range-keyed responses (1XX/2XX/3XX/4XX/5XX) per OAS
+                // 3.x §"Responses Object". Specific codes still take priority
+                // (handled by ordering — concrete codes deserialize first
+                // because the generic dispatch is a generic `_ if (range)`).
                 let pattern = match code.as_str() {
                     "default" | "Default" => return None, // handled in fallback
                     other if other.chars().all(|c| c.is_ascii_digit()) => {
                         let n: u16 = other.parse().ok()?;
                         quote! { #n }
                     }
-                    // Range like "4XX" / "5XX" — fall through to generic
-                    // for now; declared-range handling is a follow-up.
+                    "1XX" | "1xx" => quote! { code if (100..=199).contains(&code) },
+                    "2XX" | "2xx" => quote! { code if (200..=299).contains(&code) },
+                    "3XX" | "3xx" => quote! { code if (300..=399).contains(&code) },
+                    "4XX" | "4xx" => quote! { code if (400..=499).contains(&code) },
+                    "5XX" | "5xx" => quote! { code if (500..=599).contains(&code) },
                     _ => return None,
                 };
 
@@ -1035,21 +1245,27 @@ impl CodeGenerator {
             .filter(|p| p.location == "path")
             .collect();
 
-        // Replace {paramName} with {} and collect parameter names for format args
+        // Replace {paramName} with {} and collect parameter names for format args.
+        // T5: percent-encode each path-template variable per RFC3986 §3.3
+        // "Path". Without encoding, values containing `/`, `?`, `#`, or
+        // non-ASCII break the URL. Calls __pct_encode_path_segment, a private
+        // helper emitted into the generated client (see emit_path_encoder).
         for param in &path_params {
             let placeholder = format!("{{{}}}", param.name);
             if format_string.contains(&placeholder) {
                 format_string = format_string.replace(&placeholder, "{}");
 
-                // Use snake_case for the Rust variable name with keyword escaping
                 let param_name_snake = self.sanitize_param_name(&param.name);
                 let param_ident = Self::to_field_ident(&param_name_snake);
 
-                // Use .as_ref() for string types to handle impl AsRef<str>
                 if param.rust_type == "String" {
-                    format_args.push(quote! { #param_ident.as_ref() });
+                    format_args.push(quote! {
+                        __pct_encode_path_segment(#param_ident.as_ref())
+                    });
                 } else {
-                    format_args.push(quote! { #param_ident });
+                    format_args.push(quote! {
+                        __pct_encode_path_segment(&#param_ident.to_string())
+                    });
                 }
             }
         }

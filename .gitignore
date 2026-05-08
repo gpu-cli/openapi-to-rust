@@ -3,3 +3,11 @@
 *.swo
 *~
 .DS_Store
+
+# Lazy-cloned external corpus (see tests/conformance/external/apis-guru-sync.sh)
+/tests/conformance/external/apis-guru/
+
+# Conformance reports are regenerated; keep the .toml/.yaml inputs tracked
+/tests/conformance/coverage-report.md
+/tests/conformance/json-schema-2020-12-report.md
+/tests/conformance/apis-guru-report.md

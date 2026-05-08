@@ -1,0 +1,13 @@
+# coverage: [objects.Schema.type[array]]
+# reason: F2 added Schema::TypedMulti; type:["string","null"] now parses + nullable propagates to AnalyzedSchema
+openapi: 3.1.0
+info: { title: Nullable Demo, version: 1.0.0 }
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        nickname:
+          type: ["string", "null"]
+      required: [nickname]
+paths: {}

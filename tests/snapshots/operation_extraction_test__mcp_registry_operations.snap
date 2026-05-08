@@ -9,6 +9,7 @@ getV0Servers:
   summary: List MCP servers
   description: ~
   request_body: ~
+  request_body_required: false
   response_schemas:
     "200": ServerList
   parameters: []
@@ -21,6 +22,7 @@ getV0ServersServerId:
   summary: Get MCP server details
   description: ~
   request_body: ~
+  request_body_required: false
   response_schemas:
     "200": ServerResponse
   parameters:

@@ -1,0 +1,214 @@
+# Honest support claims for OpenAPI 3.1 / 3.2 features.
+#
+# This file is the source of truth for what the README and Cargo description
+# may claim. It is regenerated/diffed by `cargo test conformance` — drift
+# between this file and the test results fails CI.
+#
+# status: supported | partial | unsupported | intentionally-skipped
+# Each entry must reference at least one fixture under tests/conformance/fixtures/
+# unless status = "intentionally-skipped".
+
+spec_version = "3.2.0"
+honest_claim = "OpenAPI 3.1 mostly; 3.2 typed and parsed; full codegen for 3.2-specific behaviors WIP."
+
+[[entry]]
+catalog_ref = "objects.OpenAPI.fields.webhooks"
+status = "partial"
+reason = "T4: spec.webhooks parsed and walked into op extraction; types emitted but no typed Webhook dispatcher yet"
+fixtures = ["webhooks/basic-webhook.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Path Item.additionalOperations"
+status = "supported"
+reason = "D1: typed field on PathItem; codegen emits methods via reqwest::Method::from_bytes"
+fixtures = ["pathitem/additional-operations-3.2.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Path Item.fields.query"
+status = "supported"
+reason = "D1: typed field on PathItem; codegen emits a method using reqwest::Method::from_bytes(\"QUERY\")"
+fixtures = ["pathitem/query-method-3.2.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Parameter.style.deepObject"
+status = "partial"
+reason = "F1 typed style/explode/allowReserved on Parameter; codegen at analysis.rs:3767 still ignores them (T14)"
+fixtures = ["parameter/deepobject-query.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Parameter.in.header"
+status = "supported"
+reason = "T1: header request parameters wired through codegen; required headers reach the wire"
+fixtures = ["parameter/header-required.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Schema.type[array]"
+status = "supported"
+reason = "F2: Schema::TypedMulti variant accepts type-as-array; nullable propagates to AnalyzedSchema"
+fixtures = ["schema/type-string-or-null.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Components.pathItems"
+status = "partial"
+reason = "F1: Components.pathItems typed as BTreeMap<String, PathItem>. Path Item $ref resolution still TODO (H11)"
+fixtures = ["components/path-items-component.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Security Scheme.type[mutualTLS]"
+status = "partial"
+reason = "H2: SecurityScheme::MutualTls typed; runtime auth wiring still defers to bearer/apiKey path (T3)"
+fixtures = ["security/mutual-tls.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Schema.$dynamicRef"
+status = "partial"
+reason = "J1: Schema::DynamicRef variant + SchemaDetails.$dynamicAnchor typed. Full $dynamicAnchor scope resolution is TODO"
+fixtures = ["schema/dynamic-ref-tree.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Components.mediaTypes"
+status = "supported"
+reason = "F1: Components.mediaTypes is typed BTreeMap<String, MediaType>"
+fixtures = ["components/media-types-component-3.2.yaml"]
+
+# ── 3.2 deltas additionally landed ──
+
+[[entry]]
+catalog_ref = "objects.Server.fields.name"
+status = "supported"
+reason = "H1+D8: Server.name typed"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Tag.fields.summary"
+status = "supported"
+reason = "H9+D5"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Tag.fields.parent"
+status = "supported"
+reason = "H9+D5"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Tag.fields.kind"
+status = "supported"
+reason = "H9+D5"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.OAuth Flows.fields.deviceAuthorization"
+status = "supported"
+reason = "H2+D4"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Security Scheme.fields.oauth2MetadataUrl"
+status = "supported"
+reason = "H2+D4"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Security Scheme.fields.deprecated"
+status = "supported"
+reason = "H2+D10"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Discriminator.fields.defaultMapping"
+status = "partial"
+reason = "D9: typed; emission of fallback enum variant TODO"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Media Type.fields.itemSchema"
+status = "partial"
+reason = "D3: typed; codegen TODO"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.OpenAPI.fields.$self"
+status = "partial"
+reason = "F1+D6: typed; full Appendix-F resolution TODO"
+fixtures = []
+
+# ── Phase 1 silent failures ──
+
+[[entry]]
+catalog_ref = "objects.Operation.fields.deprecated"
+status = "supported"
+reason = "F1+T13: typed and surfaced into rustdoc"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Operation.fields.summary"
+status = "supported"
+reason = "T13: rustdoc on every method"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Path Item.method[options]"
+status = "supported"
+reason = "T2: emits a real options request via reqwest::Method::OPTIONS instead of silently downgrading to GET"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Path Item.method[trace]"
+status = "supported"
+reason = "T2"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Path Item.method[head]"
+status = "supported"
+reason = "T2"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Operation.operationId.uniqueness"
+status = "supported"
+reason = "T6: collision detection at analysis time"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Request Body.fields.required"
+status = "supported"
+reason = "T11: required:false → Option<T> generated parameter"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Operation.fields.tags"
+status = "supported"
+reason = "F1: typed Vec<Tag>"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Path.templating.percent-encoding"
+status = "supported"
+reason = "T5: __pct_encode_path_segment helper emitted into the generated client (RFC3986 §3.3)"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Auth.config.ApiKey"
+status = "supported"
+reason = "T3: ApiKey + Custom auth_config variants emitted by client; previously hard-coded bearer_auth"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Auth.config.Custom"
+status = "supported"
+reason = "T3"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Responses.range[2XX-5XX]"
+status = "supported"
+reason = "T8: range-keyed responses produce guarded match arms"
+fixtures = []
+
+[[entry]]
+catalog_ref = "objects.Operation.streaming.text-event-stream"
+status = "supported"
+reason = "T15: SSE auto-detection from response content-type"
+fixtures = []
