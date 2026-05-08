@@ -110,7 +110,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if apply {
             create_label(&beads.repo, label)?;
         } else {
-            println!("  + label {} ({}, {})", label.name, label.color, label.description);
+            println!(
+                "  + label {} ({}, {})",
+                label.name, label.color, label.description
+            );
         }
     }
 
@@ -176,9 +179,15 @@ fn phase_string(v: &serde_yaml::Value) -> String {
 }
 
 fn phase_to_epic_map() -> BTreeMap<&'static str, &'static str> {
-    [("0", "E0"), ("1", "E1"), ("2", "E2"), ("2b", "E2"), ("3", "E3")]
-        .into_iter()
-        .collect()
+    [
+        ("0", "E0"),
+        ("1", "E1"),
+        ("2", "E2"),
+        ("2b", "E2"),
+        ("3", "E3"),
+    ]
+    .into_iter()
+    .collect()
 }
 
 fn phase_to_label_map() -> BTreeMap<&'static str, &'static str> {
@@ -193,11 +202,7 @@ fn phase_to_label_map() -> BTreeMap<&'static str, &'static str> {
     .collect()
 }
 
-fn bead_labels(
-    bead: &Bead,
-    phase_str: &str,
-    phase_to_label: &BTreeMap<&str, &str>,
-) -> Vec<String> {
+fn bead_labels(bead: &Bead, phase_str: &str, phase_to_label: &BTreeMap<&str, &str>) -> Vec<String> {
     let mut labels = vec!["bead".to_string()];
     if let Some(p) = phase_to_label.get(phase_str) {
         labels.push((*p).to_string());
@@ -374,10 +379,8 @@ fn compose_parallel_plan(beads: &[Bead]) -> String {
         let parallel = max_parallel_groups(group);
         for (i, batch) in parallel.iter().enumerate() {
             let ids: Vec<String> = batch.iter().map(|b| b.id.clone()).collect();
-            let files: BTreeSet<String> = batch
-                .iter()
-                .flat_map(|b| b.files.iter().cloned())
-                .collect();
+            let files: BTreeSet<String> =
+                batch.iter().flat_map(|b| b.files.iter().cloned()).collect();
             s.push_str(&format!(
                 "- Batch {}.{}: {} (touches {})\n",
                 d,
@@ -394,11 +397,7 @@ fn compose_parallel_plan(beads: &[Bead]) -> String {
 fn compute_depths(beads: &[Bead]) -> BTreeMap<String, usize> {
     let by_id: BTreeMap<&str, &Bead> = beads.iter().map(|b| (b.id.as_str(), b)).collect();
     let mut depth = BTreeMap::new();
-    fn dfs(
-        id: &str,
-        by_id: &BTreeMap<&str, &Bead>,
-        depth: &mut BTreeMap<String, usize>,
-    ) -> usize {
+    fn dfs(id: &str, by_id: &BTreeMap<&str, &Bead>, depth: &mut BTreeMap<String, usize>) -> usize {
         if let Some(d) = depth.get(id) {
             return *d;
         }
@@ -453,15 +452,23 @@ fn escape_md(s: &str) -> String {
 fn create_label(repo: &str, label: &Label) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("gh")
         .args([
-            "label", "create", &label.name,
-            "--repo", repo,
-            "--color", &label.color,
-            "--description", &label.description,
+            "label",
+            "create",
+            &label.name,
+            "--repo",
+            repo,
+            "--color",
+            &label.color,
+            "--description",
+            &label.description,
             "--force",
         ])
         .status()?;
     if !status.success() {
-        eprintln!("warning: label create failed for {} (may already exist)", label.name);
+        eprintln!(
+            "warning: label create failed for {} (may already exist)",
+            label.name
+        );
     }
     Ok(())
 }
@@ -474,9 +481,23 @@ fn create_issue(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     // Dedup: skip if an open issue with the same title already exists.
     let existing = Command::new("gh")
-        .args(["issue", "list", "--repo", repo, "--state", "all", "--search", title, "--json", "number,title", "--limit", "20"])
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--search",
+            title,
+            "--json",
+            "number,title",
+            "--limit",
+            "20",
+        ])
         .output()?;
-    let existing_json: serde_json::Value = serde_json::from_slice(&existing.stdout).unwrap_or(serde_json::Value::Array(vec![]));
+    let existing_json: serde_json::Value =
+        serde_json::from_slice(&existing.stdout).unwrap_or(serde_json::Value::Array(vec![]));
     if let Some(arr) = existing_json.as_array() {
         for v in arr {
             if v.get("title").and_then(|t| t.as_str()) == Some(title) {
@@ -490,9 +511,12 @@ fn create_issue(
     let mut args = vec![
         "issue".to_string(),
         "create".to_string(),
-        "--repo".to_string(), repo.to_string(),
-        "--title".to_string(), title.to_string(),
-        "--body".to_string(), body.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--title".to_string(),
+        title.to_string(),
+        "--body".to_string(),
+        body.to_string(),
     ];
     for l in labels {
         args.push("--label".to_string());
@@ -504,7 +528,11 @@ fn create_issue(
         return Err(format!("gh issue create failed: {}", stderr).into());
     }
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let number = url.rsplit('/').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let number = url
+        .rsplit('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     println!("  + #{} {}", number, title);
     Ok(number)
 }

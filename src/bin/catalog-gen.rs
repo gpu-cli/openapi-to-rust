@@ -78,8 +78,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     catalog.totals.object_count = catalog.objects.len();
     catalog.totals.field_count = catalog.objects.values().map(|o| o.fields.len()).sum();
-    catalog.totals.patterned_field_count =
-        catalog.objects.values().map(|o| o.patterned_fields.len()).sum();
+    catalog.totals.patterned_field_count = catalog
+        .objects
+        .values()
+        .map(|o| o.patterned_fields.len())
+        .sum();
     catalog.totals.json_schema_keyword_count = catalog.json_schema_2020_12_keywords.len();
     catalog.totals.parameter_style_combo_count = catalog.parameter_style_matrix.len();
 
@@ -301,17 +304,12 @@ fn strip_markdown(s: &str) -> String {
             }
             ']' => {
                 in_link_text = false;
-                while let Some(&n) = chars.peek() {
-                    if n == '(' {
-                        chars.next();
-                        for inner in chars.by_ref() {
-                            if inner == ')' {
-                                break;
-                            }
+                if let Some(&'(') = chars.peek() {
+                    chars.next();
+                    for inner in chars.by_ref() {
+                        if inner == ')' {
+                            break;
                         }
-                        break;
-                    } else {
-                        break;
                     }
                 }
             }
@@ -332,27 +330,69 @@ fn strip_markdown(s: &str) -> String {
 fn json_schema_2020_12_keywords() -> Vec<String> {
     [
         // Core
-        "$schema", "$vocabulary", "$id", "$ref", "$anchor", "$dynamicRef", "$dynamicAnchor",
-        "$defs", "$comment",
+        "$schema",
+        "$vocabulary",
+        "$id",
+        "$ref",
+        "$anchor",
+        "$dynamicRef",
+        "$dynamicAnchor",
+        "$defs",
+        "$comment",
         // Applicators
-        "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "dependentSchemas",
-        "prefixItems", "items", "contains", "properties", "patternProperties",
-        "additionalProperties", "propertyNames",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "if",
+        "then",
+        "else",
+        "dependentSchemas",
+        "prefixItems",
+        "items",
+        "contains",
+        "properties",
+        "patternProperties",
+        "additionalProperties",
+        "propertyNames",
         // Validation
-        "type", "enum", "const",
-        "multipleOf", "maximum", "exclusiveMaximum", "minimum", "exclusiveMinimum",
-        "maxLength", "minLength", "pattern",
-        "maxItems", "minItems", "uniqueItems", "maxContains", "minContains",
-        "maxProperties", "minProperties", "required", "dependentRequired",
+        "type",
+        "enum",
+        "const",
+        "multipleOf",
+        "maximum",
+        "exclusiveMaximum",
+        "minimum",
+        "exclusiveMinimum",
+        "maxLength",
+        "minLength",
+        "pattern",
+        "maxItems",
+        "minItems",
+        "uniqueItems",
+        "maxContains",
+        "minContains",
+        "maxProperties",
+        "minProperties",
+        "required",
+        "dependentRequired",
         // Meta-data
-        "title", "description", "default", "deprecated", "readOnly", "writeOnly",
+        "title",
+        "description",
+        "default",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
         "examples",
         // Format
         "format",
         // Content
-        "contentEncoding", "contentMediaType", "contentSchema",
+        "contentEncoding",
+        "contentMediaType",
+        "contentSchema",
         // Unevaluated
-        "unevaluatedItems", "unevaluatedProperties",
+        "unevaluatedItems",
+        "unevaluatedProperties",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -409,12 +449,33 @@ fn parameter_style_matrix() -> Vec<StyleEntry> {
 
 fn appendices() -> Vec<AppendixEntry> {
     vec![
-        AppendixEntry { id: "A", title: "Revision History" },
-        AppendixEntry { id: "B", title: "Data Type Conversion" },
-        AppendixEntry { id: "C", title: "Using RFC6570-Based Serialization" },
-        AppendixEntry { id: "D", title: "Serializing Headers and Cookies" },
-        AppendixEntry { id: "E", title: "Percent-Encoding and Form Media Types" },
-        AppendixEntry { id: "F", title: "Base URI Determination and Reference Resolution" },
-        AppendixEntry { id: "G", title: "Parsing and Resolution Guidance" },
+        AppendixEntry {
+            id: "A",
+            title: "Revision History",
+        },
+        AppendixEntry {
+            id: "B",
+            title: "Data Type Conversion",
+        },
+        AppendixEntry {
+            id: "C",
+            title: "Using RFC6570-Based Serialization",
+        },
+        AppendixEntry {
+            id: "D",
+            title: "Serializing Headers and Cookies",
+        },
+        AppendixEntry {
+            id: "E",
+            title: "Percent-Encoding and Form Media Types",
+        },
+        AppendixEntry {
+            id: "F",
+            title: "Base URI Determination and Reference Resolution",
+        },
+        AppendixEntry {
+            id: "G",
+            title: "Parsing and Resolution Guidance",
+        },
     ]
 }

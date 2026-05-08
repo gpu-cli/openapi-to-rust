@@ -175,7 +175,10 @@ impl CodeGenerator {
                 "HEAD" => quote! { HttpMethod::Head },
                 "OPTIONS" => quote! { HttpMethod::Options },
                 "TRACE" => quote! { HttpMethod::Trace },
-                other => panic!("unsupported HTTP method `{other}` for op `{}`", op.operation_id),
+                other => panic!(
+                    "unsupported HTTP method `{other}` for op `{}`",
+                    op.operation_id
+                ),
             };
             let path = &op.path;
 

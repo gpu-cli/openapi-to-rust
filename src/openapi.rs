@@ -587,12 +587,10 @@ impl Schema {
     pub fn schema_type(&self) -> Option<&SchemaType> {
         match self {
             Schema::Typed { schema_type, .. } => Some(schema_type),
-            Schema::TypedMulti { schema_types, .. } => {
-                schema_types
-                    .iter()
-                    .find(|t| **t != SchemaType::Null)
-                    .or_else(|| schema_types.first())
-            }
+            Schema::TypedMulti { schema_types, .. } => schema_types
+                .iter()
+                .find(|t| **t != SchemaType::Null)
+                .or_else(|| schema_types.first()),
             _ => None,
         }
     }

@@ -49,7 +49,7 @@ fn test_generate_get_operation() {
         },
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -88,7 +88,7 @@ fn test_generate_post_operation() {
         },
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -130,7 +130,7 @@ fn test_generate_put_operation() {
         },
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -162,7 +162,7 @@ fn test_generate_delete_operation() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -197,7 +197,7 @@ fn test_generate_patch_operation() {
         },
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -270,7 +270,7 @@ fn test_method_with_response_type() {
         },
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -300,7 +300,7 @@ fn test_method_without_response_type() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -342,7 +342,7 @@ fn test_error_handling_generation() {
         },
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -375,7 +375,7 @@ fn test_url_construction() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -398,7 +398,7 @@ fn test_url_construction() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -426,7 +426,7 @@ fn test_bearer_auth_injection() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -456,7 +456,7 @@ fn test_custom_headers_injection() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -556,7 +556,7 @@ fn test_doc_comment_generation() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: false,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -589,7 +589,7 @@ fn test_generate_form_urlencoded_operation() {
         },
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -620,7 +620,7 @@ fn test_generate_multipart_operation() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -649,7 +649,7 @@ fn test_generate_octet_stream_operation() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -680,7 +680,7 @@ fn test_generate_text_plain_operation() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -718,7 +718,7 @@ fn test_request_body_schema_name_pascal_cased() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 
@@ -734,7 +734,7 @@ fn test_request_body_schema_name_pascal_cased() {
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
-            supports_streaming: false,
+        supports_streaming: false,
         stream_parameter: None,
     };
 

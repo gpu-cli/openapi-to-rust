@@ -25,7 +25,10 @@ const SUITE_REL: &str = "tests/conformance/external/json-schema-test-suite/tests
 /// these are recorded as `INTENTIONALLY_SKIPPED` rather than failing the
 /// build. Each entry must justify itself in `reason`.
 const SKIP_LIST: &[(&str, &str)] = &[
-    ("dynamicRef.json", "$dynamicRef/$dynamicAnchor not modeled (only obsolete $recursiveRef)"),
+    (
+        "dynamicRef.json",
+        "$dynamicRef/$dynamicAnchor not modeled (only obsolete $recursiveRef)",
+    ),
     ("vocabulary.json", "$vocabulary handling not modeled"),
     ("unknownKeyword.json", "deny_unknown_fields not yet enabled"),
 ];
@@ -65,7 +68,11 @@ fn json_schema_2020_12_parse_corpus() {
     }
 
     let suites = load_suites(&suite_dir);
-    assert!(!suites.is_empty(), "no test files found in {}", suite_dir.display());
+    assert!(
+        !suites.is_empty(),
+        "no test files found in {}",
+        suite_dir.display()
+    );
 
     let skip: BTreeMap<&str, &str> = SKIP_LIST.iter().copied().collect();
     let mut by_file: BTreeMap<String, Tally> = BTreeMap::new();
@@ -171,11 +178,9 @@ fn load_suites(dir: &Path) -> Vec<Suite> {
 /// equality would require canonicalization and is out of scope here.
 fn json_keys_subset(expected: &Value, actual: &Value) -> bool {
     match (expected, actual) {
-        (Value::Object(e), Value::Object(a)) => e.iter().all(|(k, ev)| {
-            a.get(k)
-                .map(|av| json_keys_subset(ev, av))
-                .unwrap_or(false)
-        }),
+        (Value::Object(e), Value::Object(a)) => e
+            .iter()
+            .all(|(k, ev)| a.get(k).map(|av| json_keys_subset(ev, av)).unwrap_or(false)),
         _ => true,
     }
 }

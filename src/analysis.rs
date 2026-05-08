@@ -646,10 +646,7 @@ impl SchemaAnalyzer {
         // A document may legitimately have no `components.schemas` (e.g. a
         // webhooks-only or paths-only spec). Return an empty map in that case
         // and let downstream codegen handle "no types to emit" gracefully.
-        let schemas = spec
-            .components
-            .as_ref()
-            .and_then(|c| c.schemas.as_ref());
+        let schemas = spec.components.as_ref().and_then(|c| c.schemas.as_ref());
         Ok(schemas
             .map(|m| {
                 m.iter()
@@ -3470,10 +3467,11 @@ impl SchemaAnalyzer {
         if no_properties {
             // Check for constraints that would make this a structured type.
             // After J5–J8, these are typed fields rather than `extra` lookups.
-            let has_structural_constraints =
-                details.required.as_ref()
-                    .map(|req| req.iter().any(|r| r != "type"))
-                    .unwrap_or(false)
+            let has_structural_constraints = details
+                .required
+                .as_ref()
+                .map(|req| req.iter().any(|r| r != "type"))
+                .unwrap_or(false)
                 || details.pattern_properties.is_some()
                 || details.property_names.is_some()
                 || details.min_properties.is_some()
@@ -3701,10 +3699,7 @@ impl SchemaAnalyzer {
                 // signal so a `stream: true` parameter and an event-stream
                 // content type produce a streaming variant by default.
                 if let Some(content) = response.content.as_ref() {
-                    if content
-                        .keys()
-                        .any(|ct| ct.starts_with("text/event-stream"))
-                    {
+                    if content.keys().any(|ct| ct.starts_with("text/event-stream")) {
                         op_info.supports_streaming = true;
                     }
                 }

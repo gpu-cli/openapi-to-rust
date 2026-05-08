@@ -20,7 +20,9 @@ const APIS_GURU_REL: &str = "tests/conformance/external/apis-guru/APIs";
 #[test]
 fn apis_guru_smoke() {
     if std::env::var_os("APIS_GURU_SMOKE").is_none() {
-        eprintln!("APIS_GURU_SMOKE not set — skipping (run tests/conformance/external/apis-guru-sync.sh first, then export APIS_GURU_SMOKE=1)");
+        eprintln!(
+            "APIS_GURU_SMOKE not set — skipping (run tests/conformance/external/apis-guru-sync.sh first, then export APIS_GURU_SMOKE=1)"
+        );
         return;
     }
 
@@ -98,7 +100,9 @@ fn walk(root: &Path, out: &mut Vec<PathBuf>) {
         } else {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if (ext == "yaml" || ext == "json") && (name == "openapi.yaml" || name == "openapi.json") {
+            if (ext == "yaml" || ext == "json")
+                && (name == "openapi.yaml" || name == "openapi.json")
+            {
                 out.push(path);
             }
         }
@@ -127,5 +131,8 @@ fn provider_label(path: &Path) -> String {
         }
         comps.remove(0);
     }
-    comps.first().map(|s| s.to_string()).unwrap_or_else(|| "?".to_string())
+    comps
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "?".to_string())
 }

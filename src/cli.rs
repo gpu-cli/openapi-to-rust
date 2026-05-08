@@ -278,7 +278,10 @@ fn parse_oas_version(s: &str) -> Option<(u32, u32)> {
     let mut parts = s.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor_raw = parts.next()?;
-    let minor_digits: String = minor_raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let minor_digits: String = minor_raw
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     let minor = minor_digits.parse().ok()?;
     Some((major, minor))
 }
