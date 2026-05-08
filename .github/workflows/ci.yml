@@ -64,6 +64,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: |
           scripts/spec-compile.sh \
-            anthropic asana browserbase cartesia cerebras coda coingecko \
-            digitalocean groq imagekit launchdarkly meta-llama openai \
-            resend runway spotify terminal-shop twilio val-town writer
+            anthropic arcade asana box browserbase cartesia cerebras circleci \
+            coda coingecko datadog-v2 digitalocean github gitpod \
+            google-calendar google-drive google-gmail google-tasks google-youtube \
+            grafana groq imagekit increase launchdarkly letta luma meta-llama \
+            modern-treasury openai pagerduty perplexity resend retell runway \
+            sentry snyk spotify supabase terminal-shop together twilio val-town \
+            writer

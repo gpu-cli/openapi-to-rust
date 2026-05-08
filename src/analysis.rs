@@ -145,6 +145,28 @@ impl RequestBodyContent {
     }
 }
 
+/// Compute the disambiguation-base for a parameter name. Mirrors
+/// `ClientGenerator::sanitize_param_name` so analysis-time uniqueness
+/// decisions and codegen-time emission agree on the final ident.
+fn base_param_ident(name: &str) -> String {
+    use heck::ToSnakeCase;
+    let suffix = if name.ends_with("<=") {
+        "_lte"
+    } else if name.ends_with(">=") {
+        "_gte"
+    } else if name.ends_with('<') {
+        "_lt"
+    } else if name.ends_with('>') {
+        "_gt"
+    } else {
+        ""
+    };
+    let stripped = name.trim_end_matches(['<', '>', '=']);
+    let mut snake = stripped.to_snake_case();
+    snake.push_str(suffix);
+    snake
+}
+
 /// Information about an operation parameter
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ParameterInfo {
@@ -167,6 +189,15 @@ pub struct ParameterInfo {
     /// See issue #10 follow-up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
+    /// Disambiguated Rust ident assigned by the analyzer at the operation
+    /// scope. When two parameters in the same operation sanitize to the same
+    /// snake_case name (e.g. `exclude_ids` + `exclude-ids` in vercel,
+    /// `StartTime` + `StartTime>` in twilio), the analyzer suffixes
+    /// later occurrences with `_2`, `_3`, … so the codegen function
+    /// signature and body don't reuse the same binding.
+    /// Empty/none = use sanitize from `name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rust_ident: Option<String>,
 }
 
 impl Default for DependencyGraph {
@@ -980,20 +1011,37 @@ impl SchemaAnalyzer {
 
         let parts: Vec<&str> = ref_str.split('/').collect();
 
-        // Standard pattern: #/components/schemas/{SchemaName}[/deeper/path]
-        // parts[0]="#", parts[1]="components", parts[2]="schemas", parts[3]="SchemaName"
+        // Standard 3.x pattern: #/components/schemas/{SchemaName}[/deeper/path]
         if parts.len() >= 4 && parts[0] == "#" && parts[2] == "schemas" {
             return Some(parts[3]);
         }
 
-        // Fallback for other ref patterns: use last segment,
-        // but only if it looks like a schema name (not a bare number)
-        let last = parts.last()?;
-        if last.is_empty() || last.chars().all(|c| c.is_ascii_digit()) {
-            None
-        } else {
-            Some(last)
+        // Swagger 2.0 carry-over: some 3.x specs (Google) still use
+        // `#/definitions/{SchemaName}`. Treat it as an alias.
+        if parts.len() >= 3 && parts[0] == "#" && parts[1] == "definitions" {
+            return Some(parts[2]);
         }
+
+        // Last-segment fallback for other ref shapes — but only if the
+        // segment plausibly names a top-level schema (PascalCase, no digits-
+        // only, not a JSON-schema keyword like `schema`/`properties`/`items`).
+        // pagerduty has `#/components/parameters/foo/schema`, where the last
+        // segment "schema" is a sub-path indicator, not a schema name.
+        let last = parts.last()?;
+        if last.is_empty()
+            || last.chars().all(|c| c.is_ascii_digit())
+            || matches!(
+                *last,
+                "schema" | "properties" | "items" | "additionalProperties"
+            )
+        {
+            return None;
+        }
+        let first = last.chars().next().unwrap_or(' ');
+        if !first.is_ascii_alphabetic() || !first.is_ascii_uppercase() {
+            return None;
+        }
+        Some(last)
     }
 
     fn analyze_schema(&mut self, schema_name: &str) -> Result<AnalyzedSchema> {
@@ -1049,12 +1097,26 @@ impl SchemaAnalyzer {
 
         let schema_type = match schema {
             Schema::Reference { reference, .. } => {
-                let target = self
-                    .extract_schema_name(reference)
-                    .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
-                    .to_string();
-                dependencies.insert(target.clone());
-                SchemaType::Reference { target }
+                // For real-world refs we can't resolve to a known schema name
+                // (e.g. pagerduty's `#/components/parameters/foo/schema`),
+                // fall back to opaque JSON instead of failing whole-document
+                // generation. The rest of the spec is usually unaffected.
+                match self.extract_schema_name(reference) {
+                    Some(name) => {
+                        let target = name.to_string();
+                        dependencies.insert(target.clone());
+                        SchemaType::Reference { target }
+                    }
+                    None => {
+                        eprintln!(
+                            "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
+                            reference
+                        );
+                        SchemaType::Primitive {
+                            rust_type: "serde_json::Value".to_string(),
+                        }
+                    }
+                }
             }
             Schema::RecursiveRef { recursive_ref, .. }
             | Schema::DynamicRef {
@@ -1224,6 +1286,21 @@ impl SchemaAnalyzer {
                         SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
                         }
+                    } else if prop_schema.is_nullable_pattern()
+                        && let Some(non_null) = prop_schema.non_null_variant()
+                    {
+                        // 3.1 idiom: `anyOf: [<schema>, {type: null}]`. The
+                        // wrapper has no semantic value beyond nullability;
+                        // unwrap to the inner type. Without this, the synthesized
+                        // wrapper type collides with the inner $ref's name when
+                        // the property name produces a colliding parent context
+                        // (e.g. `Step.status` → `StepStatus`, which is also the
+                        // referenced component).
+                        self.analyze_property_schema_with_context(
+                            non_null,
+                            Some(prop_name),
+                            dependencies,
+                        )?
                     } else {
                         // This is an anyOf union in a property - create a named union type
                         // Use the current schema name as context to make the union name unique
@@ -1234,7 +1311,28 @@ impl SchemaAnalyzer {
 
                         // Generate a name based on both the schema and property name
                         let prop_pascal = self.to_pascal_case(prop_name);
-                        let union_type_name = format!("{context_name}{prop_pascal}");
+                        let mut union_type_name = format!("{context_name}{prop_pascal}");
+
+                        // Avoid colliding with an existing component schema or
+                        // an inline name that's already in resolved_cache.
+                        if self.schemas.contains_key(&union_type_name)
+                            || self.resolved_cache.contains_key(&union_type_name)
+                        {
+                            let mut suffix = 2;
+                            loop {
+                                let candidate = format!("{union_type_name}Union{suffix}");
+                                if !self.schemas.contains_key(&candidate)
+                                    && !self.resolved_cache.contains_key(&candidate)
+                                {
+                                    union_type_name = candidate;
+                                    break;
+                                }
+                                suffix += 1;
+                                if suffix > 1000 {
+                                    break;
+                                }
+                            }
+                        }
 
                         // Analyze the union
                         let union_schema_type = self.analyze_anyof_union(
@@ -1360,17 +1458,29 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
         if let Some(ref_str) = self.get_any_reference(schema) {
-            let target = if ref_str == "#" {
-                // $recursiveRef: "#" - need to find the schema with $recursiveAnchor: true
-                self.find_recursive_anchor_schema()
-                    .unwrap_or_else(|| "UnknownRecursive".to_string())
+            let target_opt = if ref_str == "#" {
+                Some(
+                    self.find_recursive_anchor_schema()
+                        .unwrap_or_else(|| "UnknownRecursive".to_string()),
+                )
             } else {
-                self.extract_schema_name(ref_str)
-                    .ok_or_else(|| GeneratorError::UnresolvedReference(ref_str.to_string()))?
-                    .to_string()
+                self.extract_schema_name(ref_str).map(|s| s.to_string())
             };
-            dependencies.insert(target.clone());
-            return Ok(SchemaType::Reference { target });
+            match target_opt {
+                Some(target) => {
+                    dependencies.insert(target.clone());
+                    return Ok(SchemaType::Reference { target });
+                }
+                None => {
+                    eprintln!(
+                        "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
+                        ref_str
+                    );
+                    return Ok(SchemaType::Primitive {
+                        rust_type: "serde_json::Value".to_string(),
+                    });
+                }
+            }
         }
 
         if let Some(schema_type) = schema.schema_type() {
@@ -3786,6 +3896,25 @@ impl SchemaAnalyzer {
             }
         }
 
+        // Disambiguate Rust idents across the operation. Real-world specs
+        // sometimes use both `kebab-case` and `snake_case` for closely-related
+        // filter parameters (vercel: `exclude_ids` + `exclude-ids`), or
+        // operator-suffixed forms (twilio: `StartTime`, `StartTime<`,
+        // `StartTime>`). Without disambiguation those parameters share a
+        // single binding and the generated body fails E0382 (use of moved
+        // value) or E0415 (binding declared twice).
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in op_info.parameters.iter_mut() {
+            let raw = base_param_ident(&p.name);
+            let mut chosen = raw.clone();
+            let mut suffix = 2;
+            while !used.insert(chosen.clone()) {
+                chosen = format!("{raw}_{suffix}");
+                suffix += 1;
+            }
+            p.rust_ident = Some(chosen);
+        }
+
         Ok(op_info)
     }
 
@@ -3959,6 +4088,7 @@ impl SchemaAnalyzer {
             rust_type,
             description: param.description.clone(),
             enum_values,
+            rust_ident: None,
         }))
     }
 }

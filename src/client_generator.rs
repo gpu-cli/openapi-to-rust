@@ -455,10 +455,31 @@ impl CodeGenerator {
 
         let enum_ident = format_ident!("{}", param.rust_type);
 
-        let variants: Vec<TokenStream> = values
+        // Dedupe variant names. Real-world specs use sort enums like
+        // `["created_at", "-created_at"]` (descending prefix), and both
+        // PascalCase to `CreatedAt`. Suffix collisions with `_2`/`_3`/…
+        // while keeping each `serde(rename)` pointing at the original
+        // wire string.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let variant_names: Vec<String> = values
             .iter()
             .map(|value| {
-                let variant_ident = format_ident!("{}", self.to_rust_enum_variant(value));
+                let base = self.to_rust_enum_variant(value);
+                let mut chosen = base.clone();
+                let mut suffix = 2;
+                while !used.insert(chosen.clone()) {
+                    chosen = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
+                chosen
+            })
+            .collect();
+
+        let variants: Vec<TokenStream> = values
+            .iter()
+            .zip(&variant_names)
+            .map(|(value, name)| {
+                let variant_ident = format_ident!("{}", name);
                 quote! {
                     #[serde(rename = #value)]
                     #variant_ident,
@@ -468,8 +489,9 @@ impl CodeGenerator {
 
         let display_arms: Vec<TokenStream> = values
             .iter()
-            .map(|value| {
-                let variant_ident = format_ident!("{}", self.to_rust_enum_variant(value));
+            .zip(&variant_names)
+            .map(|(value, name)| {
+                let variant_ident = format_ident!("{}", name);
                 quote! { Self::#variant_ident => #value, }
             })
             .collect();
@@ -702,7 +724,7 @@ impl CodeGenerator {
         }
         let mut emit = Vec::new();
         for param in header_params {
-            let param_name_snake = self.sanitize_param_name(&param.name);
+            let param_name_snake = self.param_ident_str(param);
             let param_ident = Self::to_field_ident(&param_name_snake);
             let header_name = &param.name;
             if param.required {
@@ -750,7 +772,7 @@ impl CodeGenerator {
 
         for param in query_params {
             // Use snake_case for Rust variable name with keyword escaping
-            let param_name_snake = self.sanitize_param_name(&param.name);
+            let param_name_snake = self.param_ident_str(param);
             let param_name = Self::to_field_ident(&param_name_snake);
 
             // Use the original parameter name from OpenAPI spec as the query string key
@@ -888,12 +910,28 @@ impl CodeGenerator {
     /// Generate request parameters including path, query, header, and request body.
     fn generate_request_param(&self, op: &OperationInfo) -> TokenStream {
         let mut params = Vec::new();
+        // Dedup parameter Rust idents within this method signature. Real-world
+        // specs sometimes declare two parameters that sanitize to the same
+        // snake_case name (modern-treasury declared `name` twice across
+        // different param objects). Suffixing with `_2`, `_3`, … keeps each
+        // parameter accessible while preserving the original wire-level name
+        // (which is used elsewhere as the query/path/header key).
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut unique_param_ident = |raw: String| -> syn::Ident {
+            let mut chosen = raw.clone();
+            let mut suffix = 2;
+            while !used.insert(chosen.clone()) {
+                chosen = format!("{raw}_{suffix}");
+                suffix += 1;
+            }
+            Self::to_field_ident(&chosen)
+        };
 
         // Add path parameters
         for param in &op.parameters {
             if param.location == "path" {
-                let param_name_snake = self.sanitize_param_name(&param.name);
-                let param_name = Self::to_field_ident(&param_name_snake);
+                let param_name_snake = self.param_ident_str(param);
+                let param_name = unique_param_ident(param_name_snake);
                 let param_type = self.get_param_rust_type(param);
                 params.push(quote! { #param_name: #param_type });
             }
@@ -902,8 +940,8 @@ impl CodeGenerator {
         // Add query parameters (all as Option<T>)
         for param in &op.parameters {
             if param.location == "query" {
-                let param_name_snake = self.sanitize_param_name(&param.name);
-                let param_name = Self::to_field_ident(&param_name_snake);
+                let param_name_snake = self.param_ident_str(param);
+                let param_name = unique_param_ident(param_name_snake);
                 let param_type = self.get_param_rust_type(param);
 
                 // Query parameters should be Option unless explicitly required
@@ -922,8 +960,8 @@ impl CodeGenerator {
         // analysis.
         for param in &op.parameters {
             if param.location == "header" {
-                let param_name_snake = self.sanitize_param_name(&param.name);
-                let param_name = Self::to_field_ident(&param_name_snake);
+                let param_name_snake = self.param_ident_str(param);
+                let param_name = unique_param_ident(param_name_snake);
                 let param_type = self.get_param_rust_type(param);
                 if param.required {
                     params.push(quote! { #param_name: #param_type });
@@ -1203,9 +1241,14 @@ impl CodeGenerator {
         // Fallback for "default" or undeclared status codes: try to parse
         // as `serde_json::Value` for inspectability when the op's error
         // type is generic, otherwise leave typed = None.
-        let has_typed_enum = op.response_schemas.iter().any(|(code, _)| {
-            !code.starts_with('2') && !matches!(code.as_str(), "default" | "Default")
-        });
+        // Must mirror op_error_type_token: if op_error_type is the typed
+        // enum (any non-2xx response, including `default`), the fallback arm
+        // can't deserialize into `serde_json::Value` because `typed` is the
+        // enum. Default to `typed = None` in that case.
+        let has_typed_enum = op
+            .response_schemas
+            .iter()
+            .any(|(code, _)| !code.starts_with('2'));
 
         let default_arm = if has_typed_enum {
             quote! {
@@ -1284,7 +1327,7 @@ impl CodeGenerator {
             if format_string.contains(&placeholder) {
                 format_string = format_string.replace(&placeholder, "{}");
 
-                let param_name_snake = self.sanitize_param_name(&param.name);
+                let param_name_snake = self.param_ident_str(param);
                 let param_ident = Self::to_field_ident(&param_name_snake);
 
                 if Self::param_uses_as_ref_str(param) {
@@ -1309,6 +1352,31 @@ impl CodeGenerator {
             quote! {
                 let request_url = format!("{}{}", self.base_url, format!(#format_string, #(#format_args),*));
             }
+        }
+    }
+
+    /// Resolve the Rust ident for a parameter. Prefers the disambiguated
+    /// `rust_ident` set by the analyzer (which dedupes across the whole
+    /// operation), falling back to a fresh sanitize of the wire name when
+    /// no analyzer-side ident is present.
+    fn param_ident_str(&self, param: &crate::analysis::ParameterInfo) -> String {
+        if let Some(ident) = &param.rust_ident {
+            // Apply the keyword-escape and self/super/crate dance the
+            // sanitize fn does. The analyzer's base ident is already the
+            // snake/kebab-aware shape; we only need post-processing.
+            return self.escape_keyword_ident(ident);
+        }
+        self.sanitize_param_name(&param.name)
+    }
+
+    fn escape_keyword_ident(&self, snake_case: &str) -> String {
+        if matches!(snake_case, "self" | "super" | "crate" | "Self") {
+            return format!("{snake_case}_param");
+        }
+        if Self::is_rust_keyword(snake_case) {
+            format!("r#{snake_case}")
+        } else {
+            snake_case.to_string()
         }
     }
 

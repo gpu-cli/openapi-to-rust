@@ -222,12 +222,25 @@ impl CodeGenerator {
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
 
-        // Generate all schemas, including those not in dependency graph
+        // Defensive layer: track emitted Rust type names so that two
+        // analyzed schemas which sanitize to the same Rust ident don't
+        // produce two definitions (E0119 conflicting impls / E0428 name
+        // defined multiple times). The first occurrence wins; later
+        // occurrences are silently dropped. Schema-name uniqueness at the
+        // analysis layer is a follow-up; this stops the generated file from
+        // failing to compile.
+        let mut emitted_rust_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut processed = std::collections::HashSet::new();
 
         // First, generate schemas in dependency order
         for schema_name in generation_order {
             if let Some(schema) = analysis.schemas.get(&schema_name) {
+                let rust_name = self.to_rust_type_name(&schema.name);
+                if !emitted_rust_names.insert(rust_name) {
+                    processed.insert(schema_name);
+                    continue;
+                }
                 let type_def =
                     self.generate_type_definition(schema, analysis, &discriminated_variant_info)?;
                 if !type_def.is_empty() {
@@ -238,7 +251,6 @@ impl CodeGenerator {
         }
 
         // Then generate any remaining schemas not in dependency graph
-        // Sort by name for deterministic output
         let mut remaining_schemas: Vec<_> = analysis
             .schemas
             .iter()
@@ -247,6 +259,10 @@ impl CodeGenerator {
         remaining_schemas.sort_by_key(|(name, _)| name.as_str());
 
         for (_schema_name, schema) in remaining_schemas {
+            let rust_name = self.to_rust_type_name(&schema.name);
+            if !emitted_rust_names.insert(rust_name) {
+                continue;
+            }
             let type_def =
                 self.generate_type_definition(schema, analysis, &discriminated_variant_info)?;
             if !type_def.is_empty() {
@@ -859,11 +875,24 @@ impl CodeGenerator {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // Variant-name uniqueness: enum values that PascalCase to the same
+        // identifier (e.g. `ASC`/`asc` both → `Asc`) collide and produce
+        // E0428 + non-exhaustive matches downstream. Dedupe by suffixing
+        // `_2`, `_3`, … on collisions while preserving the first occurrence's
+        // name, and keeping each variant's `#[serde(rename)]` pointed at the
+        // original wire string.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let variant_pairs: Vec<(syn::Ident, &String, bool)> = values
             .iter()
             .enumerate()
             .map(|(i, value)| {
-                let variant_name = self.to_rust_enum_variant(value);
+                let base = self.to_rust_enum_variant(value);
+                let mut variant_name = base.clone();
+                let mut suffix = 2;
+                while !used.insert(variant_name.clone()) {
+                    variant_name = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
                 let variant_ident = format_ident!("{}", variant_name);
                 let is_default = if let Some(ref default) = default_value {
                     value == default
@@ -960,6 +989,16 @@ impl CodeGenerator {
         let mut sorted_properties: Vec<_> = properties.iter().collect();
         sorted_properties.sort_by_key(|(name, _)| name.as_str());
 
+        // Track Rust field-name uniqueness inside the struct. Two spec
+        // properties whose names sanitize to the same Rust identifier
+        // (e.g. `connectionString` and `connection_string` both → `connection_string`)
+        // would otherwise emit duplicate fields and trigger E0124 / E0062.
+        // We disambiguate by suffixing `_2`, `_3`, … on collisions, and we
+        // skip the duplicate entirely when the spec literally repeats the
+        // same key (impossible in JSON but tolerated in YAML merging).
+        let mut used_field_idents: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         let mut fields: Vec<TokenStream> = sorted_properties
             .into_iter()
             .filter(|(field_name, _)| {
@@ -979,7 +1018,14 @@ impl CodeGenerator {
                 }
             })
             .map(|(field_name, prop)| {
-                let field_ident = Self::to_field_ident(&self.to_rust_field_name(field_name));
+                let raw = self.to_rust_field_name(field_name);
+                let mut chosen = raw.clone();
+                let mut suffix = 2;
+                while !used_field_idents.insert(chosen.clone()) {
+                    chosen = format!("{raw}_{suffix}");
+                    suffix += 1;
+                }
+                let field_ident = Self::to_field_ident(&chosen);
                 let is_required = required.contains(field_name);
                 let field_type =
                     self.generate_field_type(&schema.name, field_name, prop, is_required, analysis);
@@ -1279,6 +1325,17 @@ impl CodeGenerator {
             } else {
                 let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
                 quote! { #type_ident }
+            };
+
+            // Self-referential variant (variant payload type == enclosing
+            // enum) yields an infinite-size enum (E0072). Wrap in `Box<T>` to
+            // break the cycle. Observed in microsoft-graph.yaml.
+            let target_rust_name = self.to_rust_type_name(&variant.target);
+            let enclosing_name = self.to_rust_type_name(&schema.name);
+            let variant_type_tokens = if target_rust_name == enclosing_name {
+                quote! { Box<#variant_type_tokens> }
+            } else {
+                variant_type_tokens
             };
 
             quote! {
@@ -1750,6 +1807,15 @@ impl CodeGenerator {
     }
 
     fn to_rust_field_name(&self, s: &str) -> String {
+        // Track sign / leading-non-alpha so e.g. `+1` and `-1` produce
+        // distinct field names instead of both collapsing to `field_1`
+        // (observed in github.json's reactions schemas).
+        let leading_marker = match s.chars().next() {
+            Some('-') if s.len() > 1 => "neg_",
+            Some('+') if s.len() > 1 => "pos_",
+            _ => "",
+        };
+
         // Convert field name to snake_case properly
         let mut result = String::new();
         let mut prev_was_upper = false;
@@ -1797,7 +1863,9 @@ impl CodeGenerator {
 
         // Ensure field name starts with a letter or underscore (not a number)
         if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            result = format!("field_{result}");
+            result = format!("field_{leading_marker}{result}");
+        } else if !leading_marker.is_empty() {
+            result = format!("{leading_marker}{result}");
         }
 
         // `self`, `super`, `crate`, `Self` are NOT permitted as raw identifiers
