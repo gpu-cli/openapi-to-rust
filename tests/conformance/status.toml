@@ -1,0 +1,72 @@
+# Honest support claims for OpenAPI 3.1 / 3.2 features.
+#
+# This file is the source of truth for what the README and Cargo description
+# may claim. It is regenerated/diffed by `cargo test conformance` — drift
+# between this file and the test results fails CI.
+#
+# status: supported | partial | unsupported | intentionally-skipped
+# Each entry must reference at least one fixture under tests/conformance/fixtures/
+# unless status = "intentionally-skipped".
+
+spec_version = "3.2.0"
+honest_claim = "OpenAPI 3.1 partial; 3.2 not yet."
+
+[[entry]]
+catalog_ref = "objects.PathItem.fields.webhooks"
+status = "unsupported"
+reason = "webhooks parsed into extra; analysis.rs:3493 only walks spec.paths"
+fixtures = ["webhooks/basic-webhook.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Path Item.additionalOperations"
+status = "unsupported"
+reason = "PathItem.operations() enumerates 8 hardcoded methods; 3.2 additions absent"
+fixtures = ["pathitem/additional-operations-3.2.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Path Item.query"
+status = "unsupported"
+reason = "3.2 adds the `query` HTTP method; PathItem struct has no field for it"
+fixtures = ["pathitem/query-method-3.2.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Parameter.style.deepObject"
+status = "unsupported"
+reason = "no style/explode handling; analysis.rs:3767 collapses array/object params to String"
+fixtures = ["parameter/deepobject-query.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Parameter.in.header"
+status = "unsupported"
+reason = "header parameters silently dropped at client_generator.rs:613-673,717-775"
+fixtures = ["parameter/header-required.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Schema.type[array]"
+status = "unsupported"
+reason = "Schema::Typed carries one SchemaType, not Vec; 3.1 canonical type:[\"string\",\"null\"] falls to Untyped"
+fixtures = ["schema/type-string-or-null.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Components.pathItems"
+status = "unsupported"
+reason = "no struct field on Components for pathItems"
+fixtures = ["components/path-items-component.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Security Scheme.type[mutualTLS]"
+status = "unsupported"
+reason = "no SecurityScheme struct at all; entire securitySchemes is in Components.extra"
+fixtures = ["security/mutual-tls.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Schema.$dynamicRef"
+status = "unsupported"
+reason = "only obsoleted $recursiveRef/$recursiveAnchor modeled (openapi.rs:43-49)"
+fixtures = ["schema/dynamic-ref-tree.yaml"]
+
+[[entry]]
+catalog_ref = "objects.Components.mediaTypes"
+status = "unsupported"
+reason = "3.2-only Components bucket; not modeled"
+fixtures = ["components/media-types-component-3.2.yaml"]

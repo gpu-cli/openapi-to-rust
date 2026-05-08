@@ -1,0 +1,26 @@
+# coverage: [objects.Path Item.fields.query]
+# fails_at: L0
+# reason: 3.2 added `query` HTTP method; PathItem struct has no field for it
+openapi: 3.2.0
+info:
+  title: Query Method Demo
+  version: 1.0.0
+paths:
+  /search:
+    query:
+      operationId: search
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                filter: { type: string }
+      responses:
+        "200":
+          description: results
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }

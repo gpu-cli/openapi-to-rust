@@ -1,0 +1,28 @@
+# coverage: [objects.OpenAPI.fields.webhooks, objects.Path Item.fields.post]
+# fails_at: L0
+# reason: webhooks not walked by analysis.rs
+openapi: 3.1.0
+info:
+  title: Webhook Demo
+  version: 1.0.0
+webhooks:
+  newPet:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Pet"
+      responses:
+        "200":
+          description: Acknowledged
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+      required: [id, name]

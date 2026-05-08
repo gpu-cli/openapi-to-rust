@@ -1,0 +1,21 @@
+# coverage: [objects.Parameter.style.deepObject, objects.Parameter.in.query]
+# fails_at: L0
+# reason: style/explode not honored; object query params collapse to String
+openapi: 3.1.0
+info: { title: DeepObject Demo, version: 1.0.0 }
+paths:
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: filter
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            type: object
+            properties:
+              kind: { type: string }
+              region: { type: string }
+      responses:
+        "200": { description: ok }

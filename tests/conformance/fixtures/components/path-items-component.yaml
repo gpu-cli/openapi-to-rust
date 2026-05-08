@@ -1,0 +1,15 @@
+# coverage: [objects.Components.fields.pathItems]
+# fails_at: L0
+# reason: Components struct has no pathItems field
+openapi: 3.1.0
+info: { title: PathItems Component Demo, version: 1.0.0 }
+paths:
+  /things:
+    $ref: "#/components/pathItems/Things"
+components:
+  pathItems:
+    Things:
+      get:
+        operationId: listThings
+        responses:
+          "200": { description: ok }

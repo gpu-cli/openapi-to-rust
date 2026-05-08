@@ -1,0 +1,20 @@
+# coverage: [objects.Path Item.additionalOperations]
+# fails_at: L0
+# reason: 3.2 additionalOperations + query disappear into extra
+openapi: 3.2.0
+info:
+  title: Additional Operations Demo
+  version: 1.0.0
+paths:
+  /things:
+    additionalOperations:
+      LINK:
+        operationId: linkThings
+        responses:
+          "200":
+            description: ok
+      UNLINK:
+        operationId: unlinkThings
+        responses:
+          "200":
+            description: ok

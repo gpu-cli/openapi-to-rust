@@ -1,0 +1,990 @@
+# Beads — units of independently-mergeable work derived from the conformance audit.
+# Source of truth for both the GitHub issue tracker (filed by `cargo run --bin file-beads`)
+# and the parallel-execution plan in PARALLEL-PLAN.md.
+#
+# Each bead has:
+#   id            stable identifier (F1, T1, H1, J1, D1, …)
+#   title         issue title
+#   phase         0 | 1 | 2 | 2b | 3
+#   area          schema | paths | bodies | security | components | webhooks | tags |
+#                 codegen | refs | foundation
+#   files         which source files this bead is expected to touch (drives parallelization)
+#   depends_on    bead IDs that must merge first
+#   fixture       relative path under tests/conformance/fixtures/, or null
+#   evidence      file:line refs into the audit reports
+#   body          issue body (markdown)
+#
+# Parallelization rule: two beads may run concurrently iff their `files` sets are
+# disjoint AND neither is in the other's depends_on closure.
+
+repo: gpu-cli/openapi-to-rust
+
+labels:
+  - { name: "phase:0-foundation",   color: "1d76db", description: "Foundation work — blocks later phases" }
+  - { name: "phase:1-silent-fail",  color: "d73a4a", description: "Top silent failures from the conformance audit" }
+  - { name: "phase:2-3.1-honesty",  color: "a2eeef", description: "Honest 3.1 support (struct families)" }
+  - { name: "phase:2b-json-schema", color: "5319e7", description: "JSON Schema 2020-12 coverage" }
+  - { name: "phase:3-3.2-deltas",   color: "0e8a16", description: "OpenAPI 3.2-specific additions" }
+  - { name: "area:schema",          color: "fbca04", description: "Schema model / JSON Schema" }
+  - { name: "area:paths",           color: "fbca04", description: "Paths / operations / parameters" }
+  - { name: "area:bodies",          color: "fbca04", description: "Request/response bodies, encoding, headers" }
+  - { name: "area:security",        color: "fbca04", description: "Servers + security schemes" }
+  - { name: "area:components",      color: "fbca04", description: "Components / refs" }
+  - { name: "area:codegen",         color: "fbca04", description: "Code generator output" }
+  - { name: "bead",                 color: "0052cc", description: "Independently-mergeable work unit" }
+  - { name: "epic",                 color: "5319e7", description: "Tracking issue for a phase" }
+  - { name: "conformance",          color: "0e8a16", description: "Has a tests/conformance fixture" }
+
+epics:
+  - id: E0
+    title: "[Epic] Phase 0 — Foundation: stop the silent drops"
+    labels: [epic, "phase:0-foundation"]
+    body: |
+      Foundation work that unblocks every subsequent phase. The audit found that the parser
+      silently swallows nearly every spec field via `serde(flatten) extra` maps, with no
+      version gate. Without these landing first, every later fix is unverifiable.
+
+      See: `tmp/openapi-specs/reports/00-SUMMARY.md` (cross-cutting root causes).
+
+      **Children:** F1 F2 F3 F4
+
+  - id: E1
+    title: "[Epic] Phase 1 — Top silent failures"
+    labels: [epic, "phase:1-silent-fail"]
+    body: |
+      The 15 highest-impact silent failures from the audit, ranked by likelihood of
+      producing a wrong but compilable client on real-world specs.
+
+      See: `tmp/openapi-specs/reports/00-SUMMARY.md` § "Top severity-ranked silent failures".
+
+      **Children:** T1–T15. Each can be picked up independently once Phase 0 lands.
+
+  - id: E2
+    title: "[Epic] Phase 2 — Honest 3.1 support"
+    labels: [epic, "phase:2-3.1-honesty"]
+    body: |
+      Model the OAS objects that currently have no Rust struct at all (Server, SecurityScheme,
+      Encoding, Header, Example, Link, Callback, Tag, ExternalDocs, etc.) plus complete
+      JSON Schema 2020-12 keyword coverage.
+
+      See: `tmp/openapi-specs/reports/04-servers-security.md`,
+      `tmp/openapi-specs/reports/05-components-refs-webhooks.md`.
+
+      **Children:** H1–H12, J1–J10.
+
+  - id: E3
+    title: "[Epic] Phase 3 — OpenAPI 3.2 deltas"
+    labels: [epic, "phase:3-3.2-deltas"]
+    body: |
+      The ~15 distinct features new in OpenAPI 3.2.0 (released 2025-09-19). All currently
+      parse silently and are ignored. Highest user-visible risk: 3.2 `additionalOperations`
+      causes whole operations to vanish from generated clients.
+
+      See: `tmp/openapi-specs/reports/06-three-two-deltas.md`.
+
+      **Children:** D1–D10.
+
+beads:
+  # ─────────────── PHASE 0 — FOUNDATION ───────────────
+  - id: F1
+    title: "Add #[serde(deny_unknown_fields)] across spec structs + version validator"
+    phase: 0
+    area: foundation
+    files: [src/openapi.rs, src/cli.rs]
+    depends_on: []
+    fixture: null
+    evidence: "src/openapi.rs:7,26,35,141,391,447,462,475,566,588 (all carry `extra: BTreeMap`)"
+    body: |
+      The audit's #1 architectural finding: **every spec struct ends with**
+      `#[serde(flatten)] pub extra: BTreeMap<String, Value>` and there is no
+      `deny_unknown_fields` anywhere. Result: 3.1- and 3.2-only specs parse
+      without error, silently drop most semantics. Plus `cli.rs:114` reads the
+      `openapi:` field once for a verbose print — no version gate.
+
+      ## Acceptance criteria
+      - [ ] All `extra: BTreeMap<String, Value>` fields removed (or replaced with
+            typed fields). Where unknown fields are legitimately allowed
+            (specification extensions starting with `x-`), introduce a
+            dedicated typed map.
+      - [ ] `#[serde(deny_unknown_fields)]` on every spec struct.
+      - [ ] CLI rejects `openapi` outside `^3\.[01]\.` with a clear error;
+            `^3\.2\.` warns "experimental support" until E3 lands.
+      - [ ] Conformance harness L0 layer flips fixtures from EXTRAS to
+            PARSE_ERR (which is the right failure mode).
+
+      ## Notes
+      Land this first. Every later bead depends on it being possible to assert
+      "we model this field" in a test.
+
+  - id: F2
+    title: "Schema enum supports `type` as array (3.1 canonical nullability)"
+    phase: 0
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: tests/conformance/fixtures/schema/type-string-or-null.yaml
+    evidence: "src/openapi.rs:69-74 (Schema::Typed carries one SchemaType, not Vec)"
+    body: |
+      `Schema::Typed` carries a single `SchemaType`, so `type: ["string","null"]`
+      falls through to `Schema::Untyped` and the type info is lost. The codebase
+      still honors 3.0's `nullable` field. This is the most visible 3.1 gap.
+
+      ## Acceptance criteria
+      - [ ] `Schema::Typed` accepts `Vec<SchemaType>` for the `type` field.
+      - [ ] `null` in the type array maps to nullable (`Option<T>`).
+      - [ ] 3.0 `nullable: true` is removed (we do not do backwards-compat per
+            project conventions).
+      - [ ] Fixture `schema/type-string-or-null.yaml` flips to passing at L1.
+
+  - id: F3
+    title: "Reference Object as sum type for non-Schema reusable objects"
+    phase: 0
+    area: refs
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/openapi.rs:461-571 (Parameter, RequestBody, Response not modeled as Reference|Object)"
+    body: |
+      `Parameter`, `RequestBody`, `Response`, `Header`, `Example`, `Link`,
+      `Callback` may all appear as either an inline object or a `$ref`. The
+      current structs don't model this — references to these objects are
+      typed as direct values and `$ref` lands in `extra`.
+
+      ## Acceptance criteria
+      - [ ] Introduce `enum MaybeRef<T> { Reference { reference, summary,
+            description }, Inline(T) }` (or `RefOr<T>`).
+      - [ ] All affected fields use `MaybeRef<T>`.
+      - [ ] Reference Object's 3.1+ `summary`/`description` overrides are
+            captured.
+
+  - id: F4
+    title: "Accept paths-less specs (components-only and webhooks-only)"
+    phase: 0
+    area: components
+    files: [src/analysis.rs]
+    depends_on: [F1]
+    fixture: tests/conformance/fixtures/components/path-items-component.yaml
+    evidence: "src/analysis.rs:646-648 (errors out when components.schemas is missing)"
+    body: |
+      OAS 3.1+ requires only one of `paths`, `webhooks`, or `components`.
+      Today the analyzer hard-requires `components.schemas` and bails on
+      paths-less specs.
+
+      ## Acceptance criteria
+      - [ ] Analyzer produces a valid (possibly empty) intermediate
+            representation when only `components` or only `webhooks` is present.
+      - [ ] CLI emits at least the components types even with no paths.
+
+  # ─────────────── PHASE 1 — TOP SILENT FAILURES ───────────────
+  - id: T1
+    title: "Wire header request parameters through codegen"
+    phase: 1
+    area: codegen
+    files: [src/client_generator.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: tests/conformance/fixtures/parameter/header-required.yaml
+    evidence: "src/client_generator.rs:613-673,717-775 (filter only on path/query)"
+    body: |
+      `Parameter.in == "header"` parses into `ParameterInfo` but `generate_query_params`
+      and `generate_request_param` filter only on `"path"`/`"query"`. Required
+      headers like `Idempotency-Key` and `X-API-Version` never reach the wire.
+
+      ## Acceptance criteria
+      - [ ] Generated client method emits header parameters via
+            `req.header(name, value)`.
+      - [ ] Fixture `parameter/header-required.yaml` flips from `fails_at: L3`
+            to passing.
+      - [ ] Wiremock test asserts the header is sent.
+
+  - id: T2
+    title: "Emit operations for options/head/patch/trace HTTP methods"
+    phase: 1
+    area: codegen
+    files: [src/client_generator.rs, src/registry_generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/client_generator.rs:704-715 (`_ => \"get\"` fallback)"
+    body: |
+      Method dispatch falls through to GET for any verb other than the four
+      common ones. options/head/patch/trace operations execute as GETs at
+      runtime — silent and dangerous.
+
+      ## Acceptance criteria
+      - [ ] Match arms for all 8 OAS 3.x methods.
+      - [ ] Fallback is a panic with operation context, not a silent GET.
+
+  - id: T3
+    title: "Honor auth_config ApiKey + Custom variants"
+    phase: 1
+    area: security
+    files: [src/client_generator.rs, src/config.rs, README.md]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/config.rs:322-337,453-471 vs src/client_generator.rs:596-599"
+    body: |
+      `auth_type = ApiKey` and `auth_type = Custom` validate in TOML
+      (`config.rs:322-337`) and never reach codegen. Every operation hard-codes
+      `req.bearer_auth(api_key)` regardless of the configured type. The README
+      claim of multi-scheme support is misleading.
+
+      ## Acceptance criteria
+      - [ ] `ApiKey { header_name }` emits `req.header(header_name, ...)`.
+      - [ ] `Custom { header_name, value_prefix }` emits the right header.
+      - [ ] README accurately reflects what's supported.
+
+  - id: T4
+    title: "Walk webhooks: in analysis"
+    phase: 1
+    area: webhooks
+    files: [src/openapi.rs, src/analysis.rs, src/client_generator.rs]
+    depends_on: [F1, F3]
+    fixture: tests/conformance/fixtures/webhooks/basic-webhook.yaml
+    evidence: "src/analysis.rs:3493-3519 (only walks spec.paths)"
+    body: |
+      OAS 3.1+ `webhooks:` is the same shape as `paths:` but represents
+      provider→consumer direction. Today it lands in the root `extra` and is
+      lost. Specs we ship in `specs/` (openai.yaml, lithic.yaml, imagekit.yaml)
+      already use this.
+
+      ## Acceptance criteria
+      - [ ] `OpenApiSpec.webhooks: BTreeMap<String, MaybeRef<PathItem>>`
+            modeled.
+      - [ ] Analyzer extracts payload schemas from webhook operations and
+            emits types.
+      - [ ] Decide and document: do we generate handler stubs, or just types?
+            (Recommend: types only, with a `Webhook` enum keyed by name.)
+
+  - id: T5
+    title: "Path templating percent-encoding"
+    phase: 1
+    area: codegen
+    files: [src/client_generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/client_generator.rs:1026-1067 (direct interpolation, no encoding)"
+    body: |
+      Path template variables are interpolated directly into the URL with no
+      percent-encoding. Violates OAS 3.2 § Path Templating (line 521 of the
+      spec) and breaks for any variable containing `/`, `?`, `#`, or non-ASCII.
+
+      ## Acceptance criteria
+      - [ ] Use `url::form_urlencoded` or equivalent to percent-encode each
+            variable.
+      - [ ] `simple` style is the default; `matrix`/`label` lands with T14.
+
+  - id: T6
+    title: "Detect operationId collisions"
+    phase: 1
+    area: codegen
+    files: [src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/analysis.rs:3514 (silent overwrite)"
+    body: |
+      Duplicate `operationId` values overwrite each other silently in the
+      operation map.
+
+      ## Acceptance criteria
+      - [ ] Collision produces a hard error with the colliding paths.
+      - [ ] Document policy if no operationId is set (synthesize from
+            method+path).
+
+  - id: T7
+    title: "Handle non-JSON success response bodies"
+    phase: 1
+    area: bodies
+    files: [src/analysis.rs, src/client_generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/analysis.rs:3615 (only calls response.json_schema())"
+    body: |
+      Non-JSON success responses (`text/plain`, `application/octet-stream`,
+      XML, `text/event-stream`) all collapse to `()`. `analyze_single_operation`
+      only inspects `application/json`.
+
+      ## Acceptance criteria
+      - [ ] `text/plain` → `String`.
+      - [ ] `application/octet-stream` → `Bytes` (non-streaming) or `impl
+            Stream` (when feature gated).
+      - [ ] `text/event-stream` triggers SSE codepath (see T15).
+
+  - id: T8
+    title: "Wire range status codes (2XX/4XX/5XX)"
+    phase: 1
+    area: bodies
+    files: [src/client_generator.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/client_generator.rs:942-944 (// follow-up)"
+    body: |
+      Range-keyed responses are explicitly TODO. Schemas keyed by `2XX`/`4XX`/
+      `5XX` are never deserialized.
+
+      ## Acceptance criteria
+      - [ ] Match arms include range matchers.
+      - [ ] Specific code wins over range when both present.
+
+  - id: T9
+    title: "Model Response Header object (typed response headers)"
+    phase: 1
+    area: bodies
+    files: [src/openapi.rs, src/client_generator.rs]
+    depends_on: [F1, F3]
+    fixture: null
+    evidence: "src/client_generator.rs:902,914 (headers reachable only on error path)"
+    body: |
+      Response Headers Object (Header is Parameter minus name/in) is not
+      modeled. Generated success types have no typed access to response
+      headers.
+
+      ## Acceptance criteria
+      - [ ] `Header` struct + `Response.headers: BTreeMap<String, MaybeRef<Header>>`.
+      - [ ] Generated success type carries headers (option: tuple `(T, Headers)`).
+
+  - id: T10
+    title: "Resolve $ref-typed parameter types"
+    phase: 1
+    area: refs
+    files: [src/client_generator.rs, src/analysis.rs]
+    depends_on: [F1, F3]
+    fixture: null
+    evidence: "src/client_generator.rs:778-791 (only consults rust_type)"
+    body: |
+      `ParameterInfo.schema_ref` is populated but `get_param_rust_type` only
+      reads `rust_type` (which stays `String`). `$ref`-ed enums lose their type.
+
+      ## Acceptance criteria
+      - [ ] `get_param_rust_type` resolves `schema_ref` to the registered type.
+      - [ ] Test: `$ref`-ed enum parameter produces an enum-typed argument.
+
+  - id: T11
+    title: "requestBody required:false → Option<T>"
+    phase: 1
+    area: bodies
+    files: [src/client_generator.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/openapi.rs RequestBody.required parsed but never read by codegen"
+    body: |
+      `RequestBody.required: false` is parsed but ignored — generated method
+      always demands a body argument.
+
+      ## Acceptance criteria
+      - [ ] `required: false` → `Option<T>` argument.
+      - [ ] Default to `required: false` per OAS spec.
+
+  - id: T12
+    title: "additionalProperties:<schema> → BTreeMap<String, T>"
+    phase: 1
+    area: schema
+    files: [src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/analysis.rs:1328-1332 (self-flagged TODO)"
+    body: |
+      `additionalProperties: <schema>` always collapses to `BTreeMap<String,
+      serde_json::Value>` per a TODO in analysis. Typed dictionaries lose type.
+
+      ## Acceptance criteria
+      - [ ] When schema is a $ref or inline object, emit `BTreeMap<String, T>`.
+      - [ ] When schema is `true` or omitted, emit `BTreeMap<String, Value>`.
+      - [ ] When schema is `false`, error.
+
+  - id: T13
+    title: "Surface description/summary/deprecated/tags into rustdoc + module structure"
+    phase: 1
+    area: codegen
+    files: [src/client_generator.rs, src/registry_generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/client_generator.rs:35-46,676-684"
+    body: |
+      `Operation.summary`, `description`, `tags`, `deprecated`, `externalDocs`
+      are all parsed but neither rustdoc nor module organization uses them.
+      All operations land as flat methods on a single `HttpClient`.
+
+      ## Acceptance criteria
+      - [ ] `///` rustdoc on every method from summary+description.
+      - [ ] `#[deprecated]` on operations marked deprecated.
+      - [ ] Optional CLI flag `--module-by-tag` groups operations by first tag.
+
+  - id: T14
+    title: "Implement parameter style/explode matrix (RFC6570)"
+    phase: 1
+    area: paths
+    files: [src/openapi.rs, src/analysis.rs, src/client_generator.rs]
+    depends_on: [F1]
+    fixture: tests/conformance/fixtures/parameter/deepobject-query.yaml
+    evidence: "src/analysis.rs:3767-3782 (default `String`, no array handling)"
+    body: |
+      The full RFC6570 serialization matrix is unimplemented. `style`,
+      `explode`, `allowReserved`, `allowEmptyValue`, and content-typed params
+      all live in `Parameter.extra` and are unread.
+
+      ## Acceptance criteria
+      - [ ] Cover (style × explode × in × type) for: matrix, label, simple,
+            form, spaceDelimited, pipeDelimited, deepObject.
+      - [ ] One wiremock-backed fixture per non-default combination.
+      - [ ] Defaults match the spec (form+explode for query/cookie, simple for
+            path/header).
+
+  - id: T15
+    title: "SSE streaming auto-detection from text/event-stream responses"
+    phase: 1
+    area: bodies
+    files: [src/streaming.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/analysis.rs:3579 (supports_streaming hardcoded false); src/streaming.rs:191-228 (detection scaffolding unused)"
+    body: |
+      `StreamingDetectionConfig`/`DetectedStreamingEndpoint`/
+      `StreamingDetectionResult` exist in `streaming.rs` but nothing consumes
+      them. SSE codegen is purely user-config-driven via cli/config.
+
+      ## Acceptance criteria
+      - [ ] Operations with a `text/event-stream` response auto-emit a
+            streaming variant.
+      - [ ] User config can still opt out / override.
+
+  # ─────────────── PHASE 2 — 3.1 HONESTY (struct families) ───────────────
+  - id: H1
+    title: "Model Server Object + Server Variable + multi-server runtime"
+    phase: 2
+    area: security
+    files: [src/openapi.rs, src/client_generator.rs, src/cli.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "openapi.rs has no `Server` struct; client uses single `base_url: String`"
+    body: |
+      No `Server` struct exists. `client_generator.rs:189-200` takes a
+      single `base_url: String`. Multiple servers, server variables with
+      `default`/`enum`/`description`, and per-path/per-op overrides are all
+      unsupported.
+
+      ## Acceptance criteria
+      - [ ] `Server` + `ServerVariable` modeled.
+      - [ ] Generated client takes either a `ServerSelector` or a base URL +
+            per-op override.
+      - [ ] Variable enums become typed Rust enums.
+
+  - id: H2
+    title: "Model SecurityScheme (apiKey/http/oauth2/openIdConnect/mutualTLS)"
+    phase: 2
+    area: security
+    files: [src/openapi.rs, src/client_generator.rs, src/streaming.rs]
+    depends_on: [F1, T3]
+    fixture: tests/conformance/fixtures/security/mutual-tls.yaml
+    evidence: "no `SecurityScheme` struct anywhere in src/"
+    body: |
+      `SecurityScheme` has no Rust struct at all. apiKey, http (Basic/Bearer/
+      Digest), oauth2 (all 4 flows), openIdConnect, mutualTLS are entirely
+      uncovered. Two parallel auth code paths exist (REST and SSE), neither
+      derived from the spec.
+
+      ## Acceptance criteria
+      - [ ] All scheme types modeled.
+      - [ ] Generated client offers a single auth abstraction consumed by
+            both REST and SSE paths.
+
+  - id: H3
+    title: "Model SecurityRequirement (AND/OR + per-op + empty)"
+    phase: 2
+    area: security
+    files: [src/openapi.rs, src/client_generator.rs]
+    depends_on: [H2]
+    fixture: null
+    evidence: "no `security` field on OpenApiSpec or Operation"
+    body: |
+      `security` is unparsed. Empty `{}` (anonymous allowed) and `[]` (opt-out)
+      semantics, OR across alternatives, AND across schemes within an
+      alternative — none implemented.
+
+      ## Acceptance criteria
+      - [ ] `SecurityRequirement` modeled.
+      - [ ] Per-op override layered over global.
+      - [ ] `security: []` produces an unauthenticated method.
+
+  - id: H4
+    title: "Model Encoding Object (multipart + form-urlencoded)"
+    phase: 2
+    area: bodies
+    files: [src/openapi.rs, src/client_generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "no `Encoding` struct"
+    body: |
+      `Encoding` is unparsed. `contentType`, `headers`, `style`, `explode`,
+      `allowReserved` per part — all dropped. Today multipart bodies are
+      hand-built (`client_generator.rs:759`).
+
+      ## Acceptance criteria
+      - [ ] `Encoding` modeled.
+      - [ ] Generated multipart code uses the encoding map.
+      - [ ] form-urlencoded honors style/explode.
+
+  - id: H5
+    title: "Model Header Object as request and response"
+    phase: 2
+    area: bodies
+    files: [src/openapi.rs]
+    depends_on: [F1, F3]
+    fixture: null
+    evidence: "no `Header` struct (Header is Parameter minus name+in)"
+    body: |
+      `Header` is structurally a `Parameter` minus `name`/`in`. Used in
+      `Response.headers`, `Encoding.headers`, and `Components.headers`. Today
+      not modeled at all.
+
+      ## Acceptance criteria
+      - [ ] `Header` struct.
+      - [ ] Used by Response (T9) and Encoding (H4).
+
+  - id: H6
+    title: "Model Example Object (object map; remove deprecated singular `example`)"
+    phase: 2
+    area: bodies
+    files: [src/openapi.rs]
+    depends_on: [F1, F3]
+    fixture: null
+    evidence: "MediaType only models `schema`; `example`/`examples` lost"
+    body: |
+      `MediaType.example` (singular, deprecated) and `examples` (object map,
+      preferred since 3.1) both land in `extra`. 3.2 added `dataValue` and
+      `serializedValue` to Example.
+
+      ## Acceptance criteria
+      - [ ] `Example` struct with all 3.1+ fields.
+      - [ ] `MediaType.examples: BTreeMap<String, MaybeRef<Example>>`.
+      - [ ] Used in rustdoc and (optionally) test fixtures.
+
+  - id: H7
+    title: "Model Link Object + runtime expressions"
+    phase: 2
+    area: components
+    files: [src/openapi.rs]
+    depends_on: [F1, F3]
+    fixture: null
+    evidence: "no `Link` struct; runtime expressions unparsed"
+    body: |
+      `Link` describes a possible follow-up call. Has `operationRef` |
+      `operationId`, `parameters`, `requestBody`, `server` — values are
+      runtime expressions like `$response.body#/id`.
+
+      ## Acceptance criteria
+      - [ ] `Link` modeled.
+      - [ ] Runtime expression parser.
+      - [ ] Generator decision: emit typed follow-up methods, or just types?
+
+  - id: H8
+    title: "Model Callback Object"
+    phase: 2
+    area: components
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1, F3, T4]
+    fixture: null
+    evidence: "no `Callback` struct"
+    body: |
+      `Callback` is a Path-Item map keyed by runtime expression. Models
+      out-of-band server→consumer calls. Today entirely unparsed.
+
+      ## Acceptance criteria
+      - [ ] `Callback` modeled (BTreeMap<expr, MaybeRef<PathItem>>).
+      - [ ] Operation.callbacks parsed.
+      - [ ] Generated types for callback payloads (parallel to webhooks).
+
+  - id: H9
+    title: "Model Tag Object + tag-based module organization"
+    phase: 2
+    area: tags
+    files: [src/openapi.rs, src/client_generator.rs, src/analysis.rs]
+    depends_on: [F1, T13]
+    fixture: null
+    evidence: "no `Tag` struct; OperationInfo lacks tags"
+    body: |
+      `Tag` (with `name`/`description`/`externalDocs`) is unparsed.
+      Operation.tags lands in extra. Generated client is one flat impl block.
+
+      ## Acceptance criteria
+      - [ ] `Tag` modeled.
+      - [ ] Operation.tags surfaced to OperationInfo.
+      - [ ] CLI flag `--module-by-tag` groups methods into per-tag modules.
+
+  - id: H10
+    title: "Model ExternalDocs"
+    phase: 2
+    area: components
+    files: [src/openapi.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "no `ExternalDocs` struct"
+    body: |
+      `ExternalDocs { url, description }` appears on OpenAPI, Operation, Tag,
+      Schema. Surface in rustdoc.
+
+      ## Acceptance criteria
+      - [ ] `ExternalDocs` modeled.
+      - [ ] Rendered in generated rustdoc as a "See also" link.
+
+  - id: H11
+    title: "Path Item $ref + components/pathItems bucket"
+    phase: 2
+    area: components
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1, F3]
+    fixture: tests/conformance/fixtures/components/path-items-component.yaml
+    evidence: "src/openapi.rs:390-411 — PathItem has no $ref field"
+    body: |
+      OAS 3.1+ allows `components/pathItems` and `paths/{path}: { $ref: ... }`.
+      Today neither works.
+
+      ## Acceptance criteria
+      - [ ] `PathItem` has a `$ref` variant.
+      - [ ] `Components.pathItems` modeled.
+      - [ ] References resolve at analysis time.
+
+  - id: H12
+    title: "Discriminator allOf-parent polymorphism + `not` keyword"
+    phase: 2
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "discriminator works for explicit oneOf only; `not` unmodeled"
+    body: |
+      Discriminator handling is solid for explicit `oneOf`+`discriminator`+
+      `mapping`. The Pet/Cat/Dog allOf-parent example in the spec is not
+      detected. `not` keyword is entirely unmodeled.
+
+      ## Acceptance criteria
+      - [ ] allOf-parent polymorphism: parent schema with discriminator,
+            children allOf-extending it.
+      - [ ] `not` keyword acknowledged (likely as a runtime-only check).
+
+  # ─────────────── PHASE 2b — JSON SCHEMA 2020-12 ───────────────
+  - id: J1
+    title: "$dynamicRef / $dynamicAnchor (replace $recursiveRef)"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: tests/conformance/fixtures/schema/dynamic-ref-tree.yaml
+    evidence: "src/openapi.rs:43-49,108-109 (only $recursiveRef modeled)"
+    body: |
+      Only the obsoleted `$recursiveRef`/`$recursiveAnchor` is modeled.
+      JSON Schema 2020-12 uses `$dynamicRef`/`$dynamicAnchor`.
+
+      ## Acceptance criteria
+      - [ ] Replace recursive variants with dynamic.
+      - [ ] Cycle-safe resolution.
+      - [ ] Fixture `schema/dynamic-ref-tree.yaml` flips to passing.
+
+  - id: J2
+    title: "$defs enumeration in extract_schemas"
+    phase: 2b
+    area: schema
+    files: [src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "extract_schemas only walks components/schemas"
+    body: |
+      `$defs` (the 2020-12 successor to `definitions`) is not enumerated.
+      Inline schemas with `$defs` lose their internal types.
+
+      ## Acceptance criteria
+      - [ ] Walk `$defs` recursively as well as `components/schemas`.
+
+  - id: J3
+    title: "Validation keywords as runtime checks (validator crate)"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "min_length/max_length/pattern/minimum/maximum parsed but never read"
+    body: |
+      Validation keywords (`min_length`, `max_length`, `pattern`, `minimum`,
+      `maximum`, `multipleOf`, `exclusiveMinimum/Maximum`, `minItems`/
+      `maxItems`, `uniqueItems`) are deserialized but not enforced. The
+      `validator` crate is already a dependency.
+
+      ## Acceptance criteria
+      - [ ] Generated structs use `validator::Validate` derive when constraints
+            are present.
+      - [ ] Constraints rendered as `validator` attributes.
+
+  - id: J4
+    title: "prefixItems (tuple types)"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "prefixItems not in SchemaDetails"
+    body: |
+      `prefixItems` is the 2020-12 way to describe tuples / heterogeneous
+      arrays. Unmodeled today.
+
+      ## Acceptance criteria
+      - [ ] `prefixItems` parsed.
+      - [ ] Maps to Rust tuples or per-position structs.
+
+  - id: J5
+    title: "patternProperties + propertyNames"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "not in SchemaDetails"
+    body: |
+      `patternProperties` (regex-keyed property schemas) and `propertyNames`
+      (constraint on key strings) are unmodeled.
+
+      ## Acceptance criteria
+      - [ ] Both keywords parsed.
+      - [ ] Strategy doc for codegen (likely runtime-only validation, types
+            stay BTreeMap<String, T>).
+
+  - id: J6
+    title: "unevaluatedProperties / unevaluatedItems"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "not in SchemaDetails"
+    body: |
+      Annotation-driven keywords from 2020-12. Important for strict closed-
+      schema usage.
+
+      ## Acceptance criteria
+      - [ ] Parsed.
+      - [ ] Decide whether to enforce at codegen or at runtime.
+
+  - id: J7
+    title: "dependentSchemas / dependentRequired"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "not in SchemaDetails"
+    body: |
+      Conditional requiredness based on the presence of another property.
+
+      ## Acceptance criteria
+      - [ ] Parsed.
+      - [ ] Surfaced in rustdoc; consider runtime validation via validator.
+
+  - id: J8
+    title: "contains / minContains / maxContains; contentEncoding/MediaType/Schema"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "not in SchemaDetails"
+    body: |
+      Array `contains` family and the content* family for embedded media.
+
+      ## Acceptance criteria
+      - [ ] Parsed.
+      - [ ] contentEncoding `base64` triggers `Vec<u8>`-style codegen.
+
+  - id: J9
+    title: "format coverage: date-time, uuid, byte, binary, email, uri"
+    phase: 2b
+    area: schema
+    files: [src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "src/analysis.rs:3091-3106 (only int32/int64/float/double mapped)"
+    body: |
+      Non-numeric formats all fall through to `String`. Common types like
+      `date-time`, `uuid`, `byte`, `binary`, `email`, `uri` deserve real Rust
+      types where possible.
+
+      ## Acceptance criteria
+      - [ ] `date-time` → `chrono::DateTime<Utc>` (feature-gated) or
+            `time::OffsetDateTime`.
+      - [ ] `uuid` → `uuid::Uuid` (feature-gated).
+      - [ ] `byte` → base64 bytes; `binary` → `Vec<u8>` / streaming.
+      - [ ] `email` and `uri` stay String but constrained via validator.
+
+  - id: J10
+    title: "jsonSchemaDialect at root; remove 3.0 nullable"
+    phase: 2b
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1, F2]
+    fixture: null
+    evidence: "jsonSchemaDialect lands in OpenApiSpec.extra; 3.0 nullable still honored"
+    body: |
+      `jsonSchemaDialect` is the document-level dialect indicator (3.1+).
+      The codebase still honors 3.0's `nullable: true`.
+
+      ## Acceptance criteria
+      - [ ] `jsonSchemaDialect` parsed and validated.
+      - [ ] `nullable` removed from Schema (no backwards compat per project
+            conventions).
+
+  # ─────────────── PHASE 3 — 3.2 DELTAS ───────────────
+  - id: D1
+    title: "PathItem.additionalOperations + query method"
+    phase: 3
+    area: paths
+    files: [src/openapi.rs, src/analysis.rs, src/client_generator.rs]
+    depends_on: [F1, T2]
+    fixture: tests/conformance/fixtures/pathitem/additional-operations-3.2.yaml
+    evidence: "src/openapi.rs:391-411 (8 hardcoded methods, no extension point)"
+    body: |
+      OAS 3.2 introduces `query` HTTP method on `PathItem` and a
+      `additionalOperations: { <METHOD>: Operation }` extension map. Currently
+      both fall into `extra` and entire operations vanish from the generated
+      client.
+
+      ## Acceptance criteria
+      - [ ] `PathItem.query: Option<Operation>`.
+      - [ ] `PathItem.additional_operations: BTreeMap<String, Operation>`.
+      - [ ] Codegen emits methods for both.
+
+  - id: D2
+    title: "Parameter `in: querystring`"
+    phase: 3
+    area: paths
+    files: [src/openapi.rs, src/analysis.rs, src/client_generator.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "3.2 spec adds a 5th parameter location; downstream switches handle 4"
+    body: |
+      OAS 3.2 adds `in: "querystring"` for the entire query string as a single
+      named parameter.
+
+      ## Acceptance criteria
+      - [ ] Parameter location enum extended.
+      - [ ] Codegen handles the all-string case.
+
+  - id: D3
+    title: "MediaType.itemSchema / prefixEncoding / itemEncoding"
+    phase: 3
+    area: bodies
+    files: [src/openapi.rs, src/analysis.rs, src/client_generator.rs]
+    depends_on: [F1, H4]
+    fixture: tests/conformance/fixtures/components/media-types-component-3.2.yaml
+    evidence: "3.2-only fields on MediaType"
+    body: |
+      3.2 adds `itemSchema` (per-element schema for streaming/multipart),
+      `prefixEncoding`, `itemEncoding`.
+
+      ## Acceptance criteria
+      - [ ] Modeled.
+      - [ ] Used in multipart/streaming codegen.
+
+  - id: D4
+    title: "OAuth deviceAuthorization flow + oauth2MetadataUrl"
+    phase: 3
+    area: security
+    files: [src/openapi.rs]
+    depends_on: [F1, H2]
+    fixture: null
+    evidence: "3.2 OAuth Flows additions"
+    body: |
+      OAS 3.2 adds `deviceAuthorization` flow and an `oauth2MetadataUrl` on
+      Security Scheme.
+
+      ## Acceptance criteria
+      - [ ] Flow modeled.
+      - [ ] `oauth2MetadataUrl` parsed.
+
+  - id: D5
+    title: "Tag.kind / parent / summary"
+    phase: 3
+    area: tags
+    files: [src/openapi.rs, src/client_generator.rs]
+    depends_on: [F1, H9]
+    fixture: null
+    evidence: "3.2 Tag Object additions (lines 2898-2902 of 3.2.0 spec)"
+    body: |
+      3.2 adds `summary`, `parent`, `kind` to Tag — enables hierarchical and
+      typed tags.
+
+      ## Acceptance criteria
+      - [ ] Fields modeled.
+      - [ ] `parent` enables nested module organization (extends T13/H9).
+
+  - id: D6
+    title: "$self keyword + Appendix F/G base URI rules"
+    phase: 3
+    area: refs
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: null
+    evidence: "3.2 spec line 98; Appendices F/G (~lines 5235, 5450)"
+    body: |
+      3.2 introduces `$self` and a formal base-URI determination algorithm
+      (Appendix F) plus parsing/resolution guidance (Appendix G).
+
+      ## Acceptance criteria
+      - [ ] `$self` parsed.
+      - [ ] $ref resolution conforms to Appendix F.
+
+  - id: D7
+    title: "Components.mediaTypes bucket"
+    phase: 3
+    area: components
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1]
+    fixture: tests/conformance/fixtures/components/media-types-component-3.2.yaml
+    evidence: "3.2 Components addition (line 414 of 3.2.0 spec)"
+    body: |
+      3.2 adds a reusable Media Type Object bucket under Components.
+
+      ## Acceptance criteria
+      - [ ] `Components.mediaTypes: BTreeMap<String, MaybeRef<MediaType>>`.
+      - [ ] Resolution at analysis time.
+
+  - id: D8
+    title: "Server.name field"
+    phase: 3
+    area: security
+    files: [src/openapi.rs]
+    depends_on: [F1, H1]
+    fixture: null
+    evidence: "3.2 Server Object addition"
+    body: |
+      3.2 adds an optional `name` to Server Object for runtime selection.
+
+      ## Acceptance criteria
+      - [ ] `Server.name` modeled.
+      - [ ] Generated server selector uses it.
+
+  - id: D9
+    title: "Discriminator.defaultMapping"
+    phase: 3
+    area: schema
+    files: [src/openapi.rs, src/analysis.rs]
+    depends_on: [F1, H12]
+    fixture: null
+    evidence: "3.2 Discriminator Object addition"
+    body: |
+      3.2 adds `defaultMapping` for unknown discriminator values.
+
+      ## Acceptance criteria
+      - [ ] Field modeled.
+      - [ ] Codegen emits a fallback variant.
+
+  - id: D10
+    title: "SecurityScheme.deprecated"
+    phase: 3
+    area: security
+    files: [src/openapi.rs, src/client_generator.rs]
+    depends_on: [F1, H2]
+    fixture: null
+    evidence: "3.2 SecurityScheme addition"
+    body: |
+      3.2 adds `deprecated` to Security Scheme; should produce a Rust
+      `#[deprecated]` attribute on the generated auth type.
+
+      ## Acceptance criteria
+      - [ ] Field modeled.
+      - [ ] Generator emits `#[deprecated]`.

@@ -1,0 +1,18 @@
+# coverage: [objects.Security Scheme.type[mutualTLS]]
+# fails_at: L0
+# reason: SecurityScheme not modeled at all; mutualTLS swallowed by Components.extra
+openapi: 3.1.0
+info: { title: mTLS Demo, version: 1.0.0 }
+components:
+  securitySchemes:
+    mtls:
+      type: mutualTLS
+      description: Client certificate authentication
+security:
+  - mtls: []
+paths:
+  /private:
+    get:
+      operationId: getPrivate
+      responses:
+        "200": { description: ok }
