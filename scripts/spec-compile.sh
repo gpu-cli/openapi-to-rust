@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
-# Smoke-test that generated clients for our reference specs compile cleanly.
-# Each spec listed below produces a separate scratch crate; we run the
-# `openapi-to-rust` generator into it and then `cargo check`. Any
-# regression here means a real-world spec stops compiling.
+# Smoke-test that generated clients for every spec under specs/ compile cleanly.
+#
+# Auto-discovers specs/*.yaml and specs/*.json. Each spec produces a separate
+# scratch crate; we run the `openapi-to-rust` generator into it and then
+# `cargo check`. Any regression here means a real-world spec stops compiling.
 #
 # Usage:
-#   scripts/spec-compile.sh                    # run all specs in SPECS
-#   scripts/spec-compile.sh anthropic openai   # run a subset
+#   scripts/spec-compile.sh                        # all specs in specs/
+#   scripts/spec-compile.sh anthropic openai       # subset by name
+#   SPEC_COMPILE_LIMIT=5 scripts/spec-compile.sh   # first 5 only (CI smoke)
 #
 # Env:
-#   SPEC_COMPILE_KEEP=1   keep the scratch directory under tmp/spec-compile/
-#   SPEC_COMPILE_OFFLINE=1 pass --offline to cargo invocations
+#   SPEC_COMPILE_KEEP=1     keep tmp/spec-compile/<name>/ on success
+#   SPEC_COMPILE_OFFLINE=1  pass --offline to cargo invocations
+#   SPEC_COMPILE_LIMIT=N    process only the first N alphabetically-sorted specs
+#   SPEC_COMPILE_PARSE_ONLY=1  skip cargo check; only verify the generator
+#                              parses+emits without errors. Faster.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-# (spec_name, spec_path, base_url, auth_type, auth_header)
-SPECS=(
-  "anthropic|specs/anthropic.yaml|https://api.anthropic.com|ApiKey|x-api-key"
-  "openai|specs/openai.yaml|https://api.openai.com/v1|Bearer|Authorization"
-)
-
-# If args are given, treat them as a whitelist of spec names.
-WANT=("$@")
 
 OFFLINE=""
 if [ "${SPEC_COMPILE_OFFLINE:-}" = "1" ]; then
@@ -32,22 +28,59 @@ echo "[spec-compile] building openapi-to-rust binary..."
 cargo build --bin openapi-to-rust $OFFLINE >/dev/null
 
 GEN_BIN="$(pwd)/target/debug/openapi-to-rust"
+WORKSPACE="$(pwd)"
 
-ROOT="$(pwd)/tmp/spec-compile"
+ROOT="$WORKSPACE/tmp/spec-compile"
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
 
-failed=()
-for entry in "${SPECS[@]}"; do
-  IFS='|' read -r name spec_path base_url auth_type auth_header <<<"$entry"
+# Discover specs. Sort for deterministic output.
+mapfile -t ALL_SPECS < <(find specs -maxdepth 1 -type f \( -name "*.yaml" -o -name "*.json" \) | sort)
+
+# Filter by command-line whitelist.
+WANT=("$@")
+SPECS=()
+for spec in "${ALL_SPECS[@]}"; do
+  name="$(basename "$spec")"
+  name="${name%.*}"
   if [ ${#WANT[@]} -gt 0 ]; then
-    skip=1
-    for w in "${WANT[@]}"; do [ "$w" = "$name" ] && skip=0; done
-    [ $skip -eq 1 ] && continue
+    keep=0
+    for w in "${WANT[@]}"; do [ "$w" = "$name" ] && keep=1; done
+    [ $keep -eq 0 ] && continue
+  fi
+  SPECS+=("$name|$spec")
+done
+
+if [ -n "${SPEC_COMPILE_LIMIT:-}" ]; then
+  SPECS=("${SPECS[@]:0:$SPEC_COMPILE_LIMIT}")
+fi
+
+if [ ${#SPECS[@]} -eq 0 ]; then
+  echo "[spec-compile] no specs matched"
+  exit 0
+fi
+
+echo "[spec-compile] running ${#SPECS[@]} spec(s)"
+echo
+
+passed=()
+failed_gen=()
+failed_check=()
+skipped=()
+for entry in "${SPECS[@]}"; do
+  IFS='|' read -r name spec_path <<<"$entry"
+
+  printf "%-30s " "$name"
+
+  # Skip Swagger 2.0 specs — out of scope for this generator. Detect either
+  # `"swagger": "2.0"` (JSON) or `swagger: "2.0"` / `swagger: 2.0` (YAML).
+  if grep -qE '("swagger"\s*:|swagger\s*:)\s*"?2\.' "$spec_path" 2>/dev/null \
+     && ! grep -qE '("openapi"\s*:|openapi\s*:)' "$spec_path" 2>/dev/null; then
+    echo "SKIP (Swagger 2.0)"
+    skipped+=("$name")
+    continue
   fi
 
-  echo
-  echo "==> $name (spec: $spec_path)"
   dir="$ROOT/$name"
   mkdir -p "$dir/src/generated"
 
@@ -75,43 +108,59 @@ EOF
 pub mod generated;
 EOF
 
+  # Sanitize module name (replace - with _).
+  module_name="$(echo "$name" | tr '-' '_')"
+
   cat >"$dir/openapi-to-rust.toml" <<EOF
 [generator]
-spec_path = "$(pwd)/$spec_path"
+spec_path = "$WORKSPACE/$spec_path"
 output_dir = "src/generated"
-module_name = "$name"
+module_name = "$module_name"
 
 [features]
 enable_async_client = true
 
 [http_client]
-base_url = "$base_url"
+base_url = "https://example.invalid"
 timeout_seconds = 60
-
-[http_client.auth]
-type = "$auth_type"
-header_name = "$auth_header"
 EOF
 
-  (
-    cd "$dir"
-    "$GEN_BIN" generate --config openapi-to-rust.toml >/dev/null
-    if ! cargo check $OFFLINE 2>&1 | tail -200; then
-      echo "[spec-compile] $name FAILED to compile" >&2
-      exit 1
-    fi
-  ) || failed+=("$name")
+  # Generator step
+  log="$dir/generate.log"
+  if ! ( cd "$dir" && "$GEN_BIN" generate --config openapi-to-rust.toml ) >"$log" 2>&1; then
+    echo "GEN-FAIL"
+    failed_gen+=("$name")
+    continue
+  fi
+
+  if [ "${SPEC_COMPILE_PARSE_ONLY:-}" = "1" ]; then
+    echo "GEN-OK"
+    passed+=("$name")
+    [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$dir"
+    continue
+  fi
+
+  # Cargo check step
+  log="$dir/check.log"
+  if ! ( cd "$dir" && cargo check $OFFLINE ) >"$log" 2>&1; then
+    err_count=$(grep -cE "^error" "$log" || true)
+    echo "CHECK-FAIL ($err_count errs)"
+    failed_check+=("$name")
+    continue
+  fi
+
+  echo "PASS"
+  passed+=("$name")
+  [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$dir"
 done
 
-if [ "${SPEC_COMPILE_KEEP:-}" != "1" ]; then
-  rm -rf "$ROOT"
-fi
+echo
+echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed, ${#failed_check[@]} check-failed, ${#skipped[@]} skipped"
+[ ${#failed_gen[@]}   -gt 0 ] && echo "  gen-fail:   ${failed_gen[*]}"
+[ ${#failed_check[@]} -gt 0 ] && echo "  check-fail: ${failed_check[*]}"
+[ ${#skipped[@]}      -gt 0 ] && echo "  skipped:    ${skipped[*]}"
 
-if [ ${#failed[@]} -gt 0 ]; then
-  echo
-  echo "[spec-compile] FAILED: ${failed[*]}" >&2
+if [ ${#failed_gen[@]} -gt 0 ] || [ ${#failed_check[@]} -gt 0 ]; then
   exit 1
 fi
-
-echo
 echo "[spec-compile] ✅ all specs compiled cleanly"

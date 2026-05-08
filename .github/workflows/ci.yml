@@ -47,14 +47,23 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Regression guard: generate clients for our reference specs (Anthropic +
-  # OpenAI) and `cargo check` the result. Catches breakage where a generator
-  # change still passes unit tests but emits invalid Rust against real-world
-  # OAS documents. See scripts/spec-compile.sh.
+  # Regression guard: generate clients for a curated list of real-world specs
+  # and `cargo check` the result. Catches breakage where a generator change
+  # still passes unit tests but emits invalid Rust against real-world OAS
+  # documents. See scripts/spec-compile.sh.
+  #
+  # The list is the "gold" subset that currently compiles cleanly. Local
+  # `scripts/spec-compile.sh` (no args) runs against all of `specs/`; we
+  # don't gate CI on the full corpus because many of the 50+ specs currently
+  # surface unfixed generator bugs (tracked in #14).
   spec-compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/spec-compile.sh
+      - run: |
+          scripts/spec-compile.sh \
+            anthropic asana browserbase cartesia cerebras coda coingecko \
+            digitalocean groq imagekit launchdarkly meta-llama openai \
+            resend runway spotify terminal-shop twilio val-town writer

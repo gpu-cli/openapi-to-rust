@@ -1466,6 +1466,16 @@ impl CodeGenerator {
     }
 
     pub(crate) fn to_rust_enum_variant(&self, s: &str) -> String {
+        // Preserve sign for numeric values so e.g. `-1` and `1` produce
+        // distinct variants (`VariantNeg1` vs `Variant1`). Without this,
+        // strict-namespace enums in github.json collide on `1`/`-1`.
+        let neg_prefix =
+            if s.starts_with('-') && s.chars().skip(1).all(|c| c.is_ascii_digit() || c == '.') {
+                "Neg"
+            } else {
+                ""
+            };
+
         // Convert string to valid Rust enum variant (PascalCase)
         let mut result = String::new();
         let mut next_upper = true;
@@ -1518,7 +1528,11 @@ impl CodeGenerator {
 
         // Ensure variant starts with a letter (not a number)
         if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            result = format!("Variant{result}");
+            result = format!("Variant{neg_prefix}{result}");
+        } else if !neg_prefix.is_empty() {
+            // String happened to start with `-<digits>` but produced a
+            // non-empty alphabetic prefix. Tag the negative anyway.
+            result = format!("{neg_prefix}{result}");
         }
 
         // Handle special cases for enum variants
@@ -1786,6 +1800,12 @@ impl CodeGenerator {
             result = format!("field_{result}");
         }
 
+        // `self`, `super`, `crate`, `Self` are NOT permitted as raw identifiers
+        // (they trigger an `r#self cannot be a raw identifier` panic in
+        // proc_macro2). Suffix them instead.
+        if matches!(result.as_str(), "self" | "super" | "crate" | "Self") {
+            return format!("{result}_field");
+        }
         // Handle reserved keywords using raw identifiers (r#keyword)
         if Self::is_rust_keyword(&result) {
             format!("r#{result}")
@@ -2006,19 +2026,18 @@ impl CodeGenerator {
 
         match item_type {
             SchemaType::Primitive { rust_type } => {
-                // Handle complex types like serde_json::Value
-                if rust_type.contains("::") {
-                    let parts: Vec<&str> = rust_type.split("::").collect();
-                    if parts.len() == 2 {
-                        let module = format_ident!("{}", parts[0]);
-                        let type_name = format_ident!("{}", parts[1]);
-                        quote! { #module::#type_name }
-                    } else {
-                        // More than 2 parts, construct path
-                        let path_parts: Vec<_> =
-                            parts.iter().map(|p| format_ident!("{}", p)).collect();
-                        quote! { #(#path_parts)::* }
-                    }
+                // The string here may be anything from `i64` / `String` to
+                // `serde_json::Value` to `Vec<serde_json::Value>` to
+                // `BTreeMap<String, T>`. Parse it as a syn::Type so we get
+                // the right tokens regardless of generics.
+                if let Ok(parsed) = syn::parse_str::<syn::Type>(rust_type) {
+                    quote! { #parsed }
+                } else if rust_type.contains("::") {
+                    let parts: Vec<_> = rust_type
+                        .split("::")
+                        .map(|p| format_ident!("{}", p))
+                        .collect();
+                    quote! { #(#parts)::* }
                 } else {
                     let type_ident = format_ident!("{}", rust_type);
                     quote! { #type_ident }

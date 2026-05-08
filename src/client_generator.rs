@@ -1312,9 +1312,33 @@ impl CodeGenerator {
         }
     }
 
-    /// Sanitize a parameter name by escaping Rust reserved keywords with raw identifiers
+    /// Sanitize a parameter name by escaping Rust reserved keywords with raw
+    /// identifiers and disambiguating Twilio-style suffix operators
+    /// (`StartTime`, `StartTime<`, `StartTime>` would otherwise all snake-
+    /// case to `start_time`).
     fn sanitize_param_name(&self, name: &str) -> String {
-        let snake_case = name.to_snake_case();
+        // Disambiguate before stripping. `<`, `>`, `<=`, `>=` are common in
+        // filter-style query params; map them to `_lt` / `_gt` etc. so the
+        // Rust ident is unique while the wire-level param name stays the
+        // original string elsewhere in the codegen.
+        let suffix = if name.ends_with("<=") {
+            "_lte"
+        } else if name.ends_with(">=") {
+            "_gte"
+        } else if name.ends_with('<') {
+            "_lt"
+        } else if name.ends_with('>') {
+            "_gt"
+        } else {
+            ""
+        };
+        let stripped = name.trim_end_matches(['<', '>', '=']);
+        let mut snake_case = stripped.to_snake_case();
+        snake_case.push_str(suffix);
+
+        if matches!(snake_case.as_str(), "self" | "super" | "crate" | "Self") {
+            return format!("{snake_case}_param");
+        }
         if Self::is_rust_keyword(&snake_case) {
             format!("r#{snake_case}")
         } else {

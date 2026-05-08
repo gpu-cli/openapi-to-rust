@@ -212,10 +212,13 @@ pub struct SchemaDetails {
     #[serde(rename = "maxLength")]
     pub max_length: Option<u64>,
     pub pattern: Option<String>,
+    /// In 3.0/Swagger this was a `bool` flag relative to `minimum`; in 3.1
+    /// (JSON Schema 2020-12) it's a number. Accept either to round-trip
+    /// real-world specs. (Tracked under J3 — proper validation lowering.)
     #[serde(rename = "exclusiveMinimum")]
-    pub exclusive_minimum: Option<f64>,
+    pub exclusive_minimum: Option<ExclusiveBound>,
     #[serde(rename = "exclusiveMaximum")]
-    pub exclusive_maximum: Option<f64>,
+    pub exclusive_maximum: Option<ExclusiveBound>,
     #[serde(rename = "multipleOf")]
     pub multiple_of: Option<f64>,
     #[serde(rename = "minItems")]
@@ -290,6 +293,15 @@ pub struct SchemaDetails {
     // for well-formed OAS 3.1+ specs.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// 3.0 used `exclusiveMinimum: true` as a bool flag against `minimum`;
+/// 3.1 (JSON Schema 2020-12) uses `exclusiveMinimum: <number>`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ExclusiveBound {
+    Bool(bool),
+    Number(f64),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

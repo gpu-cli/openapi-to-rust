@@ -3566,11 +3566,32 @@ impl SchemaAnalyzer {
         analysis: &mut SchemaAnalysis,
     ) -> Result<()> {
         for (method, operation) in path_item.operations() {
-            // Generate operation ID if missing
-            let operation_id = operation
+            // Generate operation ID if missing.
+            let raw_operation_id = operation
                 .operation_id
                 .clone()
                 .unwrap_or_else(|| Self::generate_operation_id(method, path));
+
+            // T6: detect operationId collisions. Per the OAS spec these MUST
+            // be unique, but real-world specs (arcade, cal-com, telnyx,
+            // val-town, …) frequently aren't. Auto-disambiguate by suffixing
+            // with the method, then a counter, and warn.
+            let operation_id = if analysis.operations.contains_key(&raw_operation_id) {
+                let method_lower = method.to_lowercase();
+                let mut candidate = format!("{}_{}", raw_operation_id, method_lower);
+                let mut suffix = 2;
+                while analysis.operations.contains_key(&candidate) {
+                    candidate = format!("{}_{}_{}", raw_operation_id, method_lower, suffix);
+                    suffix += 1;
+                }
+                eprintln!(
+                    "⚠️  duplicate operationId `{}` at `{} {}` — disambiguated to `{}`",
+                    raw_operation_id, method, path, candidate
+                );
+                candidate
+            } else {
+                raw_operation_id
+            };
 
             let op_info = self.analyze_single_operation(
                 &operation_id,
@@ -3580,14 +3601,6 @@ impl SchemaAnalyzer {
                 path_item.parameters.as_ref(),
                 analysis,
             )?;
-            // T6: detect operationId collisions instead of silently overwriting.
-            if let Some(existing) = analysis.operations.get(&operation_id) {
-                return Err(GeneratorError::InvalidSchema(format!(
-                    "duplicate operationId `{}` — first at `{} {}`, then at `{} {}`. \
-                     OpenAPI requires operationId to be unique across the document.",
-                    operation_id, existing.method, existing.path, method, path
-                )));
-            }
             analysis.operations.insert(operation_id, op_info);
         }
         Ok(())
