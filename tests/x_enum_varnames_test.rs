@@ -32,8 +32,7 @@ fn enum_spec(values: serde_json::Value, extensions: serde_json::Value) -> serde_
 
 fn generate(spec: serde_json::Value, types_cfg: TypeMappingConfig) -> String {
     let mapper = TypeMapper::new(types_cfg.clone());
-    let mut analyzer =
-        SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
+    let mut analyzer = SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),

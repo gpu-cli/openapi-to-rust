@@ -45,8 +45,7 @@ fn string_spec(format: &str) -> serde_json::Value {
 }
 
 fn generate(spec: serde_json::Value, mapper: TypeMapper) -> String {
-    let mut analyzer =
-        SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
+    let mut analyzer = SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),

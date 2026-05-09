@@ -63,7 +63,11 @@ fn format_constraints_doc(c: &crate::analysis::PropertyConstraints) -> String {
         parts.push("uniqueItems=true".to_string());
     }
     if let Some(p) = &c.pattern {
-        let safe = p.replace("///", "/​//").replace("*/", "*​/");
+        // Insert a zero-width-space inside `///` and `*/` so they
+        // can't terminate the surrounding doc/block comment. Using
+        // the `\u{200B}` escape (vs. a literal U+200B) keeps clippy's
+        // `invisible_characters` lint happy.
+        let safe = p.replace("///", "/\u{200B}//").replace("*/", "*\u{200B}/");
         parts.push(format!("pattern=`{safe}`"));
     }
 
@@ -768,9 +772,7 @@ impl CodeGenerator {
         // Skipped silently when the set is empty so we don't litter
         // the output dir for specs whose generated types only use
         // std/serde/serde_json.
-        if let Some(toml) =
-            crate::type_mapping::render_required_deps_toml(&result.required_deps)
-        {
+        if let Some(toml) = crate::type_mapping::render_required_deps_toml(&result.required_deps) {
             let deps_path = self.config.output_dir.join("REQUIRED_DEPS.toml");
             fs::write(&deps_path, toml)?;
         }
@@ -1128,31 +1130,32 @@ impl CodeGenerator {
             })
             .collect();
 
-        let variants = variant_pairs.iter().map(
-            |(variant_ident, value, is_default, description)| {
-                let doc = description
-                    .as_ref()
-                    .map(|d| {
-                        let s = self.sanitize_doc_comment(d);
-                        quote! { #[doc = #s] }
-                    })
-                    .unwrap_or_default();
-                if *is_default {
-                    quote! {
-                        #doc
-                        #[default]
-                        #[serde(rename = #value)]
-                        #variant_ident,
+        let variants =
+            variant_pairs
+                .iter()
+                .map(|(variant_ident, value, is_default, description)| {
+                    let doc = description
+                        .as_ref()
+                        .map(|d| {
+                            let s = self.sanitize_doc_comment(d);
+                            quote! { #[doc = #s] }
+                        })
+                        .unwrap_or_default();
+                    if *is_default {
+                        quote! {
+                            #doc
+                            #[default]
+                            #[serde(rename = #value)]
+                            #variant_ident,
+                        }
+                    } else {
+                        quote! {
+                            #doc
+                            #[serde(rename = #value)]
+                            #variant_ident,
+                        }
                     }
-                } else {
-                    quote! {
-                        #doc
-                        #[serde(rename = #value)]
-                        #variant_ident,
-                    }
-                }
-            },
-        );
+                });
 
         // T13/T10: emit `as_str` and `Display` so the enum can be embedded in
         // query strings, headers, and path segments without requiring callers

@@ -33,8 +33,7 @@ fn generate(spec: serde_json::Value, types_cfg: TypeMappingConfig) -> String {
     // analysis-time and codegen-time decisions stay consistent. The
     // production CLI does this in src/bin/openapi-to-rust.rs.
     let mapper = TypeMapper::new(types_cfg.clone());
-    let mut analyzer =
-        SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
+    let mut analyzer = SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),

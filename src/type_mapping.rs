@@ -187,8 +187,7 @@ pub fn render_required_deps_toml(deps: &[DepRequirement]) -> Option<String> {
 /// `DepRequirement`s. Sorting by crate name keeps the emitted file
 /// deterministic so it can be checked in or diffed.
 pub fn collect_dep_requirements(used: &UsedFeatures) -> Vec<DepRequirement> {
-    let mut deps: Vec<DepRequirement> =
-        used.iter().map(|f| f.dep_requirement()).collect();
+    let mut deps: Vec<DepRequirement> = used.iter().map(|f| f.dep_requirement()).collect();
     deps.sort_by_key(|d| d.crate_name);
     deps.dedup_by_key(|d| d.crate_name);
     deps
@@ -223,125 +222,89 @@ impl UsedFeatures {
 // =====================================================================
 
 /// Strategy for `format: date-time | date | time`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DateStrategy {
     /// Plain `String`. Pre-Q2 behavior; pick this to opt out.
     String,
     /// `chrono::DateTime<Utc>` / `NaiveDate` / `NaiveTime` (default).
+    #[default]
     Chrono,
     /// `time::OffsetDateTime` / `Date` / `Time`.
     Time,
 }
 
-impl Default for DateStrategy {
-    fn default() -> Self {
-        Self::Chrono
-    }
-}
-
 /// Strategy for `format: duration` (ISO 8601 durations).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DurationStrategy {
+    // Off by default — `format: duration` is ISO 8601 (e.g.
+    // "PT1H30M") but `chrono::Duration`'s native serde encodes
+    // seconds. Round-tripping requires a custom parser that we'll
+    // land in a follow-up; for now `duration` stays String so
+    // default-on doesn't break specs that emit ISO 8601 strings
+    // the chrono codec couldn't decode.
+    #[default]
     String,
-    /// `chrono::Duration` (default). Round-trips ISO 8601 durations
-    /// via a small custom serde module emitted into the generated
-    /// crate.
+    /// `chrono::Duration`. Round-trips ISO 8601 durations via a
+    /// small custom serde module emitted into the generated crate.
     Chrono,
     /// `iso8601::Duration` from the `iso8601` crate.
     Iso8601,
 }
 
-impl Default for DurationStrategy {
-    fn default() -> Self {
-        // Off by default — `format: duration` is ISO 8601 (e.g.
-        // "PT1H30M") but `chrono::Duration`'s native serde encodes
-        // seconds. Round-tripping requires a custom parser that
-        // we'll land in a follow-up; for now `duration` stays
-        // String so default-on doesn't break specs that emit ISO
-        // 8601 strings the chrono codec couldn't decode.
-        Self::String
-    }
-}
-
 /// Strategy for `format: uuid` (or normalized aliases).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UuidStrategy {
     String,
     /// `uuid::Uuid` (default).
+    #[default]
     Uuid,
 }
 
-impl Default for UuidStrategy {
-    fn default() -> Self {
-        Self::Uuid
-    }
-}
-
 /// Strategy for `format: byte` (base64-encoded binary on the wire).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ByteStrategy {
     String,
     /// `Vec<u8>` round-tripped via an inlined `base64_serde` module
     /// (default).
+    #[default]
     Base64,
     /// `Vec<u8>` with no codec (caller responsible for encoding).
     VecU8,
 }
 
-impl Default for ByteStrategy {
-    fn default() -> Self {
-        Self::Base64
-    }
-}
-
 /// Strategy for `format: binary` (raw octets).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BinaryStrategy {
     String,
     /// `bytes::Bytes` (default).
+    #[default]
     Bytes,
     VecU8,
 }
 
-impl Default for BinaryStrategy {
-    fn default() -> Self {
-        Self::Bytes
-    }
-}
-
 /// Strategy for `format: ipv4 | ipv6`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IpStrategy {
     String,
     /// `std::net::Ipv4Addr` / `Ipv6Addr` (default; pure std, no deps).
+    #[default]
     Std,
 }
 
-impl Default for IpStrategy {
-    fn default() -> Self {
-        Self::Std
-    }
-}
-
 /// Strategy for `format: uri | url`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UriStrategy {
     String,
     /// `url::Url` (default).
+    #[default]
     Url,
-}
-
-impl Default for UriStrategy {
-    fn default() -> Self {
-        Self::Url
-    }
 }
 
 /// Strategy for `format: email`.
@@ -349,17 +312,12 @@ impl Default for UriStrategy {
 /// Email is **off by default** — the `email_address` crate is more
 /// opinionated than the wire ever guarantees, and most APIs treat
 /// emails as opaque strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmailStrategy {
+    #[default]
     String,
     EmailAddress,
-}
-
-impl Default for EmailStrategy {
-    fn default() -> Self {
-        Self::String
-    }
 }
 
 // =====================================================================
@@ -533,20 +491,15 @@ pub struct TypeConstraintsConfig {
 /// surfaces them only as doc-comments so callers see the rules
 /// without the SDK duplicating server logic and going brittle
 /// when the rules drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstraintMode {
     /// Drop constraints entirely (pre-Q2.4 behavior).
     Off,
     /// Emit `/// Constraint: ...` doc comments on each field.
     /// Cheap, no extra crate dependency. Default.
+    #[default]
     Doc,
-}
-
-impl Default for ConstraintMode {
-    fn default() -> Self {
-        Self::Doc
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -622,7 +575,6 @@ impl TypeMapper {
             .unwrap_or_default()
     }
 
-
     fn record(&self, feature: TypeFeature) {
         self.used.borrow_mut().insert(feature);
     }
@@ -680,10 +632,7 @@ impl TypeMapper {
                 // serializes as RFC 3339 by default and parses both
                 // `Z` and `+HH:MM` offsets on input. No `with`
                 // attribute required.
-                MappedType::with_feature(
-                    "chrono::DateTime<chrono::Utc>",
-                    TypeFeature::Chrono,
-                )
+                MappedType::with_feature("chrono::DateTime<chrono::Utc>", TypeFeature::Chrono)
             }
             DateStrategy::Time => {
                 self.record(TypeFeature::Time);
@@ -707,11 +656,7 @@ impl TypeMapper {
             }
             DateStrategy::Time => {
                 self.record(TypeFeature::Time);
-                MappedType::with_codec(
-                    "time::Date",
-                    "time::serde::iso8601",
-                    TypeFeature::Time,
-                )
+                MappedType::with_codec("time::Date", "time::serde::iso8601", TypeFeature::Time)
             }
         }
     }
@@ -725,11 +670,7 @@ impl TypeMapper {
             }
             DateStrategy::Time => {
                 self.record(TypeFeature::Time);
-                MappedType::with_codec(
-                    "time::Time",
-                    "time::serde::iso8601",
-                    TypeFeature::Time,
-                )
+                MappedType::with_codec("time::Time", "time::serde::iso8601", TypeFeature::Time)
             }
         }
     }
@@ -817,10 +758,7 @@ impl TypeMapper {
             EmailStrategy::String => MappedType::plain("String"),
             EmailStrategy::EmailAddress => {
                 self.record(TypeFeature::EmailAddress);
-                MappedType::with_feature(
-                    "email_address::EmailAddress",
-                    TypeFeature::EmailAddress,
-                )
+                MappedType::with_feature("email_address::EmailAddress", TypeFeature::EmailAddress)
             }
         }
     }

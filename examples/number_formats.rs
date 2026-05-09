@@ -83,8 +83,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 openapi_to_rust::analysis::SchemaType::Object { properties, .. } => {
                     let mut prop_types = Vec::new();
                     for (prop_name, prop_info) in properties {
-                        if let openapi_to_rust::analysis::SchemaType::Primitive { rust_type } =
-                            &prop_info.schema_type
+                        if let openapi_to_rust::analysis::SchemaType::Primitive {
+                            rust_type, ..
+                        } = &prop_info.schema_type
                         {
                             prop_types.push(format!("{prop_name}: {rust_type}"));
                         } else {

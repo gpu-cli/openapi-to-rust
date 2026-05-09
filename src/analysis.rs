@@ -120,7 +120,7 @@ pub enum SchemaType {
     /// Simple primitive type. `serde_with` carries an optional
     /// `#[serde(with = "<path>")]` codec hint produced by the
     /// TypeMapper for typed scalars (e.g. `format: byte` →
-    /// Vec<u8> + `base64_serde`); the generator wraps this in a
+    /// `Vec<u8>` + `base64_serde`); the generator wraps this in a
     /// field-level `with = ...` attribute.
     Primitive {
         rust_type: String,
@@ -1020,9 +1020,7 @@ impl SchemaAnalyzer {
                 SchemaType::ExtensibleEnum { known_values } => known_values.len(),
                 _ => continue,
             };
-            if let Some(ext) =
-                extract_enum_extensions(&analyzed.original, enum_value_count, name)
-            {
+            if let Some(ext) = extract_enum_extensions(&analyzed.original, enum_value_count, name) {
                 analysis.enum_extensions.insert(name.clone(), ext);
             }
         }
@@ -1650,9 +1648,7 @@ impl SchemaAnalyzer {
                                 description: prop_description,
                                 default: prop_default,
                                 serde_attrs: Vec::new(),
-                                constraints: PropertyConstraints::from_schema_details(
-                                    prop_details,
-                                ),
+                                constraints: PropertyConstraints::from_schema_details(prop_details),
                             },
                         );
                         continue;
@@ -1763,9 +1759,7 @@ impl SchemaAnalyzer {
             Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
                 ObjectAdditionalProperties::Forbidden
             }
-            Some(crate::openapi::AdditionalProperties::Schema(value_schema))
-                if typed_enabled =>
-            {
+            Some(crate::openapi::AdditionalProperties::Schema(value_schema)) if typed_enabled => {
                 let analyzed =
                     self.analyze_property_schema_with_context(value_schema, None, dependencies)?;
                 ObjectAdditionalProperties::Typed {
@@ -3777,8 +3771,7 @@ impl SchemaAnalyzer {
                         .unwrap_or(true);
 
                     if primitive_unions {
-                        let mapped =
-                            self.type_mapper.map(schema_type.clone(), schema.details());
+                        let mapped = self.type_mapper.map(schema_type.clone(), schema.details());
                         variants.push(SchemaRef {
                             target: mapped.rust_type,
                             nullable: false,
@@ -3817,8 +3810,8 @@ impl SchemaAnalyzer {
                             _ => format!("{context_name}Variant{inline_index}"),
                         };
 
-                        let rust_type = self
-                            .openapi_type_to_rust_type(schema_type.clone(), schema.details());
+                        let rust_type =
+                            self.openapi_type_to_rust_type(schema_type.clone(), schema.details());
 
                         self.resolved_cache.insert(
                             inline_type_name.clone(),

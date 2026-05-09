@@ -313,6 +313,7 @@ fn demonstrate_rust_api(
         schema_extensions: vec![],
         enable_registry: false,
         registry_only: false,
+        types: openapi_to_rust::TypeMappingConfig::default(),
     };
 
     // Generate code

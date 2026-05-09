@@ -77,8 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // for bisecting regressions caused by typed-scalar
             // adoption without editing the TOML config.
             if types_conservative {
-                generator_config.types =
-                    openapi_to_rust::TypeMappingConfig::conservative();
+                generator_config.types = openapi_to_rust::TypeMappingConfig::conservative();
             }
 
             println!(
@@ -132,8 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // TypeMapper from the user's [generator.types] config so
             // per-format strategies drive type generation (Q2.0).
             println!("🔍 Analyzing schemas...");
-            let type_mapper =
-                openapi_to_rust::TypeMapper::new(generator_config.types.clone());
+            let type_mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
             let mut analyzer = if generator_config.schema_extensions.is_empty() {
                 SchemaAnalyzer::with_type_mapper(spec_value, type_mapper)?
             } else {

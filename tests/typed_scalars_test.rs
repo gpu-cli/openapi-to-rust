@@ -11,7 +11,9 @@
 //! only on `TypeMapper` would miss the codec threading through
 //! `SchemaType::Primitive.serde_with`.
 
-use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMappingConfig, TypeMapper};
+use openapi_to_rust::{
+    CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
+};
 use serde_json::json;
 
 fn spec_with_format(format: &str) -> serde_json::Value {
@@ -34,8 +36,7 @@ fn spec_with_format(format: &str) -> serde_json::Value {
 }
 
 fn generate(spec: serde_json::Value, mapper: TypeMapper) -> String {
-    let mut analyzer =
-        SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
+    let mut analyzer = SchemaAnalyzer::with_type_mapper(spec, mapper).expect("analyzer");
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
@@ -201,11 +202,7 @@ fn required_deps_are_populated_for_typed_scalars() {
     let codegen = CodeGenerator::new(cfg);
     let result = codegen.generate_all(&mut analysis).expect("generate_all");
 
-    let crate_names: Vec<&str> = result
-        .required_deps
-        .iter()
-        .map(|d| d.crate_name)
-        .collect();
+    let crate_names: Vec<&str> = result.required_deps.iter().map(|d| d.crate_name).collect();
     // Sorted, deterministic ordering.
     assert_eq!(crate_names, vec!["base64", "chrono", "url", "uuid"]);
 }
