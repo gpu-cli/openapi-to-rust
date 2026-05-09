@@ -1,4 +1,5 @@
 use crate::openapi::{Discriminator, OpenApiSpec, Schema, SchemaType as OpenApiSchemaType};
+use crate::type_mapping::TypeMapper;
 use crate::{GeneratorError, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -572,10 +573,25 @@ pub struct SchemaAnalyzer {
     openapi_spec: Value,
     current_schema_name: Option<String>,
     component_parameters: BTreeMap<String, crate::openapi::Parameter>,
+    /// Single chokepoint for `(openapi_type, format)` → Rust-type
+    /// decisions (Q2.0). Defaulted when the analyzer is built without a
+    /// config; threaded from `GeneratorConfig.types` via
+    /// [`Self::with_type_mapper`].
+    type_mapper: TypeMapper,
 }
 
 impl SchemaAnalyzer {
+    /// Construct an analyzer with a default [`TypeMapper`]. Pre-Q2.0
+    /// callers (tests, simple bins) use this and get bit-identical
+    /// behavior to the pre-refactor code.
     pub fn new(openapi_spec: Value) -> Result<Self> {
+        Self::with_type_mapper(openapi_spec, TypeMapper::default())
+    }
+
+    /// Construct an analyzer with a caller-supplied [`TypeMapper`]
+    /// (built from `GeneratorConfig.types`). The CLI / library entry
+    /// points use this so user TOML config drives type generation.
+    pub fn with_type_mapper(openapi_spec: Value, type_mapper: TypeMapper) -> Result<Self> {
         let spec: OpenApiSpec =
             serde_json::from_value(openapi_spec.clone()).map_err(GeneratorError::ParseError)?;
         let schemas = Self::extract_schemas(&spec)?;
@@ -593,16 +609,36 @@ impl SchemaAnalyzer {
             openapi_spec,
             current_schema_name: None,
             component_parameters,
+            type_mapper,
         })
     }
 
-    /// Create a new analyzer with schema extensions merged in
+    /// Create a new analyzer with schema extensions merged in (default
+    /// type mapper).
     pub fn new_with_extensions(
         openapi_spec: Value,
         extension_paths: &[std::path::PathBuf],
     ) -> Result<Self> {
         let merged_spec = merge_schema_extensions(openapi_spec, extension_paths)?;
         Self::new(merged_spec)
+    }
+
+    /// Same as [`Self::new_with_extensions`] but with a caller-supplied
+    /// type mapper.
+    pub fn new_with_extensions_and_type_mapper(
+        openapi_spec: Value,
+        extension_paths: &[std::path::PathBuf],
+        type_mapper: TypeMapper,
+    ) -> Result<Self> {
+        let merged_spec = merge_schema_extensions(openapi_spec, extension_paths)?;
+        Self::with_type_mapper(merged_spec, type_mapper)
+    }
+
+    /// Borrow the analyzer's type mapper. Useful for downstream
+    /// inspection (e.g. the dep advisory in Q2.8 reads
+    /// `type_mapper().used_features()` after generation).
+    pub fn type_mapper(&self) -> &TypeMapper {
+        &self.type_mapper
     }
 
     /// Generate a context-aware name for inline types, arrays, and variants
@@ -1147,28 +1183,25 @@ impl SchemaAnalyzer {
                     .schema_type()
                     .cloned()
                     .unwrap_or(OpenApiSchemaType::Object);
+                let format = details.format.as_deref();
                 match primary {
                     OpenApiSchemaType::String => {
                         if let Some(values) = details.string_enum_values() {
                             SchemaType::StringEnum { values }
                         } else {
                             SchemaType::Primitive {
-                                rust_type: "String".to_string(),
+                                rust_type: self.type_mapper.string_format(format).rust_type,
                             }
                         }
                     }
-                    OpenApiSchemaType::Integer => {
-                        let rust_type =
-                            self.get_number_rust_type(OpenApiSchemaType::Integer, details);
-                        SchemaType::Primitive { rust_type }
-                    }
-                    OpenApiSchemaType::Number => {
-                        let rust_type =
-                            self.get_number_rust_type(OpenApiSchemaType::Number, details);
-                        SchemaType::Primitive { rust_type }
-                    }
+                    OpenApiSchemaType::Integer => SchemaType::Primitive {
+                        rust_type: self.type_mapper.integer_format(format).rust_type,
+                    },
+                    OpenApiSchemaType::Number => SchemaType::Primitive {
+                        rust_type: self.type_mapper.number_format(format).rust_type,
+                    },
                     OpenApiSchemaType::Boolean => SchemaType::Primitive {
-                        rust_type: "bool".to_string(),
+                        rust_type: self.type_mapper.boolean().rust_type,
                     },
                     OpenApiSchemaType::Array => {
                         // Analyze array item type
@@ -1178,7 +1211,7 @@ impl SchemaAnalyzer {
                         // Check if this is a dynamic JSON object
                         if self.should_use_dynamic_json(schema) {
                             SchemaType::Primitive {
-                                rust_type: "serde_json::Value".to_string(),
+                                rust_type: self.type_mapper.dynamic_json().rust_type,
                             }
                         } else {
                             // Analyze object properties
@@ -1186,7 +1219,7 @@ impl SchemaAnalyzer {
                         }
                     }
                     _ => SchemaType::Primitive {
-                        rust_type: "serde_json::Value".to_string(),
+                        rust_type: self.type_mapper.dynamic_json().rust_type,
                     },
                 }
             }
@@ -2969,15 +3002,11 @@ impl SchemaAnalyzer {
         openapi_type: OpenApiSchemaType,
         details: &crate::openapi::SchemaDetails,
     ) -> String {
-        match openapi_type {
-            OpenApiSchemaType::String => "String".to_string(),
-            OpenApiSchemaType::Integer => self.get_number_rust_type(openapi_type, details),
-            OpenApiSchemaType::Number => self.get_number_rust_type(openapi_type, details),
-            OpenApiSchemaType::Boolean => "bool".to_string(),
-            OpenApiSchemaType::Array => "Vec<serde_json::Value>".to_string(), // Fallback for arrays without items
-            OpenApiSchemaType::Object => "serde_json::Value".to_string(), // Fallback for untyped objects
-            OpenApiSchemaType::Null => "()".to_string(),                  // Null type
-        }
+        // Q2.0: route through the TypeMapper chokepoint. With the default
+        // config this produces bit-identical output to the pre-refactor
+        // match; later Q2.* issues add format-aware branches inside
+        // TypeMapper without touching this function.
+        self.type_mapper.map(openapi_type, details).rust_type
     }
 
     #[allow(dead_code)]
@@ -3260,24 +3289,14 @@ impl SchemaAnalyzer {
         schema_type: OpenApiSchemaType,
         details: &crate::openapi::SchemaDetails,
     ) -> String {
+        // Q2.0: delegate to the TypeMapper chokepoint. The fallback for
+        // non-numeric inputs is preserved for backwards compatibility
+        // (callers in 2025-era code path `Integer | Number` here).
+        let format = details.format.as_deref();
         match schema_type {
-            OpenApiSchemaType::Integer => {
-                // Check format field for integer types
-                match details.format.as_deref() {
-                    Some("int32") => "i32".to_string(),
-                    Some("int64") => "i64".to_string(),
-                    _ => "i64".to_string(), // Default for integer
-                }
-            }
-            OpenApiSchemaType::Number => {
-                // Check format field for number types
-                match details.format.as_deref() {
-                    Some("float") => "f32".to_string(),
-                    Some("double") => "f64".to_string(),
-                    _ => "f64".to_string(), // Default for number
-                }
-            }
-            _ => "serde_json::Value".to_string(), // Fallback
+            OpenApiSchemaType::Integer => self.type_mapper.integer_format(format).rust_type,
+            OpenApiSchemaType::Number => self.type_mapper.number_format(format).rust_type,
+            _ => self.type_mapper.dynamic_json().rust_type,
         }
     }
 

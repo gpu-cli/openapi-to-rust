@@ -110,18 +110,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Analyze schemas (with extensions if configured)
+            // Analyze schemas (with extensions if configured). Build a
+            // TypeMapper from the user's [generator.types] config so
+            // per-format strategies drive type generation (Q2.0).
             println!("🔍 Analyzing schemas...");
+            let type_mapper =
+                openapi_to_rust::TypeMapper::new(generator_config.types.clone());
             let mut analyzer = if generator_config.schema_extensions.is_empty() {
-                SchemaAnalyzer::new(spec_value)?
+                SchemaAnalyzer::with_type_mapper(spec_value, type_mapper)?
             } else {
                 println!(
                     "📎 Merging {} schema extension(s)",
                     generator_config.schema_extensions.len()
                 );
-                SchemaAnalyzer::new_with_extensions(
+                SchemaAnalyzer::new_with_extensions_and_type_mapper(
                     spec_value,
                     &generator_config.schema_extensions,
+                    type_mapper,
                 )?
             };
             let mut analysis = analyzer.analyze()?;

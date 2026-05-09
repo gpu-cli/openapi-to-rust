@@ -287,6 +287,7 @@ pub fn run_generation_test(
         auth_config: None,
         enable_registry: false,
         registry_only: false,
+        types: crate::type_mapping::TypeMappingConfig::default(),
     };
 
     // Generate code

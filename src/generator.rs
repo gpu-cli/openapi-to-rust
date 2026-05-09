@@ -51,6 +51,10 @@ pub struct GeneratorConfig {
     pub enable_registry: bool,
     /// Generate only the operation registry (skip types, client, streaming)
     pub registry_only: bool,
+    /// Per-format type-mapping strategies driven by the `[generator.types]`
+    /// TOML section. Q2.0 introduces this field; with the default value
+    /// every mapping preserves pre-refactor behavior.
+    pub types: crate::type_mapping::TypeMappingConfig,
 }
 
 impl Default for GeneratorConfig {
@@ -72,6 +76,7 @@ impl Default for GeneratorConfig {
             auth_config: None,
             enable_registry: false,
             registry_only: false,
+            types: crate::type_mapping::TypeMappingConfig::default(),
         }
     }
 }
