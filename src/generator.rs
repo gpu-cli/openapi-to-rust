@@ -4,6 +4,23 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Parse a Rust type string (possibly with generics, e.g.
+/// `chrono::DateTime<chrono::Utc>`) into a `TokenStream`. The pre-Q2
+/// ad-hoc `::`-splitter choked on `<` and `>`; `syn::parse_str` handles
+/// every valid type expression. Errors here mean the [`TypeMapper`]
+/// produced a string that doesn't parse as a Rust type — a generator
+/// bug, surfaced as a `GeneratorError::CodeGenError`.
+///
+/// [`TypeMapper`]: crate::type_mapping::TypeMapper
+fn parse_rust_type(rust_type: &str) -> Result<TokenStream> {
+    let parsed: syn::Type = syn::parse_str(rust_type).map_err(|e| {
+        GeneratorError::CodeGenError(format!(
+            "TypeMapper produced un-parseable type `{rust_type}`: {e}"
+        ))
+    })?;
+    Ok(quote! { #parsed })
+}
+
 /// Info about schemas that are variants in discriminated unions
 #[derive(Clone)]
 struct DiscriminatedVariantInfo {
@@ -275,7 +292,77 @@ impl CodeGenerator {
             }
         }
 
-        // Generate file with imports and types (no module wrapper)
+        // Helper modules emitted only when the analyzer actually
+        // referenced their codecs. Avoids polluting every generated
+        // file (and every snapshot) with dead code for specs that
+        // don't use `format: byte`.
+        let base64_helper = if analysis
+            .used_type_features
+            .contains(crate::type_mapping::TypeFeature::Base64)
+        {
+            quote! {
+                /// base64 codec for `Vec<u8>` fields produced from
+                /// `format: byte`. Used via `#[serde(with = "base64_serde")]`
+                /// for required/non-null fields; `with = "base64_serde::option"`
+                /// for the Option<Vec<u8>> case.
+                mod base64_serde {
+                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    use serde::{Deserialize, Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        bytes: &Vec<u8>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        ser.serialize_str(&STANDARD.encode(bytes))
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Vec<u8>, D::Error> {
+                        let s = String::deserialize(de)?;
+                        STANDARD
+                            .decode(s.as_bytes())
+                            .map_err(serde::de::Error::custom)
+                    }
+
+                    /// Codec for Option<Vec<u8>> fields (optional /
+                    /// nullable `format: byte`). serde dispatches on
+                    /// the field type; without this submodule the
+                    /// `?` operator in the generated code would fail
+                    /// to convert Vec<u8> to Option<Vec<u8>>.
+                    pub mod option {
+                        use super::*;
+                        use serde::{Deserialize, Deserializer, Serializer};
+
+                        pub fn serialize<S: Serializer>(
+                            opt: &Option<Vec<u8>>,
+                            ser: S,
+                        ) -> Result<S::Ok, S::Error> {
+                            match opt {
+                                Some(bytes) => super::serialize(bytes, ser),
+                                None => ser.serialize_none(),
+                            }
+                        }
+
+                        pub fn deserialize<'de, D: Deserializer<'de>>(
+                            de: D,
+                        ) -> Result<Option<Vec<u8>>, D::Error> {
+                            let opt = Option::<String>::deserialize(de)?;
+                            opt.map(|s| {
+                                STANDARD
+                                    .decode(s.as_bytes())
+                                    .map_err(serde::de::Error::custom)
+                            })
+                            .transpose()
+                        }
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        // Generate file with imports and types (no module wrapper).
         let generated = quote! {
             //! Generated types from OpenAPI specification
             //!
@@ -288,6 +375,8 @@ impl CodeGenerator {
             #![allow(unreachable_patterns)]
 
             use serde::{Deserialize, Serialize};
+
+            #base64_helper
 
             #type_definitions
         };
@@ -609,7 +698,7 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
 
         match &schema.schema_type {
-            SchemaType::Primitive { rust_type } => {
+            SchemaType::Primitive { rust_type, .. } => {
                 // Generate type alias for primitives that are referenced by other schemas
                 self.generate_type_alias(schema, rust_type)
             }
@@ -746,23 +835,10 @@ impl CodeGenerator {
         rust_type: &str,
     ) -> Result<TokenStream> {
         let type_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
-
-        // Parse the rust type into tokens
-        let base_type = if rust_type.contains("::") {
-            let parts: Vec<&str> = rust_type.split("::").collect();
-            if parts.len() == 2 {
-                let module = format_ident!("{}", parts[0]);
-                let type_name_part = format_ident!("{}", parts[1]);
-                quote! { #module::#type_name_part }
-            } else {
-                // More complex path
-                let path_parts: Vec<_> = parts.iter().map(|p| format_ident!("{}", p)).collect();
-                quote! { #(#path_parts)::* }
-            }
-        } else {
-            let simple_type = format_ident!("{}", rust_type);
-            quote! { #simple_type }
-        };
+        // syn parses any valid Rust type expression including
+        // generics (`chrono::DateTime<chrono::Utc>`, `Vec<u8>`).
+        // The pre-Q2 ad-hoc `::`-splitter choked on `<`.
+        let base_type = parse_rust_type(rust_type)?;
 
         let doc_comment = if let Some(desc) = &schema.description {
             let sanitized_desc = self.sanitize_doc_comment(desc);
@@ -1356,6 +1432,15 @@ impl CodeGenerator {
                     };
                     quote! { Vec<#inner_type> }
                 }
+            } else if variant.target.contains("::") || variant.target.contains('<') {
+                // Qualified Rust path or generic (chrono::DateTime<chrono::Utc>,
+                // bytes::Bytes, std::net::Ipv4Addr) emitted by TypeMapper. Pass
+                // it straight to syn — the to_rust_type_name PascalCase
+                // pipeline below would mangle it into a non-existent ident.
+                parse_rust_type(&variant.target).unwrap_or_else(|_| {
+                    let fallback = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                    quote! { #fallback }
+                })
             } else {
                 let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
                 quote! { #type_ident }
@@ -1456,24 +1541,20 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
 
         let base_type = match &prop.schema_type {
-            SchemaType::Primitive { rust_type } => {
-                // Handle complex types like serde_json::Value
-                if rust_type.contains("::") {
-                    let parts: Vec<&str> = rust_type.split("::").collect();
-                    if parts.len() == 2 {
-                        let module = format_ident!("{}", parts[0]);
-                        let type_name = format_ident!("{}", parts[1]);
-                        quote! { #module::#type_name }
-                    } else {
-                        // More than 2 parts, construct path
-                        let path_parts: Vec<_> =
-                            parts.iter().map(|p| format_ident!("{}", p)).collect();
-                        quote! { #(#path_parts)::* }
-                    }
-                } else {
-                    let type_ident = format_ident!("{}", rust_type);
-                    quote! { #type_ident }
-                }
+            SchemaType::Primitive { rust_type, .. } => {
+                // syn handles generics + complex paths
+                // (chrono::DateTime<chrono::Utc>, Vec<u8>, …).
+                parse_rust_type(rust_type).unwrap_or_else(|_| {
+                    // Pathological mapper output: fall back to bare
+                    // String so the generated file at least
+                    // compiles. Emit a stderr warning so the
+                    // operator can investigate.
+                    eprintln!(
+                        "⚠️  TypeMapper produced un-parseable type `{rust_type}`; \
+                         falling back to String"
+                    );
+                    quote! { String }
+                })
             }
             SchemaType::Reference { target } => {
                 let target_rust_name = self.to_rust_type_name(target);
@@ -1569,6 +1650,30 @@ impl CodeGenerator {
             attrs.push(quote! { default });
         }
 
+        // Codec hint from TypeMapper (Q2): `format: byte` →
+        // `with = "base64_serde"`, etc. Fields whose mapped type
+        // carries no codec (e.g. chrono::DateTime<Utc> uses its
+        // built-in serde) skip this attribute. Option fields need
+        // the `::option` submodule of the codec — serde dispatches
+        // on field type, and the base codec works on Vec<u8> /
+        // chrono::Duration / etc., not their Option wrappers.
+        if let crate::analysis::SchemaType::Primitive {
+            serde_with: Some(codec),
+            ..
+        } = &prop.schema_type
+        {
+            // Mirrors the wrapping logic in generate_field_type:
+            // the field is Option<T> when the schema marks it
+            // optional or nullable.
+            let is_option_wrapped = !is_required || prop.nullable;
+            let codec_path = if is_option_wrapped {
+                format!("{codec}::option")
+            } else {
+                codec.clone()
+            };
+            attrs.push(quote! { with = #codec_path });
+        }
+
         if attrs.is_empty() {
             TokenStream::new()
         } else {
@@ -1587,6 +1692,22 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
         match schema_type {
             SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => true,
+            // Q2 typed scalars: chrono / url have no Default impl.
+            // uuid::Uuid, bytes::Bytes, std::net::Ip*Addr all derive
+            // Default, so they're safe to leave under #[serde(default)].
+            SchemaType::Primitive { rust_type, .. } => matches!(
+                rust_type.as_str(),
+                "chrono::DateTime<chrono::Utc>"
+                    | "chrono::NaiveDate"
+                    | "chrono::NaiveTime"
+                    | "chrono::Duration"
+                    | "url::Url"
+                    | "time::OffsetDateTime"
+                    | "time::Date"
+                    | "time::Time"
+                    | "iso8601::Duration"
+                    | "email_address::EmailAddress"
+            ),
             SchemaType::Reference { target } => {
                 if let Some(schema) = analysis.schemas.get(target) {
                     self.type_lacks_default(&schema.schema_type, analysis)
@@ -2221,7 +2342,7 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
 
         match item_type {
-            SchemaType::Primitive { rust_type } => {
+            SchemaType::Primitive { rust_type, .. } => {
                 // The string here may be anything from `i64` / `String` to
                 // `serde_json::Value` to `Vec<serde_json::Value>` to
                 // `BTreeMap<String, T>`. Parse it as a syn::Type so we get
@@ -2270,6 +2391,17 @@ impl CodeGenerator {
             "f32" | "f64" => return "Number".to_string(),
             "String" => return "String".to_string(),
             "serde_json::Value" => return "Value".to_string(),
+            // Q2 typed-scalar paths. Without these the fallback PascalCase
+            // pass over `bytes::Bytes` produces `BytesBytes(BytesBytes)`,
+            // which then can't compile because no `BytesBytes` type exists.
+            "bytes::Bytes" => return "Binary".to_string(),
+            "chrono::DateTime<chrono::Utc>" => return "DateTime".to_string(),
+            "chrono::NaiveDate" => return "Date".to_string(),
+            "chrono::NaiveTime" => return "Time".to_string(),
+            "uuid::Uuid" => return "Uuid".to_string(),
+            "url::Url" => return "Url".to_string(),
+            "std::net::Ipv4Addr" => return "Ipv4".to_string(),
+            "std::net::Ipv6Addr" => return "Ipv6".to_string(),
             _ => {}
         }
 

@@ -36,6 +36,12 @@ edition = "2021"
 [dependencies]
 serde = {{ version = "1.0", features = ["derive"] }}
 serde_json = "1.0"
+# Q2 typed-scalar deps (default-on; harmless when unused).
+chrono = {{ version = "0.4", features = ["serde"] }}
+uuid = {{ version = "1", features = ["serde", "v4"] }}
+url = {{ version = "2", features = ["serde"] }}
+bytes = {{ version = "1", features = ["serde"] }}
+base64 = "0.22"
 "#
     );
 

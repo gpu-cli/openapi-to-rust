@@ -229,6 +229,7 @@ fn test_generated_error_code() {
             type_mappings: BTreeMap::new(),
         },
         operations: BTreeMap::new(),
+        used_type_features: Default::default(),
     };
 
     // Generate HTTP client code which includes error types

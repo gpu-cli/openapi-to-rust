@@ -27,6 +27,7 @@ fn create_test_analysis_with_operations(operations: Vec<OperationInfo>) -> Schem
             type_mappings: Default::default(),
         },
         operations: ops_map,
+        used_type_features: Default::default(),
     }
 }
 

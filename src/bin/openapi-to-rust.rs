@@ -18,6 +18,12 @@ enum Commands {
         /// Path to configuration file (openapi-to-rust.toml)
         #[arg(short, long, default_value = "openapi-to-rust.toml")]
         config: PathBuf,
+        /// Force every typed-scalar strategy back to "string" (Q2).
+        /// Useful for bisecting regressions caused by typed-scalar
+        /// adoption — overrides any `[generator.types]` settings in
+        /// the TOML config.
+        #[arg(long)]
+        types_conservative: bool,
     },
     /// Validate configuration file without generating code
     Validate {
@@ -48,7 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Generate { config } => {
+        Commands::Generate {
+            config,
+            types_conservative,
+        } => {
             println!("📖 Reading configuration from: {}", config.display());
 
             // Load configuration from TOML
@@ -61,7 +70,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let generator_config = config_file.into_generator_config();
+            let mut generator_config = config_file.into_generator_config();
+
+            // CLI override: `--types-conservative` collapses every
+            // Q2 typed-scalar strategy back to plain `String`. Useful
+            // for bisecting regressions caused by typed-scalar
+            // adoption without editing the TOML config.
+            if types_conservative {
+                generator_config.types =
+                    openapi_to_rust::TypeMappingConfig::conservative();
+            }
 
             println!(
                 "📄 Reading OpenAPI spec: {}",

@@ -100,7 +100,12 @@ reqwest-middleware = { version = "0.4", features = ["multipart"] }
 reqwest-retry = "0.7"
 reqwest-tracing = "0.5"
 thiserror = "1"
-url = "2"
+url = { version = "2", features = ["serde"] }
+# Q2 typed-scalar deps (default-on; harmless when unused).
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+bytes = { version = "1", features = ["serde"] }
+base64 = "0.22"
 EOF
 
   cat >"$dir/src/lib.rs" <<EOF

@@ -322,6 +322,12 @@ pub fn run_generation_test(
         ("futures-util", r#""0.3""#),
         ("tokio", r#"{ version = "1.0", features = ["full"] }"#),
         ("tracing", r#""0.1""#),
+        // Q2 typed-scalar deps (default-on; harmless when unused).
+        ("chrono", r#"{ version = "0.4", features = ["serde"] }"#),
+        ("uuid", r#"{ version = "1", features = ["serde", "v4"] }"#),
+        ("url", r#"{ version = "2", features = ["serde"] }"#),
+        ("bytes", r#"{ version = "1", features = ["serde"] }"#),
+        ("base64", r#""0.22""#),
     ];
 
     // Add extra dependencies

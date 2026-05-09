@@ -15,6 +15,14 @@ pub struct SchemaAnalysis {
     pub patterns: DetectedPatterns,
     /// OpenAPI operations and their request/response schemas
     pub operations: BTreeMap<String, OperationInfo>,
+    /// Optional crates the [`TypeMapper`] was asked to reference
+    /// during analysis (e.g. chrono when a `format: date-time` field
+    /// became `chrono::DateTime<Utc>`). The generator reads this to
+    /// decide which helper modules (e.g. `base64_serde`) to emit.
+    /// Q2.8 will additionally use it to write `REQUIRED_DEPS.toml`.
+    ///
+    /// [`TypeMapper`]: crate::type_mapping::TypeMapper
+    pub used_type_features: crate::type_mapping::UsedFeatures,
 }
 
 #[derive(Debug, Clone)]
@@ -30,8 +38,15 @@ pub struct AnalyzedSchema {
 
 #[derive(Debug, Clone)]
 pub enum SchemaType {
-    /// Simple primitive type
-    Primitive { rust_type: String },
+    /// Simple primitive type. `serde_with` carries an optional
+    /// `#[serde(with = "<path>")]` codec hint produced by the
+    /// TypeMapper for typed scalars (e.g. `format: byte` →
+    /// Vec<u8> + `base64_serde`); the generator wraps this in a
+    /// field-level `with = ...` attribute.
+    Primitive {
+        rust_type: String,
+        serde_with: Option<String>,
+    },
     /// Object with properties
     Object {
         properties: BTreeMap<String, PropertyInfo>,
@@ -733,6 +748,7 @@ impl SchemaAnalyzer {
                 type_mappings: BTreeMap::new(),
             },
             operations: BTreeMap::new(),
+            used_type_features: crate::type_mapping::UsedFeatures::default(),
         };
 
         // First pass: detect patterns
@@ -814,6 +830,11 @@ impl SchemaAnalyzer {
                 }
             }
         }
+
+        // Snapshot the type-mapper's used-features set so the
+        // generator can decide which helper modules to emit
+        // (e.g. base64_serde for `format: byte`).
+        analysis.used_type_features = self.type_mapper.used_features();
 
         Ok(analysis)
     }
@@ -1150,6 +1171,7 @@ impl SchemaAnalyzer {
                         );
                         SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         }
                     }
                 }
@@ -1191,17 +1213,21 @@ impl SchemaAnalyzer {
                         } else {
                             SchemaType::Primitive {
                                 rust_type: self.type_mapper.string_format(format).rust_type,
+                                serde_with: None,
                             }
                         }
                     }
                     OpenApiSchemaType::Integer => SchemaType::Primitive {
                         rust_type: self.type_mapper.integer_format(format).rust_type,
+                        serde_with: None,
                     },
                     OpenApiSchemaType::Number => SchemaType::Primitive {
                         rust_type: self.type_mapper.number_format(format).rust_type,
+                        serde_with: None,
                     },
                     OpenApiSchemaType::Boolean => SchemaType::Primitive {
                         rust_type: self.type_mapper.boolean().rust_type,
+                        serde_with: None,
                     },
                     OpenApiSchemaType::Array => {
                         // Analyze array item type
@@ -1212,6 +1238,7 @@ impl SchemaAnalyzer {
                         if self.should_use_dynamic_json(schema) {
                             SchemaType::Primitive {
                                 rust_type: self.type_mapper.dynamic_json().rust_type,
+                                serde_with: None,
                             }
                         } else {
                             // Analyze object properties
@@ -1220,6 +1247,7 @@ impl SchemaAnalyzer {
                     }
                     _ => SchemaType::Primitive {
                         rust_type: self.type_mapper.dynamic_json().rust_type,
+                        serde_with: None,
                     },
                 }
             }
@@ -1261,6 +1289,7 @@ impl SchemaAnalyzer {
                             if self.should_use_dynamic_json(schema) {
                                 SchemaType::Primitive {
                                     rust_type: "serde_json::Value".to_string(),
+                                    serde_with: None,
                                 }
                             } else {
                                 self.analyze_object_schema(schema, &mut dependencies)?
@@ -1273,11 +1302,13 @@ impl SchemaAnalyzer {
                         }
                         _ => SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         },
                     }
                 } else {
                     SchemaType::Primitive {
                         rust_type: "serde_json::Value".to_string(),
+                        serde_with: None,
                     }
                 }
             }
@@ -1318,6 +1349,7 @@ impl SchemaAnalyzer {
                         // This is a dynamic JSON pattern, use serde_json::Value directly
                         SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         }
                     } else if prop_schema.is_nullable_pattern()
                         && let Some(non_null) = prop_schema.non_null_variant()
@@ -1560,6 +1592,7 @@ impl SchemaAnalyzer {
                     );
                     return Ok(SchemaType::Primitive {
                         rust_type: "serde_json::Value".to_string(),
+                        serde_with: None,
                     });
                 }
             }
@@ -1697,19 +1730,32 @@ impl SchemaAnalyzer {
                             target: enum_type_name,
                         });
                     } else {
+                        // Property-level string with no enum values:
+                        // route through TypeMapper so `format: date-time`
+                        // / `uuid` / etc. surface as typed scalars
+                        // (chrono::DateTime, uuid::Uuid, …) instead of
+                        // collapsing to bare `String`.
+                        let mapped = self
+                            .type_mapper
+                            .string_format(schema.details().format.as_deref());
                         return Ok(SchemaType::Primitive {
-                            rust_type: "String".to_string(),
+                            rust_type: mapped.rust_type,
+                            serde_with: mapped.serde_with,
                         });
                     }
                 }
                 OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
                     let details = schema.details();
                     let rust_type = self.get_number_rust_type(schema_type.clone(), details);
-                    return Ok(SchemaType::Primitive { rust_type });
+                    return Ok(SchemaType::Primitive {
+                        rust_type,
+                        serde_with: None,
+                    });
                 }
                 OpenApiSchemaType::Boolean => {
                     return Ok(SchemaType::Primitive {
                         rust_type: "bool".to_string(),
+                        serde_with: None,
                     });
                 }
                 OpenApiSchemaType::Array => {
@@ -1733,6 +1779,7 @@ impl SchemaAnalyzer {
                     if self.should_use_dynamic_json(schema) {
                         return Ok(SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         });
                     }
                     // Inline object in property - create a named schema for it
@@ -1779,6 +1826,7 @@ impl SchemaAnalyzer {
                 _ => {
                     return Ok(SchemaType::Primitive {
                         rust_type: "serde_json::Value".to_string(),
+                        serde_with: None,
                     });
                 }
             }
@@ -1799,6 +1847,7 @@ impl SchemaAnalyzer {
         if self.should_use_dynamic_json(schema) {
             return Ok(SchemaType::Primitive {
                 rust_type: "serde_json::Value".to_string(),
+                serde_with: None,
             });
         }
 
@@ -1919,6 +1968,7 @@ impl SchemaAnalyzer {
                     if self.should_use_dynamic_json(schema) {
                         return Ok(SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         });
                     }
                     return self.analyze_object_schema(schema, dependencies);
@@ -1946,19 +1996,24 @@ impl SchemaAnalyzer {
                     } else {
                         return Ok(SchemaType::Primitive {
                             rust_type: "String".to_string(),
+                            serde_with: None,
                         });
                     }
                 }
                 _ => {
                     // Handle other inferred types
                     let rust_type = self.openapi_type_to_rust_type(inferred_type, schema.details());
-                    return Ok(SchemaType::Primitive { rust_type });
+                    return Ok(SchemaType::Primitive {
+                        rust_type,
+                        serde_with: None,
+                    });
                 }
             }
         }
 
         Ok(SchemaType::Primitive {
             rust_type: "serde_json::Value".to_string(),
+            serde_with: None,
         })
     }
 
@@ -2388,7 +2443,7 @@ impl SchemaAnalyzer {
 
                     match &variant_type {
                         // For primitive types, we can use them directly in the union
-                        SchemaType::Primitive { rust_type } => {
+                        SchemaType::Primitive { rust_type, .. } => {
                             union_variants.push(SchemaRef {
                                 target: rust_type.clone(),
                                 nullable: false,
@@ -2397,7 +2452,7 @@ impl SchemaAnalyzer {
                         // For arrays, check if we can determine the item type
                         SchemaType::Array { item_type } => {
                             match item_type.as_ref() {
-                                SchemaType::Primitive { rust_type } => {
+                                SchemaType::Primitive { rust_type, .. } => {
                                     let type_name = format!("Vec<{rust_type}>");
                                     union_variants.push(SchemaRef {
                                         target: type_name,
@@ -2465,6 +2520,7 @@ impl SchemaAnalyzer {
             // Only fall back to serde_json::Value if we truly can't analyze the union
             return Ok(SchemaType::Primitive {
                 rust_type: "serde_json::Value".to_string(),
+                serde_with: None,
             });
         }
 
@@ -2541,7 +2597,7 @@ impl SchemaAnalyzer {
 
                 match &variant_type {
                     // For primitive types, we can use them directly in the union
-                    SchemaType::Primitive { rust_type } => {
+                    SchemaType::Primitive { rust_type, .. } => {
                         union_variants.push(SchemaRef {
                             target: rust_type.clone(),
                             nullable: false,
@@ -2550,7 +2606,7 @@ impl SchemaAnalyzer {
                     // For arrays, check if we can determine the item type
                     SchemaType::Array { item_type } => {
                         match item_type.as_ref() {
-                            SchemaType::Primitive { rust_type } => {
+                            SchemaType::Primitive { rust_type, .. } => {
                                 let type_name = format!("Vec<{rust_type}>");
                                 union_variants.push(SchemaRef {
                                     target: type_name,
@@ -2569,7 +2625,7 @@ impl SchemaAnalyzer {
                                 item_type: inner_item_type,
                             } => {
                                 match inner_item_type.as_ref() {
-                                    SchemaType::Primitive { rust_type } => {
+                                    SchemaType::Primitive { rust_type, .. } => {
                                         let type_name = format!("Vec<Vec<{rust_type}>>");
                                         union_variants.push(SchemaRef {
                                             target: type_name,
@@ -2657,6 +2713,7 @@ impl SchemaAnalyzer {
         // Only fall back to serde_json::Value if we truly can't analyze the union
         Ok(SchemaType::Primitive {
             rust_type: "serde_json::Value".to_string(),
+            serde_with: None,
         })
     }
 
@@ -2682,7 +2739,10 @@ impl SchemaAnalyzer {
                         AnalyzedSchema {
                             name: type_name.to_string(),
                             original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                            schema_type: SchemaType::Primitive { rust_type },
+                            schema_type: SchemaType::Primitive {
+                                rust_type,
+                                serde_with: None,
+                            },
                             dependencies: HashSet::new(),
                             nullable: false,
                             description: schema.details().description.clone(),
@@ -3135,14 +3195,19 @@ impl SchemaAnalyzer {
                     match schema_type {
                         OpenApiSchemaType::String => SchemaType::Primitive {
                             rust_type: "String".to_string(),
+                            serde_with: None,
                         },
                         OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
                             let details = items_schema.details();
                             let rust_type = self.get_number_rust_type(schema_type.clone(), details);
-                            SchemaType::Primitive { rust_type }
+                            SchemaType::Primitive {
+                                rust_type,
+                                serde_with: None,
+                            }
                         }
                         OpenApiSchemaType::Boolean => SchemaType::Primitive {
                             rust_type: "bool".to_string(),
+                            serde_with: None,
                         },
                         OpenApiSchemaType::Object => {
                             // Inline object in array - create a named schema for it
@@ -3183,6 +3248,7 @@ impl SchemaAnalyzer {
                         }
                         _ => SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         },
                     }
                 }
@@ -3249,27 +3315,35 @@ impl SchemaAnalyzer {
                             }
                             OpenApiSchemaType::String => SchemaType::Primitive {
                                 rust_type: "String".to_string(),
+                                serde_with: None,
                             },
                             OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
                                 let details = items_schema.details();
                                 let rust_type = self.get_number_rust_type(inferred, details);
-                                SchemaType::Primitive { rust_type }
+                                SchemaType::Primitive {
+                                    rust_type,
+                                    serde_with: None,
+                                }
                             }
                             OpenApiSchemaType::Boolean => SchemaType::Primitive {
                                 rust_type: "bool".to_string(),
+                                serde_with: None,
                             },
                             _ => SchemaType::Primitive {
                                 rust_type: "serde_json::Value".to_string(),
+                                serde_with: None,
                             },
                         }
                     } else {
                         SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
+                            serde_with: None,
                         }
                     }
                 }
                 _ => SchemaType::Primitive {
                     rust_type: "serde_json::Value".to_string(),
+                    serde_with: None,
                 },
             };
 
@@ -3280,6 +3354,7 @@ impl SchemaAnalyzer {
             // No items specified, fall back to generic array
             Ok(SchemaType::Primitive {
                 rust_type: "Vec<serde_json::Value>".to_string(),
+                serde_with: None,
             })
         }
     }
@@ -3324,6 +3399,7 @@ impl SchemaAnalyzer {
             if filtered_owned.is_empty() {
                 return Ok(SchemaType::Primitive {
                     rust_type: "serde_json::Value".to_string(),
+                    serde_with: None,
                 });
             }
             if filtered_owned.len() == 1 {
@@ -3511,7 +3587,10 @@ impl SchemaAnalyzer {
                         AnalyzedSchema {
                             name: inline_type_name.clone(),
                             original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                            schema_type: SchemaType::Primitive { rust_type },
+                            schema_type: SchemaType::Primitive {
+                                rust_type,
+                                serde_with: None,
+                            },
                             dependencies: HashSet::new(),
                             nullable: false,
                             description: schema.details().description.clone(),
@@ -3574,6 +3653,7 @@ impl SchemaAnalyzer {
         // Pattern 4: Mixed primitives = fall back to serde_json::Value
         Ok(SchemaType::Primitive {
             rust_type: "serde_json::Value".to_string(),
+            serde_with: None,
         })
     }
 
