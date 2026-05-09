@@ -51,7 +51,7 @@ pub enum SchemaType {
     Object {
         properties: BTreeMap<String, PropertyInfo>,
         required: HashSet<String>,
-        additional_properties: bool,
+        additional_properties: ObjectAdditionalProperties,
     },
     /// Discriminated union (oneOf + discriminator)
     DiscriminatedUnion {
@@ -70,6 +70,31 @@ pub enum SchemaType {
     Composition { schemas: Vec<SchemaRef> },
     /// Reference to another schema
     Reference { target: String },
+}
+
+/// How an Object handles `additionalProperties`. Q2.3 split the
+/// pre-existing `bool` into a three-way enum so the generator can
+/// emit a typed `BTreeMap<String, T>` when the spec provides a
+/// value-type schema instead of degrading to `serde_json::Value`.
+#[derive(Debug, Clone)]
+pub enum ObjectAdditionalProperties {
+    /// `additionalProperties: false` or absent — extra keys are
+    /// rejected and no extra field is emitted.
+    Forbidden,
+    /// `additionalProperties: true` — extra keys captured as
+    /// `BTreeMap<String, serde_json::Value>`.
+    Untyped,
+    /// `additionalProperties: <schema>` — extra keys captured as
+    /// `BTreeMap<String, T>` where T comes from the schema.
+    Typed { value_type: Box<SchemaType> },
+}
+
+impl ObjectAdditionalProperties {
+    /// True when extra keys are accepted (regardless of typing).
+    /// Used by callers that only care whether the field exists.
+    pub fn is_open(&self) -> bool {
+        !matches!(self, Self::Forbidden)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1546,16 +1571,42 @@ impl SchemaAnalyzer {
             }
         }
 
-        // Check additionalProperties setting
+        // Q2.3: classify additionalProperties three ways. When the
+        // spec gives us a schema we analyze it and emit a typed
+        // BTreeMap<String, T>; pre-Q2.3 collapsed both Schema and
+        // Boolean(true) to the same untyped map. Toggle:
+        //   [generator.types.shape] additional_properties_typed
+        // Default true; setting false reverts the schema case to
+        // Untyped (current pre-Q2.3 behavior).
+        let typed_enabled = self
+            .type_mapper
+            .config()
+            .shape
+            .as_ref()
+            .and_then(|s| s.additional_properties_typed)
+            .unwrap_or(true);
+
         let additional_properties = match &details.additional_properties {
-            Some(crate::openapi::AdditionalProperties::Boolean(true)) => true,
-            Some(crate::openapi::AdditionalProperties::Boolean(false)) => false,
-            Some(crate::openapi::AdditionalProperties::Schema(_)) => {
-                // For now, treat schema-based additionalProperties as true
-                // TODO: Could analyze the schema to determine the value type
-                true
+            Some(crate::openapi::AdditionalProperties::Boolean(true)) => {
+                ObjectAdditionalProperties::Untyped
             }
-            None => false, // Default is false if not specified
+            Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
+                ObjectAdditionalProperties::Forbidden
+            }
+            Some(crate::openapi::AdditionalProperties::Schema(value_schema))
+                if typed_enabled =>
+            {
+                let analyzed =
+                    self.analyze_property_schema_with_context(value_schema, None, dependencies)?;
+                ObjectAdditionalProperties::Typed {
+                    value_type: Box::new(analyzed),
+                }
+            }
+            Some(crate::openapi::AdditionalProperties::Schema(_)) => {
+                // typed_enabled = false: degrade to the pre-Q2.3 behavior.
+                ObjectAdditionalProperties::Untyped
+            }
+            None => ObjectAdditionalProperties::Forbidden,
         };
 
         Ok(SchemaType::Object {
@@ -2126,7 +2177,7 @@ impl SchemaAnalyzer {
             Ok(SchemaType::Object {
                 properties: merged_properties,
                 required: merged_required,
-                additional_properties: false,
+                additional_properties: ObjectAdditionalProperties::Forbidden,
             })
         } else {
             // Fall back to composition if we couldn't merge

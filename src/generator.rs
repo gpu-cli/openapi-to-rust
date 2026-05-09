@@ -744,7 +744,7 @@ impl CodeGenerator {
                 schema,
                 properties,
                 required,
-                *additional_properties,
+                additional_properties,
                 analysis,
                 discriminated_variant_info.get(&schema.name),
             ),
@@ -1106,7 +1106,7 @@ impl CodeGenerator {
         schema: &crate::analysis::AnalyzedSchema,
         properties: &BTreeMap<String, crate::analysis::PropertyInfo>,
         required: &std::collections::HashSet<String>,
-        additional_properties: bool,
+        additional_properties: &crate::analysis::ObjectAdditionalProperties,
         analysis: &crate::analysis::SchemaAnalysis,
         discriminator_info: Option<&DiscriminatedVariantInfo>,
     ) -> Result<TokenStream> {
@@ -1177,13 +1177,31 @@ impl CodeGenerator {
             })
             .collect();
 
-        // Add additional properties field if enabled
-        if additional_properties {
-            fields.push(quote! {
-                /// Additional properties not explicitly defined in the schema
-                #[serde(flatten)]
-                pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
-            });
+        // Q2.3: emit the catch-all additional-properties field with
+        // the right value type. `Untyped` keeps pre-Q2.3 behavior
+        // (BTreeMap<String, serde_json::Value>); `Typed { value_type }`
+        // surfaces the actual schema-declared type, e.g.
+        // BTreeMap<String, MyValue>. `Forbidden` emits no field.
+        match additional_properties {
+            crate::analysis::ObjectAdditionalProperties::Forbidden => {}
+            crate::analysis::ObjectAdditionalProperties::Untyped => {
+                fields.push(quote! {
+                    /// Additional properties not explicitly defined in the schema
+                    #[serde(flatten)]
+                    pub additional_properties:
+                        std::collections::BTreeMap<String, serde_json::Value>,
+                });
+            }
+            crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
+                let value_tokens = self.generate_array_item_type(value_type, analysis);
+                fields.push(quote! {
+                    /// Additional properties matching the spec's
+                    /// `additionalProperties` value schema.
+                    #[serde(flatten)]
+                    pub additional_properties:
+                        std::collections::BTreeMap<String, #value_tokens>,
+                });
+            }
         }
 
         let doc_comment = if let Some(desc) = &schema.description {

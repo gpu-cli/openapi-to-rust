@@ -373,7 +373,7 @@ impl Default for EmailStrategy {
 /// Configuration for [`TypeMapper`]. Mirrors the `[generator.types]`
 /// TOML section. Defaults flip on every common typed scalar; opt out
 /// per format by setting the strategy to `string` in TOML.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct TypeMappingConfig {
     pub date_time: DateStrategy,
@@ -388,13 +388,17 @@ pub struct TypeMappingConfig {
     pub uri: UriStrategy,
     pub email: EmailStrategy,
 
-    /// When true, `format: uint32`/`uint64` map to `u32`/`u64`. Q2.1
-    /// will flip the default to true; Q2 leaves it None which
-    /// preserves today's i64 fallback.
-    pub unsigned: Option<bool>,
+    /// Q2.1: honor `format: uint32` / `uint64` integer formats and
+    /// map them to `u32` / `u64` respectively. Default `true` (cheap,
+    /// no extra crate). Set `false` to revert to the pre-Q2.1
+    /// behavior where unsigned formats degraded to `i64`.
+    #[serde(default = "default_true")]
+    pub unsigned: bool,
 
-    /// User-extensible aliases applied before standard format
-    /// dispatch. Q2.2 introduces built-in defaults.
+    /// Q2.2: user-extensible format aliases applied before standard
+    /// format dispatch (e.g. `"uuid4" -> "uuid"`,
+    /// `"unix-time" -> "int64"`). Built-in defaults are merged with
+    /// user-supplied entries; user entries win on collision.
     #[serde(default)]
     pub format_aliases: BTreeMap<String, String>,
 
@@ -408,10 +412,55 @@ pub struct TypeMappingConfig {
     pub enums: Option<TypeEnumsConfig>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+impl Default for TypeMappingConfig {
+    fn default() -> Self {
+        Self {
+            date_time: DateStrategy::default(),
+            date: DateStrategy::default(),
+            time: DateStrategy::default(),
+            duration: DurationStrategy::default(),
+            uuid: UuidStrategy::default(),
+            byte: ByteStrategy::default(),
+            binary: BinaryStrategy::default(),
+            ipv4: IpStrategy::default(),
+            ipv6: IpStrategy::default(),
+            uri: UriStrategy::default(),
+            email: EmailStrategy::default(),
+            unsigned: true,
+            format_aliases: BTreeMap::new(),
+            shape: None,
+            constraints: None,
+            enums: None,
+        }
+    }
+}
+
+/// Built-in format aliases applied before user-supplied
+/// [`TypeMappingConfig::format_aliases`]. These normalize common
+/// vendor-isms found in real-world specs so the standard format
+/// dispatch in [`TypeMapper::string_format`] /
+/// [`TypeMapper::integer_format`] sees canonical names.
+fn builtin_format_aliases() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("uuid4", "uuid"),
+        ("uuid_v4", "uuid"),
+        ("UUID", "uuid"),
+        ("unix-time", "int64"),
+        ("unix_time", "int64"),
+        ("unixtime", "int64"),
+        ("timestamp", "int64"),
+    ]
+}
+
 impl TypeMappingConfig {
-    /// Pre-Q2 behavior — every format renders as `String`. Users opt
-    /// in via `--types-conservative` when bisecting regressions
-    /// introduced by typed-scalar adoption.
+    /// Pre-Q2 behavior — every format renders as `String` and
+    /// integer formats degrade to `i64`. Users opt in via
+    /// `--types-conservative` when bisecting regressions introduced
+    /// by typed-scalar adoption.
     pub fn conservative() -> Self {
         Self {
             date_time: DateStrategy::String,
@@ -425,7 +474,7 @@ impl TypeMappingConfig {
             ipv6: IpStrategy::String,
             uri: UriStrategy::String,
             email: EmailStrategy::String,
-            unsigned: None,
+            unsigned: false,
             format_aliases: BTreeMap::new(),
             shape: None,
             constraints: None,
@@ -499,6 +548,16 @@ impl TypeMapper {
         self.config.shape.as_ref().and_then(|s| s.primitive_unions)
     }
 
+    /// Q2.3 helper: should `additionalProperties: <schema>` produce
+    /// `BTreeMap<String, T>` (true) or degrade to `BTreeMap<String,
+    /// serde_json::Value>` (false)? Default: true.
+    pub fn config_shape_additional_properties_typed(&self) -> Option<bool> {
+        self.config
+            .shape
+            .as_ref()
+            .and_then(|s| s.additional_properties_typed)
+    }
+
     fn record(&self, feature: TypeFeature) {
         self.used.borrow_mut().insert(feature);
     }
@@ -530,13 +589,19 @@ impl TypeMapper {
         }
     }
 
-    /// Apply built-in + user-provided format aliases.
-    /// Q2.0 has no built-ins; Q2.2 will add `uuid4 → uuid` and
-    /// `unix-time → int64`.
+    /// Apply user + built-in format aliases (in that order — user
+    /// entries win on collision). Built-ins normalize common
+    /// vendor-isms like `uuid4` → `uuid` and `unix-time` → `int64`
+    /// so the standard format dispatch below sees canonical names.
     fn normalize_format(&self, format: Option<&str>) -> Option<String> {
         let raw = format?;
         if let Some(target) = self.config.format_aliases.get(raw) {
             return Some(target.clone());
+        }
+        for (from, to) in builtin_format_aliases() {
+            if *from == raw {
+                return Some((*to).to_string());
+            }
         }
         Some(raw.to_string())
     }
@@ -696,12 +761,22 @@ impl TypeMapper {
     }
 
     /// Map `integer` + optional `format` → Rust type.
-    /// Q2 (quq) keeps Q2.0 semantics; Q2.1 adds `uint32`/`uint64`.
+    ///
+    /// Q2.1: honors `uint32` / `uint64` (and a few vendor variants
+    /// like `uint`) when `config.unsigned` is true (default).
+    /// Setting `unsigned = false` reverts to the pre-Q2.1 behavior
+    /// where unsigned formats degrade to `i64`.
     pub fn integer_format(&self, format: Option<&str>) -> MappedType {
         let normalized = self.normalize_format(format);
         match normalized.as_deref() {
             Some("int32") => MappedType::plain("i32"),
             Some("int64") => MappedType::plain("i64"),
+            Some("uint32") if self.config.unsigned => MappedType::plain("u32"),
+            Some("uint64") if self.config.unsigned => MappedType::plain("u64"),
+            // OAS-adjacent specs sometimes use bare `uint` — treat
+            // it as 64-bit unsigned to match the broadest intended
+            // domain.
+            Some("uint") if self.config.unsigned => MappedType::plain("u64"),
             _ => MappedType::plain("i64"),
         }
     }
@@ -829,6 +904,59 @@ mod tests {
         assert_eq!(m.integer_format(Some("int32")).rust_type, "i32");
         assert_eq!(m.integer_format(Some("int64")).rust_type, "i64");
         assert_eq!(m.integer_format(None).rust_type, "i64");
+    }
+
+    #[test]
+    fn integer_formats_default_handles_unsigned_q21() {
+        let m = TypeMapper::default();
+        assert_eq!(m.integer_format(Some("uint32")).rust_type, "u32");
+        assert_eq!(m.integer_format(Some("uint64")).rust_type, "u64");
+        // Non-standard `uint` falls into the broader uint64 bucket.
+        assert_eq!(m.integer_format(Some("uint")).rust_type, "u64");
+    }
+
+    #[test]
+    fn unsigned_off_degrades_uint_to_i64() {
+        let mut cfg = TypeMappingConfig::default();
+        cfg.unsigned = false;
+        let m = TypeMapper::new(cfg);
+        assert_eq!(m.integer_format(Some("uint32")).rust_type, "i64");
+        assert_eq!(m.integer_format(Some("uint64")).rust_type, "i64");
+    }
+
+    #[test]
+    fn conservative_disables_unsigned() {
+        let m = TypeMapper::new(TypeMappingConfig::conservative());
+        assert_eq!(m.integer_format(Some("uint64")).rust_type, "i64");
+    }
+
+    #[test]
+    fn builtin_aliases_normalize_uuid_variants_to_uuid() {
+        let m = TypeMapper::default();
+        for fmt in ["uuid4", "uuid_v4", "UUID"] {
+            let mt = m.string_format(Some(fmt));
+            assert_eq!(mt.rust_type, "uuid::Uuid", "format = {fmt}");
+        }
+    }
+
+    #[test]
+    fn builtin_aliases_normalize_unix_time_to_int64() {
+        let m = TypeMapper::default();
+        for fmt in ["unix-time", "unix_time", "unixtime", "timestamp"] {
+            let mt = m.integer_format(Some(fmt));
+            assert_eq!(mt.rust_type, "i64", "format = {fmt}");
+        }
+    }
+
+    #[test]
+    fn user_alias_overrides_builtin() {
+        let mut cfg = TypeMappingConfig::default();
+        // User wants `uuid4` to mean plain string instead of uuid.
+        cfg.format_aliases
+            .insert("uuid4".to_string(), "hostname".to_string());
+        let m = TypeMapper::new(cfg);
+        // hostname is unmapped → falls through to String.
+        assert_eq!(m.string_format(Some("uuid4")).rust_type, "String");
     }
 
     #[test]
