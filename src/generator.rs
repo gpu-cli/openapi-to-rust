@@ -123,6 +123,14 @@ pub struct GenerationResult {
     pub files: Vec<GeneratedFile>,
     /// Generated mod.rs content that exports all modules
     pub mod_file: GeneratedFile,
+    /// Optional crates the generated code references (chrono, uuid,
+    /// url, …) — populated from the analyzer's TypeMapper
+    /// used-features set. The CLI uses this to write
+    /// `REQUIRED_DEPS.toml` next to the generated module and to
+    /// print a stderr summary so users know exactly what to add to
+    /// their `Cargo.toml`. Empty when no typed-scalar crates were
+    /// referenced.
+    pub required_deps: Vec<crate::type_mapping::DepRequirement>,
 }
 
 pub struct CodeGenerator {
@@ -187,7 +195,17 @@ impl CodeGenerator {
             content: mod_content,
         };
 
-        Ok(GenerationResult { files, mod_file })
+        // Snapshot the optional crates the analyzer's TypeMapper
+        // touched. Q2.8 surfaces these via REQUIRED_DEPS.toml
+        // (written by `write_files`) and a CLI stderr summary.
+        let required_deps =
+            crate::type_mapping::collect_dep_requirements(&analysis.used_type_features);
+
+        Ok(GenerationResult {
+            files,
+            mod_file,
+            required_deps,
+        })
     }
 
     /// Generate just the types (legacy single-file interface)
@@ -685,6 +703,18 @@ impl CodeGenerator {
         // Write mod.rs
         let mod_path = self.config.output_dir.join(&result.mod_file.path);
         fs::write(&mod_path, &result.mod_file.content)?;
+
+        // Q2.8: write REQUIRED_DEPS.toml when the generated code
+        // references any optional crates (chrono, uuid, url, …).
+        // Skipped silently when the set is empty so we don't litter
+        // the output dir for specs whose generated types only use
+        // std/serde/serde_json.
+        if let Some(toml) =
+            crate::type_mapping::render_required_deps_toml(&result.required_deps)
+        {
+            let deps_path = self.config.output_dir.join("REQUIRED_DEPS.toml");
+            fs::write(&deps_path, toml)?;
+        }
 
         Ok(())
     }

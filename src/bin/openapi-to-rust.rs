@@ -166,6 +166,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 generator.config().output_dir.display()
             );
 
+            // Q2.8 dep advisory: surface optional crates the
+            // generated code references so the operator knows what
+            // to add to their Cargo.toml. write_files already
+            // dropped a copy-pasteable REQUIRED_DEPS.toml next to
+            // the generated module; the stderr summary makes it
+            // discoverable without scanning the output dir.
+            if !result.required_deps.is_empty() {
+                eprintln!();
+                eprintln!(
+                    "📦 Generated code uses {} optional crate(s). Add to your Cargo.toml:",
+                    result.required_deps.len()
+                );
+                eprintln!();
+                eprintln!("[dependencies]");
+                for dep in &result.required_deps {
+                    eprintln!("{}", dep.to_toml_line());
+                }
+                eprintln!();
+                eprintln!(
+                    "(Same content written to {}/REQUIRED_DEPS.toml)",
+                    generator.config().output_dir.display()
+                );
+            }
+
             Ok(())
         }
     }
