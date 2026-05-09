@@ -18,6 +18,12 @@ enum Commands {
         /// Path to configuration file (openapi-to-rust.toml)
         #[arg(short, long, default_value = "openapi-to-rust.toml")]
         config: PathBuf,
+        /// Force every typed-scalar strategy back to "string" (Q2).
+        /// Useful for bisecting regressions caused by typed-scalar
+        /// adoption — overrides any `[generator.types]` settings in
+        /// the TOML config.
+        #[arg(long)]
+        types_conservative: bool,
     },
     /// Validate configuration file without generating code
     Validate {
@@ -48,7 +54,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Generate { config } => {
+        Commands::Generate {
+            config,
+            types_conservative,
+        } => {
             println!("📖 Reading configuration from: {}", config.display());
 
             // Load configuration from TOML
@@ -61,7 +70,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let generator_config = config_file.into_generator_config();
+            let mut generator_config = config_file.into_generator_config();
+
+            // CLI override: `--types-conservative` collapses every
+            // Q2 typed-scalar strategy back to plain `String`. Useful
+            // for bisecting regressions caused by typed-scalar
+            // adoption without editing the TOML config.
+            if types_conservative {
+                generator_config.types = openapi_to_rust::TypeMappingConfig::conservative();
+            }
 
             println!(
                 "📄 Reading OpenAPI spec: {}",
@@ -110,18 +127,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Analyze schemas (with extensions if configured)
+            // Analyze schemas (with extensions if configured). Build a
+            // TypeMapper from the user's [generator.types] config so
+            // per-format strategies drive type generation (Q2.0).
             println!("🔍 Analyzing schemas...");
+            let type_mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
             let mut analyzer = if generator_config.schema_extensions.is_empty() {
-                SchemaAnalyzer::new(spec_value)?
+                SchemaAnalyzer::with_type_mapper(spec_value, type_mapper)?
             } else {
                 println!(
                     "📎 Merging {} schema extension(s)",
                     generator_config.schema_extensions.len()
                 );
-                SchemaAnalyzer::new_with_extensions(
+                SchemaAnalyzer::new_with_extensions_and_type_mapper(
                     spec_value,
                     &generator_config.schema_extensions,
+                    type_mapper,
                 )?
             };
             let mut analysis = analyzer.analyze()?;
@@ -142,6 +163,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 result.files.len(),
                 generator.config().output_dir.display()
             );
+
+            // Q2.8 dep advisory: surface optional crates the
+            // generated code references so the operator knows what
+            // to add to their Cargo.toml. write_files already
+            // dropped a copy-pasteable REQUIRED_DEPS.toml next to
+            // the generated module; the stderr summary makes it
+            // discoverable without scanning the output dir.
+            if !result.required_deps.is_empty() {
+                eprintln!();
+                eprintln!(
+                    "📦 Generated code uses {} optional crate(s). Add to your Cargo.toml:",
+                    result.required_deps.len()
+                );
+                eprintln!();
+                eprintln!("[dependencies]");
+                for dep in &result.required_deps {
+                    eprintln!("{}", dep.to_toml_line());
+                }
+                eprintln!();
+                eprintln!(
+                    "(Same content written to {}/REQUIRED_DEPS.toml)",
+                    generator.config().output_dir.display()
+                );
+            }
 
             Ok(())
         }

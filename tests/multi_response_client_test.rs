@@ -27,6 +27,12 @@ reqwest-middleware = { version = "0.4", features = ["multipart"] }
 thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 validator = { version = "0.20", features = ["derive"] }
+# Q2 typed-scalar deps (default-on; harmless when unused).
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+url = { version = "2", features = ["serde"] }
+bytes = { version = "1", features = ["serde"] }
+base64 = "0.22"
 "#;
 
 /// Generate types + http_client for a spec, write a compilable crate to a

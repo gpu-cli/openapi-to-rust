@@ -14,14 +14,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum MultiArrayContent {
-    MultiArrayContentString(MultiArrayContentString),
+    String(String),
     MultiArrayContentStringArray(MultiArrayContentStringArray),
     MultiArrayContentArray(MultiArrayContentArray),
     ItemArray(ItemArray),
 }
 ///Array variant in union
 pub type MultiArrayContentStringArray = Vec<String>;
-pub type MultiArrayContentString = String;
 ///Array variant in union
 pub type MultiArrayContentArray = Vec<i64>;
 ///Array variant in union

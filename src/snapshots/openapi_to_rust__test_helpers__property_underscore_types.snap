@@ -17,11 +17,10 @@ pub struct ConfigObject {
     pub cache_control: Option<ConfigObjectCacheControl>,
     pub display_settings: ConfigObjectDisplaySettings,
 }
-pub type ConfigObjectDisplaySettingsString = String;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ConfigObjectDisplaySettings {
-    ConfigObjectDisplaySettingsString(ConfigObjectDisplaySettingsString),
+    String(String),
     HeightBlock(HeightBlock),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]

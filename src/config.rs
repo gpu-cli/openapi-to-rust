@@ -160,6 +160,10 @@ pub struct ConfigFile {
     pub nullable_overrides: BTreeMap<String, bool>,
     #[serde(default)]
     pub type_mappings: BTreeMap<String, String>,
+    /// `[generator.types]` block — per-format type-mapping strategies.
+    /// Wired in by Q2.0; populated in subsequent Q2.* issues.
+    #[serde(default)]
+    pub types: crate::type_mapping::TypeMappingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
@@ -550,6 +554,7 @@ impl ConfigFile {
             auth_config,
             enable_registry: self.features.enable_registry,
             registry_only: self.features.registry_only,
+            types: self.types,
         }
     }
 }

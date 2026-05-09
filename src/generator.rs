@@ -4,6 +4,86 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Parse a Rust type string (possibly with generics, e.g.
+/// `chrono::DateTime<chrono::Utc>`) into a `TokenStream`. The pre-Q2
+/// ad-hoc `::`-splitter choked on `<` and `>`; `syn::parse_str` handles
+/// every valid type expression. Errors here mean the [`TypeMapper`]
+/// produced a string that doesn't parse as a Rust type — a generator
+/// bug, surfaced as a `GeneratorError::CodeGenError`.
+///
+/// [`TypeMapper`]: crate::type_mapping::TypeMapper
+fn parse_rust_type(rust_type: &str) -> Result<TokenStream> {
+    let parsed: syn::Type = syn::parse_str(rust_type).map_err(|e| {
+        GeneratorError::CodeGenError(format!(
+            "TypeMapper produced un-parseable type `{rust_type}`: {e}"
+        ))
+    })?;
+    Ok(quote! { #parsed })
+}
+
+/// Q2.4 — render OpenAPI constraint annotations as a single-line
+/// human-readable doc comment, e.g.
+///   "Constraint: minimum=0, maximum=100, pattern=`^foo$`"
+///
+/// The pattern is wrapped in backticks so backticks/braces inside
+/// it don't trip prettyplease/rustdoc parsing. Triple-slash and
+/// `*/` sequences are escaped so embedded patterns can't terminate
+/// the surrounding doc comment / block comment.
+fn format_constraints_doc(c: &crate::analysis::PropertyConstraints) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(v) = c.minimum {
+        parts.push(format!("minimum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.maximum {
+        parts.push(format!("maximum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.exclusive_minimum {
+        parts.push(format!("exclusiveMinimum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.exclusive_maximum {
+        parts.push(format!("exclusiveMaximum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.multiple_of {
+        parts.push(format!("multipleOf={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.min_length {
+        parts.push(format!("minLength={v}"));
+    }
+    if let Some(v) = c.max_length {
+        parts.push(format!("maxLength={v}"));
+    }
+    if let Some(v) = c.min_items {
+        parts.push(format!("minItems={v}"));
+    }
+    if let Some(v) = c.max_items {
+        parts.push(format!("maxItems={v}"));
+    }
+    if c.unique_items == Some(true) {
+        parts.push("uniqueItems=true".to_string());
+    }
+    if let Some(p) = &c.pattern {
+        // Insert a zero-width-space inside `///` and `*/` so they
+        // can't terminate the surrounding doc/block comment. Using
+        // the `\u{200B}` escape (vs. a literal U+200B) keeps clippy's
+        // `invisible_characters` lint happy.
+        let safe = p.replace("///", "/\u{200B}//").replace("*/", "*\u{200B}/");
+        parts.push(format!("pattern=`{safe}`"));
+    }
+
+    format!("Constraint: {}", parts.join(", "))
+}
+
+/// `1.0` and `1` should both render as `1` in doc comments.
+/// `1.5` stays `1.5`.
+fn strip_trailing_zero(v: f64) -> String {
+    if v.fract() == 0.0 && v.is_finite() {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
 /// Info about schemas that are variants in discriminated unions
 #[derive(Clone)]
 struct DiscriminatedVariantInfo {
@@ -51,6 +131,10 @@ pub struct GeneratorConfig {
     pub enable_registry: bool,
     /// Generate only the operation registry (skip types, client, streaming)
     pub registry_only: bool,
+    /// Per-format type-mapping strategies driven by the `[generator.types]`
+    /// TOML section. Q2.0 introduces this field; with the default value
+    /// every mapping preserves pre-refactor behavior.
+    pub types: crate::type_mapping::TypeMappingConfig,
 }
 
 impl Default for GeneratorConfig {
@@ -72,6 +156,7 @@ impl Default for GeneratorConfig {
             auth_config: None,
             enable_registry: false,
             registry_only: false,
+            types: crate::type_mapping::TypeMappingConfig::default(),
         }
     }
 }
@@ -101,6 +186,14 @@ pub struct GenerationResult {
     pub files: Vec<GeneratedFile>,
     /// Generated mod.rs content that exports all modules
     pub mod_file: GeneratedFile,
+    /// Optional crates the generated code references (chrono, uuid,
+    /// url, …) — populated from the analyzer's TypeMapper
+    /// used-features set. The CLI uses this to write
+    /// `REQUIRED_DEPS.toml` next to the generated module and to
+    /// print a stderr summary so users know exactly what to add to
+    /// their `Cargo.toml`. Empty when no typed-scalar crates were
+    /// referenced.
+    pub required_deps: Vec<crate::type_mapping::DepRequirement>,
 }
 
 pub struct CodeGenerator {
@@ -165,7 +258,17 @@ impl CodeGenerator {
             content: mod_content,
         };
 
-        Ok(GenerationResult { files, mod_file })
+        // Snapshot the optional crates the analyzer's TypeMapper
+        // touched. Q2.8 surfaces these via REQUIRED_DEPS.toml
+        // (written by `write_files`) and a CLI stderr summary.
+        let required_deps =
+            crate::type_mapping::collect_dep_requirements(&analysis.used_type_features);
+
+        Ok(GenerationResult {
+            files,
+            mod_file,
+            required_deps,
+        })
     }
 
     /// Generate just the types (legacy single-file interface)
@@ -270,7 +373,77 @@ impl CodeGenerator {
             }
         }
 
-        // Generate file with imports and types (no module wrapper)
+        // Helper modules emitted only when the analyzer actually
+        // referenced their codecs. Avoids polluting every generated
+        // file (and every snapshot) with dead code for specs that
+        // don't use `format: byte`.
+        let base64_helper = if analysis
+            .used_type_features
+            .contains(crate::type_mapping::TypeFeature::Base64)
+        {
+            quote! {
+                /// base64 codec for `Vec<u8>` fields produced from
+                /// `format: byte`. Used via `#[serde(with = "base64_serde")]`
+                /// for required/non-null fields; `with = "base64_serde::option"`
+                /// for the Option<Vec<u8>> case.
+                mod base64_serde {
+                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    use serde::{Deserialize, Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        bytes: &Vec<u8>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        ser.serialize_str(&STANDARD.encode(bytes))
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Vec<u8>, D::Error> {
+                        let s = String::deserialize(de)?;
+                        STANDARD
+                            .decode(s.as_bytes())
+                            .map_err(serde::de::Error::custom)
+                    }
+
+                    /// Codec for Option<Vec<u8>> fields (optional /
+                    /// nullable `format: byte`). serde dispatches on
+                    /// the field type; without this submodule the
+                    /// `?` operator in the generated code would fail
+                    /// to convert Vec<u8> to Option<Vec<u8>>.
+                    pub mod option {
+                        use super::*;
+                        use serde::{Deserialize, Deserializer, Serializer};
+
+                        pub fn serialize<S: Serializer>(
+                            opt: &Option<Vec<u8>>,
+                            ser: S,
+                        ) -> Result<S::Ok, S::Error> {
+                            match opt {
+                                Some(bytes) => super::serialize(bytes, ser),
+                                None => ser.serialize_none(),
+                            }
+                        }
+
+                        pub fn deserialize<'de, D: Deserializer<'de>>(
+                            de: D,
+                        ) -> Result<Option<Vec<u8>>, D::Error> {
+                            let opt = Option::<String>::deserialize(de)?;
+                            opt.map(|s| {
+                                STANDARD
+                                    .decode(s.as_bytes())
+                                    .map_err(serde::de::Error::custom)
+                            })
+                            .transpose()
+                        }
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        // Generate file with imports and types (no module wrapper).
         let generated = quote! {
             //! Generated types from OpenAPI specification
             //!
@@ -283,6 +456,8 @@ impl CodeGenerator {
             #![allow(unreachable_patterns)]
 
             use serde::{Deserialize, Serialize};
+
+            #base64_helper
 
             #type_definitions
         };
@@ -592,6 +767,16 @@ impl CodeGenerator {
         let mod_path = self.config.output_dir.join(&result.mod_file.path);
         fs::write(&mod_path, &result.mod_file.content)?;
 
+        // Q2.8: write REQUIRED_DEPS.toml when the generated code
+        // references any optional crates (chrono, uuid, url, …).
+        // Skipped silently when the set is empty so we don't litter
+        // the output dir for specs whose generated types only use
+        // std/serde/serde_json.
+        if let Some(toml) = crate::type_mapping::render_required_deps_toml(&result.required_deps) {
+            let deps_path = self.config.output_dir.join("REQUIRED_DEPS.toml");
+            fs::write(&deps_path, toml)?;
+        }
+
         Ok(())
     }
 
@@ -604,13 +789,17 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
 
         match &schema.schema_type {
-            SchemaType::Primitive { rust_type } => {
+            SchemaType::Primitive { rust_type, .. } => {
                 // Generate type alias for primitives that are referenced by other schemas
                 self.generate_type_alias(schema, rust_type)
             }
-            SchemaType::StringEnum { values } => self.generate_string_enum(schema, values),
+            SchemaType::StringEnum { values } => {
+                let ext = analysis.enum_extensions.get(&schema.name);
+                self.generate_string_enum(schema, values, ext)
+            }
             SchemaType::ExtensibleEnum { known_values } => {
-                self.generate_extensible_enum(schema, known_values)
+                let ext = analysis.enum_extensions.get(&schema.name);
+                self.generate_extensible_enum(schema, known_values, ext)
             }
             SchemaType::Object {
                 properties,
@@ -620,7 +809,7 @@ impl CodeGenerator {
                 schema,
                 properties,
                 required,
-                *additional_properties,
+                additional_properties,
                 analysis,
                 discriminated_variant_info.get(&schema.name),
             ),
@@ -741,23 +930,10 @@ impl CodeGenerator {
         rust_type: &str,
     ) -> Result<TokenStream> {
         let type_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
-
-        // Parse the rust type into tokens
-        let base_type = if rust_type.contains("::") {
-            let parts: Vec<&str> = rust_type.split("::").collect();
-            if parts.len() == 2 {
-                let module = format_ident!("{}", parts[0]);
-                let type_name_part = format_ident!("{}", parts[1]);
-                quote! { #module::#type_name_part }
-            } else {
-                // More complex path
-                let path_parts: Vec<_> = parts.iter().map(|p| format_ident!("{}", p)).collect();
-                quote! { #(#path_parts)::* }
-            }
-        } else {
-            let simple_type = format_ident!("{}", rust_type);
-            quote! { #simple_type }
-        };
+        // syn parses any valid Rust type expression including
+        // generics (`chrono::DateTime<chrono::Utc>`, `Vec<u8>`).
+        // The pre-Q2 ad-hoc `::`-splitter choked on `<`.
+        let base_type = parse_rust_type(rust_type)?;
 
         let doc_comment = if let Some(desc) = &schema.description {
             let sanitized_desc = self.sanitize_doc_comment(desc);
@@ -776,6 +952,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         known_values: &[String],
+        ext: Option<&crate::analysis::EnumExtensions>,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -785,29 +962,53 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        // Q2.6: pre-resolve variant idents from x-enum-varnames when
+        // available + length-matched + toggle on. Same fallback rule
+        // as generate_string_enum.
+        let varnames_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_varnames_enabled())
+            .map(|e| &e.varnames)
+            .filter(|v| !v.is_empty() && v.len() == known_values.len());
+        let descriptions_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_descriptions_enabled())
+            .map(|e| &e.descriptions)
+            .filter(|v| !v.is_empty() && v.len() == known_values.len());
+
+        let variant_ident_for = |index: usize, value: &str| -> proc_macro2::Ident {
+            let name = match varnames_override {
+                Some(v) => v[index].clone(),
+                None => self.to_rust_enum_variant(value),
+            };
+            format_ident!("{}", name)
+        };
+
         // For extensible enums, we need a different approach:
         // 1. Create a regular enum with known variants + Custom
         // 2. Implement custom serialization/deserialization
 
-        let known_variants = known_values.iter().map(|value| {
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let known_variants = known_values.iter().enumerate().map(|(i, value)| {
+            let variant_ident = variant_ident_for(i, value);
+            let doc = descriptions_override
+                .map(|d| {
+                    let s = self.sanitize_doc_comment(&d[i]);
+                    quote! { #[doc = #s] }
+                })
+                .unwrap_or_default();
             quote! {
+                #doc
                 #variant_ident,
             }
         });
 
-        let match_arms_de = known_values.iter().map(|value| {
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let match_arms_de = known_values.iter().enumerate().map(|(i, value)| {
+            let variant_ident = variant_ident_for(i, value);
             quote! {
                 #value => Ok(#enum_name::#variant_ident),
             }
         });
 
-        let match_arms_ser = known_values.iter().map(|value| {
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let match_arms_ser = known_values.iter().enumerate().map(|(i, value)| {
+            let variant_ident = variant_ident_for(i, value);
             quote! {
                 #enum_name::#variant_ident => #value,
             }
@@ -865,6 +1066,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         values: &[String],
+        ext: Option<&crate::analysis::EnumExtensions>,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -884,6 +1086,18 @@ impl CodeGenerator {
             None => !values.is_empty(),
         };
 
+        // Q2.6: x-enum-varnames overrides the default heuristic when
+        // present, length-matched, and the toggle is on. Falls back
+        // to the to_rust_enum_variant heuristic otherwise.
+        let varnames_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_varnames_enabled())
+            .map(|e| &e.varnames)
+            .filter(|v| !v.is_empty() && v.len() == values.len());
+        let descriptions_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_descriptions_enabled())
+            .map(|e| &e.descriptions)
+            .filter(|v| !v.is_empty() && v.len() == values.len());
+
         // Variant-name uniqueness: enum values that PascalCase to the same
         // identifier (e.g. `ASC`/`asc` both → `Asc`) collide and produce
         // E0428 + non-exhaustive matches downstream. Dedupe by suffixing
@@ -891,11 +1105,14 @@ impl CodeGenerator {
         // name, and keeping each variant's `#[serde(rename)]` pointed at the
         // original wire string.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let variant_pairs: Vec<(syn::Ident, &String, bool)> = values
+        let variant_pairs: Vec<(syn::Ident, &String, bool, Option<String>)> = values
             .iter()
             .enumerate()
             .map(|(i, value)| {
-                let base = self.to_rust_enum_variant(value);
+                let base = match varnames_override {
+                    Some(v) => v[i].clone(),
+                    None => self.to_rust_enum_variant(value),
+                };
                 let mut variant_name = base.clone();
                 let mut suffix = 2;
                 while !used.insert(variant_name.clone()) {
@@ -908,31 +1125,42 @@ impl CodeGenerator {
                 } else {
                     i == 0
                 };
-                (variant_ident, value, is_default)
+                let description = descriptions_override.map(|d| d[i].clone());
+                (variant_ident, value, is_default, description)
             })
             .collect();
 
-        let variants = variant_pairs
-            .iter()
-            .map(|(variant_ident, value, is_default)| {
-                if *is_default {
-                    quote! {
-                        #[default]
-                        #[serde(rename = #value)]
-                        #variant_ident,
+        let variants =
+            variant_pairs
+                .iter()
+                .map(|(variant_ident, value, is_default, description)| {
+                    let doc = description
+                        .as_ref()
+                        .map(|d| {
+                            let s = self.sanitize_doc_comment(d);
+                            quote! { #[doc = #s] }
+                        })
+                        .unwrap_or_default();
+                    if *is_default {
+                        quote! {
+                            #doc
+                            #[default]
+                            #[serde(rename = #value)]
+                            #variant_ident,
+                        }
+                    } else {
+                        quote! {
+                            #doc
+                            #[serde(rename = #value)]
+                            #variant_ident,
+                        }
                     }
-                } else {
-                    quote! {
-                        #[serde(rename = #value)]
-                        #variant_ident,
-                    }
-                }
-            });
+                });
 
         // T13/T10: emit `as_str` and `Display` so the enum can be embedded in
         // query strings, headers, and path segments without requiring callers
         // to reach for `serde_json` round-trips.
-        let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _)| {
+        let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _, _)| {
             quote! { Self::#variant_ident => #value, }
         });
 
@@ -995,7 +1223,7 @@ impl CodeGenerator {
         schema: &crate::analysis::AnalyzedSchema,
         properties: &BTreeMap<String, crate::analysis::PropertyInfo>,
         required: &std::collections::HashSet<String>,
-        additional_properties: bool,
+        additional_properties: &crate::analysis::ObjectAdditionalProperties,
         analysis: &crate::analysis::SchemaAnalysis,
         discriminator_info: Option<&DiscriminatedVariantInfo>,
     ) -> Result<TokenStream> {
@@ -1056,9 +1284,11 @@ impl CodeGenerator {
                 } else {
                     TokenStream::new()
                 };
+                let constraint_doc = self.generate_constraint_doc(&prop.constraints);
 
                 quote! {
                     #doc_comment
+                    #constraint_doc
                     #serde_attrs
                     #specta_attrs
                     pub #field_ident: #field_type,
@@ -1066,13 +1296,31 @@ impl CodeGenerator {
             })
             .collect();
 
-        // Add additional properties field if enabled
-        if additional_properties {
-            fields.push(quote! {
-                /// Additional properties not explicitly defined in the schema
-                #[serde(flatten)]
-                pub additional_properties: std::collections::BTreeMap<String, serde_json::Value>,
-            });
+        // Q2.3: emit the catch-all additional-properties field with
+        // the right value type. `Untyped` keeps pre-Q2.3 behavior
+        // (BTreeMap<String, serde_json::Value>); `Typed { value_type }`
+        // surfaces the actual schema-declared type, e.g.
+        // BTreeMap<String, MyValue>. `Forbidden` emits no field.
+        match additional_properties {
+            crate::analysis::ObjectAdditionalProperties::Forbidden => {}
+            crate::analysis::ObjectAdditionalProperties::Untyped => {
+                fields.push(quote! {
+                    /// Additional properties not explicitly defined in the schema
+                    #[serde(flatten)]
+                    pub additional_properties:
+                        std::collections::BTreeMap<String, serde_json::Value>,
+                });
+            }
+            crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
+                let value_tokens = self.generate_array_item_type(value_type, analysis);
+                fields.push(quote! {
+                    /// Additional properties matching the spec's
+                    /// `additionalProperties` value schema.
+                    #[serde(flatten)]
+                    pub additional_properties:
+                        std::collections::BTreeMap<String, #value_tokens>,
+                });
+            }
         }
 
         let doc_comment = if let Some(desc) = &schema.description {
@@ -1351,6 +1599,15 @@ impl CodeGenerator {
                     };
                     quote! { Vec<#inner_type> }
                 }
+            } else if variant.target.contains("::") || variant.target.contains('<') {
+                // Qualified Rust path or generic (chrono::DateTime<chrono::Utc>,
+                // bytes::Bytes, std::net::Ipv4Addr) emitted by TypeMapper. Pass
+                // it straight to syn — the to_rust_type_name PascalCase
+                // pipeline below would mangle it into a non-existent ident.
+                parse_rust_type(&variant.target).unwrap_or_else(|_| {
+                    let fallback = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                    quote! { #fallback }
+                })
             } else {
                 let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
                 quote! { #type_ident }
@@ -1451,24 +1708,20 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
 
         let base_type = match &prop.schema_type {
-            SchemaType::Primitive { rust_type } => {
-                // Handle complex types like serde_json::Value
-                if rust_type.contains("::") {
-                    let parts: Vec<&str> = rust_type.split("::").collect();
-                    if parts.len() == 2 {
-                        let module = format_ident!("{}", parts[0]);
-                        let type_name = format_ident!("{}", parts[1]);
-                        quote! { #module::#type_name }
-                    } else {
-                        // More than 2 parts, construct path
-                        let path_parts: Vec<_> =
-                            parts.iter().map(|p| format_ident!("{}", p)).collect();
-                        quote! { #(#path_parts)::* }
-                    }
-                } else {
-                    let type_ident = format_ident!("{}", rust_type);
-                    quote! { #type_ident }
-                }
+            SchemaType::Primitive { rust_type, .. } => {
+                // syn handles generics + complex paths
+                // (chrono::DateTime<chrono::Utc>, Vec<u8>, …).
+                parse_rust_type(rust_type).unwrap_or_else(|_| {
+                    // Pathological mapper output: fall back to bare
+                    // String so the generated file at least
+                    // compiles. Emit a stderr warning so the
+                    // operator can investigate.
+                    eprintln!(
+                        "⚠️  TypeMapper produced un-parseable type `{rust_type}`; \
+                         falling back to String"
+                    );
+                    quote! { String }
+                })
             }
             SchemaType::Reference { target } => {
                 let target_rust_name = self.to_rust_type_name(target);
@@ -1564,6 +1817,30 @@ impl CodeGenerator {
             attrs.push(quote! { default });
         }
 
+        // Codec hint from TypeMapper (Q2): `format: byte` →
+        // `with = "base64_serde"`, etc. Fields whose mapped type
+        // carries no codec (e.g. chrono::DateTime<Utc> uses its
+        // built-in serde) skip this attribute. Option fields need
+        // the `::option` submodule of the codec — serde dispatches
+        // on field type, and the base codec works on Vec<u8> /
+        // chrono::Duration / etc., not their Option wrappers.
+        if let crate::analysis::SchemaType::Primitive {
+            serde_with: Some(codec),
+            ..
+        } = &prop.schema_type
+        {
+            // Mirrors the wrapping logic in generate_field_type:
+            // the field is Option<T> when the schema marks it
+            // optional or nullable.
+            let is_option_wrapped = !is_required || prop.nullable;
+            let codec_path = if is_option_wrapped {
+                format!("{codec}::option")
+            } else {
+                codec.clone()
+            };
+            attrs.push(quote! { with = #codec_path });
+        }
+
         if attrs.is_empty() {
             TokenStream::new()
         } else {
@@ -1582,6 +1859,22 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
         match schema_type {
             SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => true,
+            // Q2 typed scalars: chrono / url have no Default impl.
+            // uuid::Uuid, bytes::Bytes, std::net::Ip*Addr all derive
+            // Default, so they're safe to leave under #[serde(default)].
+            SchemaType::Primitive { rust_type, .. } => matches!(
+                rust_type.as_str(),
+                "chrono::DateTime<chrono::Utc>"
+                    | "chrono::NaiveDate"
+                    | "chrono::NaiveTime"
+                    | "chrono::Duration"
+                    | "url::Url"
+                    | "time::OffsetDateTime"
+                    | "time::Date"
+                    | "time::Time"
+                    | "iso8601::Duration"
+                    | "email_address::EmailAddress"
+            ),
             SchemaType::Reference { target } => {
                 if let Some(schema) = analysis.schemas.get(target) {
                     self.type_lacks_default(&schema.schema_type, analysis)
@@ -1795,6 +2088,31 @@ impl CodeGenerator {
             "virtual" => "virtual_".to_string(),
             "yield" => "yield_".to_string(),
             _ => result,
+        }
+    }
+
+    /// Q2.4: render a `/// Constraint: …` doc comment for a field
+    /// when its OpenAPI schema declares any constraint annotations.
+    /// No-op when constraints are empty or `mode = "off"`.
+    ///
+    /// **Doc-comment only** — by deliberate design we never emit
+    /// `#[validate(...)]` attributes. Constraints belong to the wire
+    /// contract; the server is the source of truth.
+    fn generate_constraint_doc(
+        &self,
+        constraints: &crate::analysis::PropertyConstraints,
+    ) -> TokenStream {
+        use crate::type_mapping::ConstraintMode;
+
+        if constraints.is_empty() {
+            return TokenStream::new();
+        }
+        match self.config.types.constraint_mode() {
+            ConstraintMode::Off => TokenStream::new(),
+            ConstraintMode::Doc => {
+                let formatted = format_constraints_doc(constraints);
+                quote! { #[doc = #formatted] }
+            }
         }
     }
 
@@ -2216,7 +2534,7 @@ impl CodeGenerator {
         use crate::analysis::SchemaType;
 
         match item_type {
-            SchemaType::Primitive { rust_type } => {
+            SchemaType::Primitive { rust_type, .. } => {
                 // The string here may be anything from `i64` / `String` to
                 // `serde_json::Value` to `Vec<serde_json::Value>` to
                 // `BTreeMap<String, T>`. Parse it as a syn::Type so we get
@@ -2265,6 +2583,17 @@ impl CodeGenerator {
             "f32" | "f64" => return "Number".to_string(),
             "String" => return "String".to_string(),
             "serde_json::Value" => return "Value".to_string(),
+            // Q2 typed-scalar paths. Without these the fallback PascalCase
+            // pass over `bytes::Bytes` produces `BytesBytes(BytesBytes)`,
+            // which then can't compile because no `BytesBytes` type exists.
+            "bytes::Bytes" => return "Binary".to_string(),
+            "chrono::DateTime<chrono::Utc>" => return "DateTime".to_string(),
+            "chrono::NaiveDate" => return "Date".to_string(),
+            "chrono::NaiveTime" => return "Time".to_string(),
+            "uuid::Uuid" => return "Uuid".to_string(),
+            "url::Url" => return "Url".to_string(),
+            "std::net::Ipv4Addr" => return "Ipv4".to_string(),
+            "std::net::Ipv6Addr" => return "Ipv6".to_string(),
             _ => {}
         }
 

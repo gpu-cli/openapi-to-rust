@@ -53,10 +53,9 @@ pub struct RequestTextBlockCacheControl {
 pub struct RequestImageBlock {
     pub source: String,
 }
-pub type CreateMessageParamsSystemString = String;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum CreateMessageParamsSystem {
-    CreateMessageParamsSystemString(CreateMessageParamsSystemString),
+    String(String),
     RequestTextBlockArray(RequestTextBlockArray),
 }
