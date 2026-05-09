@@ -5,6 +5,62 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
+/// Q2.6 — pull `x-enum-varnames` / `x-enum-descriptions` arrays off
+/// the schema's original JSON. Both extensions must be string arrays
+/// matching the enum-value count; mismatched extensions are dropped
+/// with a stderr warning so they can't subtly break codegen.
+///
+/// Returns `None` when neither extension is present.
+fn extract_enum_extensions(
+    original: &Value,
+    enum_value_count: usize,
+    schema_name: &str,
+) -> Option<EnumExtensions> {
+    let obj = original.as_object()?;
+
+    let read_string_array = |key: &str| -> Option<Vec<String>> {
+        let arr = obj.get(key)?.as_array()?;
+        let mut out = Vec::with_capacity(arr.len());
+        for v in arr {
+            out.push(v.as_str()?.to_string());
+        }
+        Some(out)
+    };
+
+    let varnames_raw = read_string_array("x-enum-varnames");
+    let descriptions_raw = read_string_array("x-enum-descriptions");
+
+    if varnames_raw.is_none() && descriptions_raw.is_none() {
+        return None;
+    }
+
+    let validate = |label: &str, vals: Option<Vec<String>>| -> Vec<String> {
+        let Some(vals) = vals else {
+            return Vec::new();
+        };
+        if vals.len() == enum_value_count {
+            vals
+        } else {
+            eprintln!(
+                "⚠️  {schema_name}: dropping {label} (expected {enum_value_count} entries, got {})",
+                vals.len()
+            );
+            Vec::new()
+        }
+    };
+
+    let varnames = validate("x-enum-varnames", varnames_raw);
+    let descriptions = validate("x-enum-descriptions", descriptions_raw);
+
+    if varnames.is_empty() && descriptions.is_empty() {
+        return None;
+    }
+    Some(EnumExtensions {
+        varnames,
+        descriptions,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct SchemaAnalysis {
     /// All schemas indexed by name
@@ -23,6 +79,29 @@ pub struct SchemaAnalysis {
     ///
     /// [`TypeMapper`]: crate::type_mapping::TypeMapper
     pub used_type_features: crate::type_mapping::UsedFeatures,
+    /// Q2.6: per-schema vendor enum extensions
+    /// (`x-enum-varnames` / `x-enum-descriptions`). Populated during
+    /// analysis when a StringEnum / ExtensibleEnum schema declares
+    /// either extension; the generator uses these to override the
+    /// default heuristic variant names and emit per-variant doc
+    /// comments. Indexed by analyzed-schema name. Side-channel so we
+    /// don't have to touch every StringEnum constructor.
+    pub enum_extensions: BTreeMap<String, EnumExtensions>,
+}
+
+/// Q2.6 — vendor extensions describing a string enum's variant
+/// names and per-variant descriptions. Length must match the
+/// schema's `enum` array; mismatched extensions are dropped at
+/// analysis time with a warning.
+#[derive(Debug, Clone, Default)]
+pub struct EnumExtensions {
+    /// `x-enum-varnames`: Rust-friendly variant identifiers per
+    /// enum value, in the same order as the spec's `enum` array.
+    /// When present and length matches, the generator uses these
+    /// instead of its default PascalCase heuristic.
+    pub varnames: Vec<String>,
+    /// `x-enum-descriptions`: one doc-comment per enum value.
+    pub descriptions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +183,75 @@ pub struct PropertyInfo {
     pub description: Option<String>,
     pub default: Option<serde_json::Value>,
     pub serde_attrs: Vec<String>,
+    /// Q2.4: OpenAPI constraint annotations captured from the
+    /// property schema. Surfaced by the generator as `/// Constraint:
+    /// …` doc lines and/or `#[validate(...)]` attributes depending on
+    /// `[generator.types.constraints] mode`.
+    pub constraints: PropertyConstraints,
+}
+
+/// Q2.4 — per-property OpenAPI constraint annotations
+/// (`minimum`/`maximum`/`minLength`/`maxLength`/`pattern`/etc.).
+/// Populated during analysis from `SchemaDetails`; consumed by the
+/// generator to emit doc comments and/or `#[validate(...)]` attrs.
+#[derive(Debug, Clone, Default)]
+pub struct PropertyConstraints {
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+    pub exclusive_minimum: Option<f64>,
+    pub exclusive_maximum: Option<f64>,
+    pub multiple_of: Option<f64>,
+    pub min_length: Option<u64>,
+    pub max_length: Option<u64>,
+    pub pattern: Option<String>,
+    pub min_items: Option<u64>,
+    pub max_items: Option<u64>,
+    pub unique_items: Option<bool>,
+}
+
+impl PropertyConstraints {
+    pub fn is_empty(&self) -> bool {
+        self.minimum.is_none()
+            && self.maximum.is_none()
+            && self.exclusive_minimum.is_none()
+            && self.exclusive_maximum.is_none()
+            && self.multiple_of.is_none()
+            && self.min_length.is_none()
+            && self.max_length.is_none()
+            && self.pattern.is_none()
+            && self.min_items.is_none()
+            && self.max_items.is_none()
+            && self.unique_items.is_none()
+    }
+
+    /// Capture the constraint-related fields off a `SchemaDetails`.
+    /// Exclusive bounds in OpenAPI 3.1 are numeric (`exclusiveMinimum:
+    /// 5`); we map the OAS-3.0 boolean flag form by leaving the
+    /// exclusive field unset and letting `minimum`/`maximum` carry it.
+    pub fn from_schema_details(details: &crate::openapi::SchemaDetails) -> Self {
+        use crate::openapi::ExclusiveBound;
+        let exclusive_minimum = match &details.exclusive_minimum {
+            Some(ExclusiveBound::Number(v)) => Some(*v),
+            _ => None,
+        };
+        let exclusive_maximum = match &details.exclusive_maximum {
+            Some(ExclusiveBound::Number(v)) => Some(*v),
+            _ => None,
+        };
+        Self {
+            minimum: details.minimum,
+            maximum: details.maximum,
+            exclusive_minimum,
+            exclusive_maximum,
+            multiple_of: details.multiple_of,
+            min_length: details.min_length,
+            max_length: details.max_length,
+            pattern: details.pattern.clone(),
+            min_items: details.min_items,
+            max_items: details.max_items,
+            unique_items: details.unique_items,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -774,6 +922,7 @@ impl SchemaAnalyzer {
             },
             operations: BTreeMap::new(),
             used_type_features: crate::type_mapping::UsedFeatures::default(),
+            enum_extensions: BTreeMap::new(),
         };
 
         // First pass: detect patterns
@@ -860,6 +1009,23 @@ impl SchemaAnalyzer {
         // generator can decide which helper modules to emit
         // (e.g. base64_serde for `format: byte`).
         analysis.used_type_features = self.type_mapper.used_features();
+
+        // Q2.6: capture x-enum-varnames / x-enum-descriptions from
+        // each enum schema's original JSON. Side-channel keyed by
+        // analyzed-schema name so we don't have to extend every
+        // SchemaType::StringEnum constructor.
+        for (name, analyzed) in &analysis.schemas {
+            let enum_value_count = match &analyzed.schema_type {
+                SchemaType::StringEnum { values } => values.len(),
+                SchemaType::ExtensibleEnum { known_values } => known_values.len(),
+                _ => continue,
+            };
+            if let Some(ext) =
+                extract_enum_extensions(&analyzed.original, enum_value_count, name)
+            {
+                analysis.enum_extensions.insert(name.clone(), ext);
+            }
+        }
 
         Ok(analysis)
     }
@@ -1484,6 +1650,9 @@ impl SchemaAnalyzer {
                                 description: prop_description,
                                 default: prop_default,
                                 serde_attrs: Vec::new(),
+                                constraints: PropertyConstraints::from_schema_details(
+                                    prop_details,
+                                ),
                             },
                         );
                         continue;
@@ -1566,6 +1735,7 @@ impl SchemaAnalyzer {
                         description: prop_description,
                         default: prop_default,
                         serde_attrs: Vec::new(),
+                        constraints: PropertyConstraints::from_schema_details(prop_details),
                     },
                 );
             }
@@ -2231,6 +2401,7 @@ impl SchemaAnalyzer {
                         description: prop_details.description.clone(),
                         default: prop_details.default.clone(),
                         serde_attrs: Vec::new(),
+                        constraints: PropertyConstraints::from_schema_details(prop_details),
                     },
                 );
             }

@@ -230,6 +230,7 @@ fn test_generated_error_code() {
         },
         operations: BTreeMap::new(),
         used_type_features: Default::default(),
+        enum_extensions: BTreeMap::new(),
     };
 
     // Generate HTTP client code which includes error types

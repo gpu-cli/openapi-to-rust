@@ -21,6 +21,65 @@ fn parse_rust_type(rust_type: &str) -> Result<TokenStream> {
     Ok(quote! { #parsed })
 }
 
+/// Q2.4 — render OpenAPI constraint annotations as a single-line
+/// human-readable doc comment, e.g.
+///   "Constraint: minimum=0, maximum=100, pattern=`^foo$`"
+///
+/// The pattern is wrapped in backticks so backticks/braces inside
+/// it don't trip prettyplease/rustdoc parsing. Triple-slash and
+/// `*/` sequences are escaped so embedded patterns can't terminate
+/// the surrounding doc comment / block comment.
+fn format_constraints_doc(c: &crate::analysis::PropertyConstraints) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(v) = c.minimum {
+        parts.push(format!("minimum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.maximum {
+        parts.push(format!("maximum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.exclusive_minimum {
+        parts.push(format!("exclusiveMinimum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.exclusive_maximum {
+        parts.push(format!("exclusiveMaximum={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.multiple_of {
+        parts.push(format!("multipleOf={}", strip_trailing_zero(v)));
+    }
+    if let Some(v) = c.min_length {
+        parts.push(format!("minLength={v}"));
+    }
+    if let Some(v) = c.max_length {
+        parts.push(format!("maxLength={v}"));
+    }
+    if let Some(v) = c.min_items {
+        parts.push(format!("minItems={v}"));
+    }
+    if let Some(v) = c.max_items {
+        parts.push(format!("maxItems={v}"));
+    }
+    if c.unique_items == Some(true) {
+        parts.push("uniqueItems=true".to_string());
+    }
+    if let Some(p) = &c.pattern {
+        let safe = p.replace("///", "/​//").replace("*/", "*​/");
+        parts.push(format!("pattern=`{safe}`"));
+    }
+
+    format!("Constraint: {}", parts.join(", "))
+}
+
+/// `1.0` and `1` should both render as `1` in doc comments.
+/// `1.5` stays `1.5`.
+fn strip_trailing_zero(v: f64) -> String {
+    if v.fract() == 0.0 && v.is_finite() {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
 /// Info about schemas that are variants in discriminated unions
 #[derive(Clone)]
 struct DiscriminatedVariantInfo {
@@ -732,9 +791,13 @@ impl CodeGenerator {
                 // Generate type alias for primitives that are referenced by other schemas
                 self.generate_type_alias(schema, rust_type)
             }
-            SchemaType::StringEnum { values } => self.generate_string_enum(schema, values),
+            SchemaType::StringEnum { values } => {
+                let ext = analysis.enum_extensions.get(&schema.name);
+                self.generate_string_enum(schema, values, ext)
+            }
             SchemaType::ExtensibleEnum { known_values } => {
-                self.generate_extensible_enum(schema, known_values)
+                let ext = analysis.enum_extensions.get(&schema.name);
+                self.generate_extensible_enum(schema, known_values, ext)
             }
             SchemaType::Object {
                 properties,
@@ -887,6 +950,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         known_values: &[String],
+        ext: Option<&crate::analysis::EnumExtensions>,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -896,29 +960,53 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        // Q2.6: pre-resolve variant idents from x-enum-varnames when
+        // available + length-matched + toggle on. Same fallback rule
+        // as generate_string_enum.
+        let varnames_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_varnames_enabled())
+            .map(|e| &e.varnames)
+            .filter(|v| !v.is_empty() && v.len() == known_values.len());
+        let descriptions_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_descriptions_enabled())
+            .map(|e| &e.descriptions)
+            .filter(|v| !v.is_empty() && v.len() == known_values.len());
+
+        let variant_ident_for = |index: usize, value: &str| -> proc_macro2::Ident {
+            let name = match varnames_override {
+                Some(v) => v[index].clone(),
+                None => self.to_rust_enum_variant(value),
+            };
+            format_ident!("{}", name)
+        };
+
         // For extensible enums, we need a different approach:
         // 1. Create a regular enum with known variants + Custom
         // 2. Implement custom serialization/deserialization
 
-        let known_variants = known_values.iter().map(|value| {
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let known_variants = known_values.iter().enumerate().map(|(i, value)| {
+            let variant_ident = variant_ident_for(i, value);
+            let doc = descriptions_override
+                .map(|d| {
+                    let s = self.sanitize_doc_comment(&d[i]);
+                    quote! { #[doc = #s] }
+                })
+                .unwrap_or_default();
             quote! {
+                #doc
                 #variant_ident,
             }
         });
 
-        let match_arms_de = known_values.iter().map(|value| {
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let match_arms_de = known_values.iter().enumerate().map(|(i, value)| {
+            let variant_ident = variant_ident_for(i, value);
             quote! {
                 #value => Ok(#enum_name::#variant_ident),
             }
         });
 
-        let match_arms_ser = known_values.iter().map(|value| {
-            let variant_name = self.to_rust_enum_variant(value);
-            let variant_ident = format_ident!("{}", variant_name);
+        let match_arms_ser = known_values.iter().enumerate().map(|(i, value)| {
+            let variant_ident = variant_ident_for(i, value);
             quote! {
                 #enum_name::#variant_ident => #value,
             }
@@ -976,6 +1064,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         values: &[String],
+        ext: Option<&crate::analysis::EnumExtensions>,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -995,6 +1084,18 @@ impl CodeGenerator {
             None => !values.is_empty(),
         };
 
+        // Q2.6: x-enum-varnames overrides the default heuristic when
+        // present, length-matched, and the toggle is on. Falls back
+        // to the to_rust_enum_variant heuristic otherwise.
+        let varnames_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_varnames_enabled())
+            .map(|e| &e.varnames)
+            .filter(|v| !v.is_empty() && v.len() == values.len());
+        let descriptions_override: Option<&Vec<String>> = ext
+            .filter(|_| self.config.types.x_enum_descriptions_enabled())
+            .map(|e| &e.descriptions)
+            .filter(|v| !v.is_empty() && v.len() == values.len());
+
         // Variant-name uniqueness: enum values that PascalCase to the same
         // identifier (e.g. `ASC`/`asc` both → `Asc`) collide and produce
         // E0428 + non-exhaustive matches downstream. Dedupe by suffixing
@@ -1002,11 +1103,14 @@ impl CodeGenerator {
         // name, and keeping each variant's `#[serde(rename)]` pointed at the
         // original wire string.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let variant_pairs: Vec<(syn::Ident, &String, bool)> = values
+        let variant_pairs: Vec<(syn::Ident, &String, bool, Option<String>)> = values
             .iter()
             .enumerate()
             .map(|(i, value)| {
-                let base = self.to_rust_enum_variant(value);
+                let base = match varnames_override {
+                    Some(v) => v[i].clone(),
+                    None => self.to_rust_enum_variant(value),
+                };
                 let mut variant_name = base.clone();
                 let mut suffix = 2;
                 while !used.insert(variant_name.clone()) {
@@ -1019,31 +1123,41 @@ impl CodeGenerator {
                 } else {
                     i == 0
                 };
-                (variant_ident, value, is_default)
+                let description = descriptions_override.map(|d| d[i].clone());
+                (variant_ident, value, is_default, description)
             })
             .collect();
 
-        let variants = variant_pairs
-            .iter()
-            .map(|(variant_ident, value, is_default)| {
+        let variants = variant_pairs.iter().map(
+            |(variant_ident, value, is_default, description)| {
+                let doc = description
+                    .as_ref()
+                    .map(|d| {
+                        let s = self.sanitize_doc_comment(d);
+                        quote! { #[doc = #s] }
+                    })
+                    .unwrap_or_default();
                 if *is_default {
                     quote! {
+                        #doc
                         #[default]
                         #[serde(rename = #value)]
                         #variant_ident,
                     }
                 } else {
                     quote! {
+                        #doc
                         #[serde(rename = #value)]
                         #variant_ident,
                     }
                 }
-            });
+            },
+        );
 
         // T13/T10: emit `as_str` and `Display` so the enum can be embedded in
         // query strings, headers, and path segments without requiring callers
         // to reach for `serde_json` round-trips.
-        let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _)| {
+        let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _, _)| {
             quote! { Self::#variant_ident => #value, }
         });
 
@@ -1167,9 +1281,11 @@ impl CodeGenerator {
                 } else {
                     TokenStream::new()
                 };
+                let constraint_doc = self.generate_constraint_doc(&prop.constraints);
 
                 quote! {
                     #doc_comment
+                    #constraint_doc
                     #serde_attrs
                     #specta_attrs
                     pub #field_ident: #field_type,
@@ -1969,6 +2085,31 @@ impl CodeGenerator {
             "virtual" => "virtual_".to_string(),
             "yield" => "yield_".to_string(),
             _ => result,
+        }
+    }
+
+    /// Q2.4: render a `/// Constraint: …` doc comment for a field
+    /// when its OpenAPI schema declares any constraint annotations.
+    /// No-op when constraints are empty or `mode = "off"`.
+    ///
+    /// **Doc-comment only** — by deliberate design we never emit
+    /// `#[validate(...)]` attributes. Constraints belong to the wire
+    /// contract; the server is the source of truth.
+    fn generate_constraint_doc(
+        &self,
+        constraints: &crate::analysis::PropertyConstraints,
+    ) -> TokenStream {
+        use crate::type_mapping::ConstraintMode;
+
+        if constraints.is_empty() {
+            return TokenStream::new();
+        }
+        match self.config.types.constraint_mode() {
+            ConstraintMode::Off => TokenStream::new(),
+            ConstraintMode::Doc => {
+                let formatted = format_constraints_doc(constraints);
+                quote! { #[doc = #formatted] }
+            }
         }
     }
 

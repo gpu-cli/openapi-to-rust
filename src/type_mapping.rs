@@ -93,7 +93,6 @@ pub enum TypeFeature {
     Base64,
     Url,
     EmailAddress,
-    Validator,
 }
 
 impl TypeFeature {
@@ -110,9 +109,6 @@ impl TypeFeature {
             Self::Base64 => DepRequirement::new("base64", "0.22"),
             Self::Url => DepRequirement::new("url", "2").with_features(&["serde"]),
             Self::EmailAddress => DepRequirement::new("email_address", "0.2"),
-            Self::Validator => {
-                DepRequirement::new("validator", "0.20").with_features(&["derive"])
-            }
         }
     }
 }
@@ -457,6 +453,35 @@ fn builtin_format_aliases() -> &'static [(&'static str, &'static str)] {
 }
 
 impl TypeMappingConfig {
+    /// Q2.4: constraint-doc emission mode. Defaults to
+    /// [`ConstraintMode::Doc`] when the
+    /// `[generator.types.constraints]` block is absent or its
+    /// `mode` field is unset.
+    pub fn constraint_mode(&self) -> ConstraintMode {
+        self.constraints
+            .as_ref()
+            .and_then(|c| c.mode)
+            .unwrap_or_default()
+    }
+
+    /// Q2.6: should `x-enum-varnames` override the heuristic
+    /// PascalCase variant naming? Default true.
+    pub fn x_enum_varnames_enabled(&self) -> bool {
+        self.enums
+            .as_ref()
+            .and_then(|e| e.x_enum_varnames)
+            .unwrap_or(true)
+    }
+
+    /// Q2.6: should `x-enum-descriptions` emit per-variant doc
+    /// comments? Default true.
+    pub fn x_enum_descriptions_enabled(&self) -> bool {
+        self.enums
+            .as_ref()
+            .and_then(|e| e.x_enum_descriptions)
+            .unwrap_or(true)
+    }
+
     /// Pre-Q2 behavior — every format renders as `String` and
     /// integer formats degrade to `i64`. Users opt in via
     /// `--types-conservative` when bisecting regressions introduced
@@ -494,7 +519,34 @@ pub struct TypeShapeConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct TypeConstraintsConfig {
-    pub mode: Option<String>,
+    /// Q2.4 constraint annotation mode. Defaults to `Doc` when the
+    /// `[generator.types.constraints]` block is absent (see
+    /// [`TypeMapper::config_constraint_mode`]).
+    pub mode: Option<ConstraintMode>,
+}
+
+/// Q2.4 — what to emit for OpenAPI constraint keywords
+/// (`minimum`/`maximum`/`minLength`/`maxLength`/`pattern`/etc.).
+///
+/// **No client-side validation.** Constraints belong to the wire
+/// contract; the server is the source of truth. The generator
+/// surfaces them only as doc-comments so callers see the rules
+/// without the SDK duplicating server logic and going brittle
+/// when the rules drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConstraintMode {
+    /// Drop constraints entirely (pre-Q2.4 behavior).
+    Off,
+    /// Emit `/// Constraint: ...` doc comments on each field.
+    /// Cheap, no extra crate dependency. Default.
+    Doc,
+}
+
+impl Default for ConstraintMode {
+    fn default() -> Self {
+        Self::Doc
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -557,6 +609,19 @@ impl TypeMapper {
             .as_ref()
             .and_then(|s| s.additional_properties_typed)
     }
+
+    /// Q2.4 helper: which constraint-annotation mode is active?
+    /// Defaults to [`ConstraintMode::Doc`] when the
+    /// `[generator.types.constraints]` block is absent or its `mode`
+    /// field is unset.
+    pub fn config_constraint_mode(&self) -> ConstraintMode {
+        self.config
+            .constraints
+            .as_ref()
+            .and_then(|c| c.mode)
+            .unwrap_or_default()
+    }
+
 
     fn record(&self, feature: TypeFeature) {
         self.used.borrow_mut().insert(feature);
