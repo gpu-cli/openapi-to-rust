@@ -1306,49 +1306,67 @@ impl CodeGenerator {
 
     /// Generate URL with path parameters
     fn generate_url_with_params(&self, path: &str, op: &OperationInfo) -> TokenStream {
-        // Parse path to find all parameter placeholders
-        let mut format_string = path.to_string();
-        let mut format_args = Vec::new();
-
-        // Find all path parameters in the operation
+        // Find all path parameters in the operation.
         let path_params: Vec<_> = op
             .parameters
             .iter()
             .filter(|p| p.location == "path")
             .collect();
 
-        // Replace {paramName} with {} and collect parameter names for format args.
-        // T5: percent-encode each path-template variable per RFC3986 §3.3
-        // "Path". Without encoding, values containing `/`, `?`, `#`, or
-        // non-ASCII break the URL. Calls __pct_encode_path_segment, a private
-        // helper emitted into the generated client (see emit_path_encoder).
-        for param in &path_params {
-            let placeholder = format!("{{{}}}", param.name);
-            if format_string.contains(&placeholder) {
-                format_string = format_string.replace(&placeholder, "{}");
-
-                let param_name_snake = self.param_ident_str(param);
-                let param_ident = Self::to_field_ident(&param_name_snake);
-
-                if Self::param_uses_as_ref_str(param) {
-                    format_args.push(quote! {
-                        __pct_encode_path_segment(#param_ident.as_ref())
-                    });
-                } else {
-                    format_args.push(quote! {
-                        __pct_encode_path_segment(&#param_ident.to_string())
-                    });
+        // T5: percent-encode each path-template variable per RFC3986 §3.3.
+        // We build a positional-arg format string by walking the template
+        // left-to-right and emitting one `{}` + one format arg per
+        // placeholder occurrence. Cloudflare has paths like
+        // `/accounts/{account_id}/.../accounts/{account_id}` — the same
+        // variable appears twice. A naive `replace_all` produced two `{}`
+        // placeholders but only one format arg (E0277). Per-occurrence
+        // emission keeps them in sync.
+        let mut format_string = String::with_capacity(path.len());
+        let mut format_args: Vec<TokenStream> = Vec::new();
+        let mut chars = path.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '{' {
+                format_string.push(c);
+                continue;
+            }
+            // Read until the matching '}'.
+            let mut name = String::new();
+            while let Some(&n) = chars.peek() {
+                chars.next();
+                if n == '}' {
+                    break;
                 }
+                name.push(n);
+            }
+            // Resolve to a path param. If no match, leave the placeholder
+            // verbatim (real-world spec bug — this op shouldn't have made
+            // it past analysis).
+            let param = path_params.iter().find(|p| p.name == name);
+            let Some(param) = param else {
+                format_string.push('{');
+                format_string.push_str(&name);
+                format_string.push('}');
+                continue;
+            };
+            format_string.push_str("{}");
+            let param_name_snake = self.param_ident_str(param);
+            let param_ident = Self::to_field_ident(&param_name_snake);
+            if Self::param_uses_as_ref_str(param) {
+                format_args.push(quote! {
+                    __pct_encode_path_segment(#param_ident.as_ref())
+                });
+            } else {
+                format_args.push(quote! {
+                    __pct_encode_path_segment(&#param_ident.to_string())
+                });
             }
         }
 
         if format_args.is_empty() {
-            // No path parameters found, use simple format
             quote! {
                 let request_url = format!("{}{}", self.base_url, #path);
             }
         } else {
-            // Build format call with path parameters
             quote! {
                 let request_url = format!("{}{}", self.base_url, format!(#format_string, #(#format_args),*));
             }

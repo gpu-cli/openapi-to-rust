@@ -1368,14 +1368,63 @@ impl SchemaAnalyzer {
                     ..
                 } = prop_schema
                 {
+                    // 3.1 idiom: `oneOf: [<schema>, {type: null}]`. Same
+                    // unwrap as anyOf above — without this, the synthesized
+                    // wrapper type collides with the inner $ref's name
+                    // (discord's `QuarantineUserAction.metadata` →
+                    // `QuarantineUserActionMetadata` clashing with the
+                    // referenced `QuarantineUserActionMetadata` schema).
+                    if prop_schema.is_nullable_pattern()
+                        && let Some(non_null) = prop_schema.non_null_variant()
+                    {
+                        let unwrapped = self.analyze_property_schema_with_context(
+                            non_null,
+                            Some(prop_name),
+                            dependencies,
+                        )?;
+                        let prop_details = prop_schema.details();
+                        let prop_nullable = true;
+                        let prop_description = prop_details.description.clone();
+                        let prop_default = prop_details.default.clone();
+                        property_info.insert(
+                            prop_name.clone(),
+                            PropertyInfo {
+                                schema_type: unwrapped,
+                                nullable: prop_nullable,
+                                description: prop_description,
+                                default: prop_default,
+                                serde_attrs: Vec::new(),
+                            },
+                        );
+                        continue;
+                    }
+
                     // Handle oneOf discriminated unions in properties
-                    // Generate a name based on the property name
                     let context_name = self
                         .current_schema_name
                         .clone()
                         .unwrap_or_else(|| "Unknown".to_string());
                     let prop_pascal = self.to_pascal_case(prop_name);
-                    let union_type_name = format!("{context_name}{prop_pascal}");
+                    let mut union_type_name = format!("{context_name}{prop_pascal}");
+                    // Same collision-suffix dance as the anyOf branch above.
+                    if self.schemas.contains_key(&union_type_name)
+                        || self.resolved_cache.contains_key(&union_type_name)
+                    {
+                        let mut suffix = 2;
+                        loop {
+                            let candidate = format!("{union_type_name}Union{suffix}");
+                            if !self.schemas.contains_key(&candidate)
+                                && !self.resolved_cache.contains_key(&candidate)
+                            {
+                                union_type_name = candidate;
+                                break;
+                            }
+                            suffix += 1;
+                            if suffix > 1000 {
+                                break;
+                            }
+                        }
+                    }
 
                     // Analyze the discriminated union
                     let union_schema_type = self.analyze_oneof_union(
@@ -3909,6 +3958,57 @@ impl SchemaAnalyzer {
                     }
                 }
             }
+        }
+
+        // Synthesize path parameters that are referenced via `{var}` in the
+        // path template but not declared as parameters in the spec.
+        // langsmith/knocklabs/cloudflare hit this — `/repos/{owner}/{repo}/...`
+        // declares `repo` but not `owner`. Without this, codegen emits
+        // `format!("/repos/{owner}/...", repo)` and `owner` is undefined
+        // (E0425). We synthesize each missing variable as a required
+        // `String` path parameter.
+        let mut declared_path_names: std::collections::HashSet<String> = op_info
+            .parameters
+            .iter()
+            .filter(|p| p.location == "path")
+            .map(|p| p.name.clone())
+            .collect();
+        let bytes = path.as_bytes().iter();
+        let mut current = String::new();
+        let mut in_brace = false;
+        let mut synthesized: Vec<String> = Vec::new();
+        for b in bytes {
+            match *b {
+                b'{' => {
+                    in_brace = true;
+                    current.clear();
+                }
+                b'}' if in_brace => {
+                    in_brace = false;
+                    if !current.is_empty() && !declared_path_names.contains(&current) {
+                        synthesized.push(current.clone());
+                        declared_path_names.insert(current.clone());
+                    }
+                }
+                _ if in_brace => current.push(*b as char),
+                _ => {}
+            }
+        }
+        for name in synthesized {
+            eprintln!(
+                "⚠️  path `{}` references `{{{}}}` but the spec doesn't declare it as a parameter — synthesizing as required String",
+                path, name
+            );
+            op_info.parameters.push(ParameterInfo {
+                name,
+                location: "path".to_string(),
+                required: true,
+                schema_ref: None,
+                rust_type: "String".to_string(),
+                description: None,
+                enum_values: None,
+                rust_ident: None,
+            });
         }
 
         // Disambiguate Rust idents across the operation. Real-world specs

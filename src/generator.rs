@@ -1409,6 +1409,37 @@ impl CodeGenerator {
         })
     }
 
+    /// Walk a chain of type-alias `Reference`s starting from `target` and
+    /// return true if the chain reaches the schema named by
+    /// `enclosing_rust_name` (Rust name). Bounded depth to prevent infinite
+    /// loops on truly cyclic aliases.
+    fn target_aliases_back_to(
+        &self,
+        target: &str,
+        enclosing_rust_name: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> bool {
+        let mut current = target.to_string();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _ in 0..16 {
+            if !visited.insert(current.clone()) {
+                return true;
+            }
+            let Some(schema) = analysis.schemas.get(&current) else {
+                return false;
+            };
+            if let crate::analysis::SchemaType::Reference { target: next } = &schema.schema_type {
+                if self.to_rust_type_name(next) == enclosing_rust_name {
+                    return true;
+                }
+                current = next.clone();
+                continue;
+            }
+            return false;
+        }
+        false
+    }
+
     fn generate_field_type(
         &self,
         schema_name: &str,
@@ -1440,9 +1471,28 @@ impl CodeGenerator {
                 }
             }
             SchemaType::Reference { target } => {
-                let target_type = format_ident!("{}", self.to_rust_type_name(target));
-                // Wrap recursive references in Box<T> for heap allocation
-                if analysis.dependencies.recursive_schemas.contains(target) {
+                let target_rust_name = self.to_rust_type_name(target);
+                let target_type = format_ident!("{}", target_rust_name);
+                // Wrap recursive references in Box<T> for heap allocation.
+                // Three ways to detect the cycle:
+                // 1. Target is in the analysis-level recursive set (catches
+                //    direct + indirect cycles via the dependency graph).
+                // 2. Target's Rust name equals the enclosing struct's Rust
+                //    name (catches cloudflare-style cases where two distinct
+                //    spec schemas PascalCase to the same ident).
+                // 3. Target is a type alias whose resolution chain reaches
+                //    the enclosing schema (catches cal-com's
+                //    `ReassignBookingOutput20240813Data = Reassign...`
+                //    pattern: the synthesized inline name aliases back to
+                //    its parent).
+                let enclosing_rust_name = self.to_rust_type_name(schema_name);
+                let is_self_via_rust_name = target_rust_name == enclosing_rust_name;
+                let is_alias_chain_self =
+                    self.target_aliases_back_to(target, &enclosing_rust_name, analysis);
+                if analysis.dependencies.recursive_schemas.contains(target)
+                    || is_self_via_rust_name
+                    || is_alias_chain_self
+                {
                     quote! { Box<#target_type> }
                 } else {
                     quote! { #target_type }
