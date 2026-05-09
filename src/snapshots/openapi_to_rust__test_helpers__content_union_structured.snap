@@ -16,11 +16,10 @@ pub struct InputMessage {
     pub content: InputMessageContent,
     pub role: String,
 }
-pub type InputMessageContentString = String;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum InputMessageContent {
-    InputMessageContentString(InputMessageContentString),
+    String(String),
     ContentBlockArray(ContentBlockArray),
 }
 ///Array variant in union

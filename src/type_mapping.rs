@@ -484,6 +484,21 @@ impl TypeMapper {
         self.used.borrow().clone()
     }
 
+    /// Borrow the underlying type-mapping config — useful for
+    /// non-format-mapping toggles (`shape`, `enums`, `constraints`)
+    /// that other modules need to inspect.
+    pub fn config(&self) -> &TypeMappingConfig {
+        &self.config
+    }
+
+    /// Q2.7 helper: should `anyOf` of primitives become an untagged
+    /// enum with primitive variant types directly (true), or fall
+    /// back to the pre-Q2.7 type-alias-per-variant shape (false)?
+    /// Default: true.
+    pub fn config_shape_primitive_unions(&self) -> Option<bool> {
+        self.config.shape.as_ref().and_then(|s| s.primitive_unions)
+    }
+
     fn record(&self, feature: TypeFeature) {
         self.used.borrow_mut().insert(feature);
     }

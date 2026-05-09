@@ -20,7 +20,7 @@ pub enum ComplexContent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ComplexContentItemUnion {
-    ArrayItemString(ArrayItemString),
+    String(String),
     Nested(NestedItem),
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -30,7 +30,6 @@ pub struct NestedItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
 }
-pub type ArrayItemString = String;
 ///Array variant in union
 pub type ComplexContentArray = Vec<ComplexContentItemUnion>;
 #[derive(Debug, Clone, Deserialize, Serialize)]

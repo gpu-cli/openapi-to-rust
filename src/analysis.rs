@@ -3540,71 +3540,87 @@ impl SchemaAnalyzer {
                         nullable: false,
                     });
                 } else if let Some(schema_type) = schema.schema_type() {
-                    // Handle primitive types by creating type aliases for consistency
-                    let inline_index = variants.len();
+                    // Q2.7: when `primitive_unions` is on (default),
+                    // emit the Rust type directly as the variant
+                    // target — matches `analyze_untagged_oneof_union`
+                    // and produces a clean
+                    //   #[serde(untagged)] pub enum Foo { String(String), Integer(i64) }
+                    // Pre-Q2.7 / opt-out emits a type alias per
+                    // primitive (`pub type FooString = String`) and
+                    // references the alias in the variant — works
+                    // but adds noise.
+                    let primitive_unions = self
+                        .type_mapper
+                        .config_shape_primitive_unions()
+                        .unwrap_or(true);
 
-                    // Generate a better name for primitive types
-                    let inline_type_name = match schema_type {
-                        OpenApiSchemaType::String => {
-                            // For string types, check if we can infer a better name from context
-                            // If this is the first variant and it's a string, use a simple name
-                            if inline_index == 0 {
-                                format!("{context_name}String")
-                            } else {
-                                format!("{context_name}StringVariant{inline_index}")
-                            }
-                        }
-                        OpenApiSchemaType::Number => {
-                            if inline_index == 0 {
-                                format!("{context_name}Number")
-                            } else {
-                                format!("{context_name}NumberVariant{inline_index}")
-                            }
-                        }
-                        OpenApiSchemaType::Integer => {
-                            if inline_index == 0 {
-                                format!("{context_name}Integer")
-                            } else {
-                                format!("{context_name}IntegerVariant{inline_index}")
-                            }
-                        }
-                        OpenApiSchemaType::Boolean => {
-                            if inline_index == 0 {
-                                format!("{context_name}Boolean")
-                            } else {
-                                format!("{context_name}BooleanVariant{inline_index}")
-                            }
-                        }
-                        _ => format!("{context_name}Variant{inline_index}"),
-                    };
-
-                    let rust_type =
-                        self.openapi_type_to_rust_type(schema_type.clone(), schema.details());
-
-                    // Store as a type alias
-                    self.resolved_cache.insert(
-                        inline_type_name.clone(),
-                        AnalyzedSchema {
-                            name: inline_type_name.clone(),
-                            original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                            schema_type: SchemaType::Primitive {
-                                rust_type,
-                                serde_with: None,
-                            },
-                            dependencies: HashSet::new(),
+                    if primitive_unions {
+                        let mapped =
+                            self.type_mapper.map(schema_type.clone(), schema.details());
+                        variants.push(SchemaRef {
+                            target: mapped.rust_type,
                             nullable: false,
-                            description: schema.details().description.clone(),
-                            default: None,
-                        },
-                    );
+                        });
+                    } else {
+                        let inline_index = variants.len();
+                        let inline_type_name = match schema_type {
+                            OpenApiSchemaType::String => {
+                                if inline_index == 0 {
+                                    format!("{context_name}String")
+                                } else {
+                                    format!("{context_name}StringVariant{inline_index}")
+                                }
+                            }
+                            OpenApiSchemaType::Number => {
+                                if inline_index == 0 {
+                                    format!("{context_name}Number")
+                                } else {
+                                    format!("{context_name}NumberVariant{inline_index}")
+                                }
+                            }
+                            OpenApiSchemaType::Integer => {
+                                if inline_index == 0 {
+                                    format!("{context_name}Integer")
+                                } else {
+                                    format!("{context_name}IntegerVariant{inline_index}")
+                                }
+                            }
+                            OpenApiSchemaType::Boolean => {
+                                if inline_index == 0 {
+                                    format!("{context_name}Boolean")
+                                } else {
+                                    format!("{context_name}BooleanVariant{inline_index}")
+                                }
+                            }
+                            _ => format!("{context_name}Variant{inline_index}"),
+                        };
 
-                    // Add inline type as a dependency
-                    dependencies.insert(inline_type_name.clone());
+                        let rust_type = self
+                            .openapi_type_to_rust_type(schema_type.clone(), schema.details());
 
-                    variants.push(SchemaRef {
-                        target: inline_type_name,
-                        nullable: false,
-                    });
+                        self.resolved_cache.insert(
+                            inline_type_name.clone(),
+                            AnalyzedSchema {
+                                name: inline_type_name.clone(),
+                                original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                                schema_type: SchemaType::Primitive {
+                                    rust_type,
+                                    serde_with: None,
+                                },
+                                dependencies: HashSet::new(),
+                                nullable: false,
+                                description: schema.details().description.clone(),
+                                default: None,
+                            },
+                        );
+
+                        dependencies.insert(inline_type_name.clone());
+
+                        variants.push(SchemaRef {
+                            target: inline_type_name,
+                            nullable: false,
+                        });
+                    }
                 }
             }
 
