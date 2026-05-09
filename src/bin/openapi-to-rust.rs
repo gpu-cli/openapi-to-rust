@@ -79,6 +79,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 json_from_str_lossy(&spec_content)?
             };
 
+            // Version gate: surface unsupported OAS major.minor early.
+            let oas_version = spec_value
+                .get("openapi")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match openapi_to_rust::cli::parse_oas_version(oas_version) {
+                Some((3, 0)) | Some((3, 1)) => {}
+                Some((3, 2)) => {
+                    eprintln!("⚠️  OpenAPI {oas_version}: 3.2 is experimentally supported.");
+                }
+                Some((major, minor)) => {
+                    eprintln!(
+                        "❌ Unsupported OpenAPI version: {major}.{minor} ({oas_version:?}). \
+                         This generator targets 3.0.x, 3.1.x, and (experimentally) 3.2.x. \
+                         Swagger 2.0 and OAS 1.x are not supported."
+                    );
+                    std::process::exit(1);
+                }
+                None => {
+                    let hint = if spec_value.get("swagger").is_some() {
+                        " (looks like Swagger 2.0 — out of scope)"
+                    } else {
+                        ""
+                    };
+                    eprintln!(
+                        "❌ Missing or unrecognised `openapi` field{hint}. Expected something like \"3.1.0\", got: {oas_version:?}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+
             // Analyze schemas (with extensions if configured)
             println!("🔍 Analyzing schemas...");
             let mut analyzer = if generator_config.schema_extensions.is_empty() {

@@ -222,12 +222,25 @@ impl CodeGenerator {
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
 
-        // Generate all schemas, including those not in dependency graph
+        // Defensive layer: track emitted Rust type names so that two
+        // analyzed schemas which sanitize to the same Rust ident don't
+        // produce two definitions (E0119 conflicting impls / E0428 name
+        // defined multiple times). The first occurrence wins; later
+        // occurrences are silently dropped. Schema-name uniqueness at the
+        // analysis layer is a follow-up; this stops the generated file from
+        // failing to compile.
+        let mut emitted_rust_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut processed = std::collections::HashSet::new();
 
         // First, generate schemas in dependency order
         for schema_name in generation_order {
             if let Some(schema) = analysis.schemas.get(&schema_name) {
+                let rust_name = self.to_rust_type_name(&schema.name);
+                if !emitted_rust_names.insert(rust_name) {
+                    processed.insert(schema_name);
+                    continue;
+                }
                 let type_def =
                     self.generate_type_definition(schema, analysis, &discriminated_variant_info)?;
                 if !type_def.is_empty() {
@@ -238,7 +251,6 @@ impl CodeGenerator {
         }
 
         // Then generate any remaining schemas not in dependency graph
-        // Sort by name for deterministic output
         let mut remaining_schemas: Vec<_> = analysis
             .schemas
             .iter()
@@ -247,6 +259,10 @@ impl CodeGenerator {
         remaining_schemas.sort_by_key(|(name, _)| name.as_str());
 
         for (_schema_name, schema) in remaining_schemas {
+            let rust_name = self.to_rust_type_name(&schema.name);
+            if !emitted_rust_names.insert(rust_name) {
+                continue;
+            }
             let type_def =
                 self.generate_type_definition(schema, analysis, &discriminated_variant_info)?;
             if !type_def.is_empty() {
@@ -622,7 +638,7 @@ impl CodeGenerator {
                             nullable: false,
                         })
                         .collect();
-                    self.generate_union_enum(schema, &schema_refs)
+                    self.generate_union_enum(schema, &schema_refs, analysis)
                 } else {
                     self.generate_discriminated_enum(
                         schema,
@@ -632,7 +648,7 @@ impl CodeGenerator {
                     )
                 }
             }
-            SchemaType::Union { variants } => self.generate_union_enum(schema, variants),
+            SchemaType::Union { variants } => self.generate_union_enum(schema, variants, analysis),
             SchemaType::Reference { target } => {
                 // For references, check if we need to generate a type alias
                 // This handles cases like nullable patterns
@@ -852,18 +868,40 @@ impl CodeGenerator {
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
-        // Determine which variant should be the default
+        // Determine which variant should be the default. The spec's `default`
+        // may not exactly match any enum value (telnyx has
+        // `default: "en"` on a language enum that lists `en-US`, `en-AU`,
+        // … — no exact match). When that happens, drop the `Default` derive
+        // entirely instead of emitting it on an enum where no variant has
+        // `#[default]` (E0665).
         let default_value = schema
             .default
             .as_ref()
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let has_default_match = match &default_value {
+            Some(d) => values.iter().any(|v| v == d),
+            None => !values.is_empty(),
+        };
 
+        // Variant-name uniqueness: enum values that PascalCase to the same
+        // identifier (e.g. `ASC`/`asc` both → `Asc`) collide and produce
+        // E0428 + non-exhaustive matches downstream. Dedupe by suffixing
+        // `_2`, `_3`, … on collisions while preserving the first occurrence's
+        // name, and keeping each variant's `#[serde(rename)]` pointed at the
+        // original wire string.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let variant_pairs: Vec<(syn::Ident, &String, bool)> = values
             .iter()
             .enumerate()
             .map(|(i, value)| {
-                let variant_name = self.to_rust_enum_variant(value);
+                let base = self.to_rust_enum_variant(value);
+                let mut variant_name = base.clone();
+                let mut suffix = 2;
+                while !used.insert(variant_name.clone()) {
+                    variant_name = format!("{base}_{suffix}");
+                    suffix += 1;
+                }
                 let variant_ident = format_ident!("{}", variant_name);
                 let is_default = if let Some(ref default) = default_value {
                     value == default
@@ -904,16 +942,23 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Generate derives with optional Specta support
-        let derives = if self.config.enable_specta {
-            quote! {
+        // Generate derives with optional Specta support. Drop `Default` if
+        // no variant ends up tagged `#[default]` (would trigger E0665).
+        let derives = match (self.config.enable_specta, has_default_match) {
+            (true, true) => quote! {
                 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
-            }
-        } else {
-            quote! {
+            },
+            (true, false) => quote! {
+                #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+                #[cfg_attr(feature = "specta", derive(specta::Type))]
+            },
+            (false, true) => quote! {
                 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-            }
+            },
+            (false, false) => quote! {
+                #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+            },
         };
 
         Ok(quote! {
@@ -960,6 +1005,16 @@ impl CodeGenerator {
         let mut sorted_properties: Vec<_> = properties.iter().collect();
         sorted_properties.sort_by_key(|(name, _)| name.as_str());
 
+        // Track Rust field-name uniqueness inside the struct. Two spec
+        // properties whose names sanitize to the same Rust identifier
+        // (e.g. `connectionString` and `connection_string` both → `connection_string`)
+        // would otherwise emit duplicate fields and trigger E0124 / E0062.
+        // We disambiguate by suffixing `_2`, `_3`, … on collisions, and we
+        // skip the duplicate entirely when the spec literally repeats the
+        // same key (impossible in JSON but tolerated in YAML merging).
+        let mut used_field_idents: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         let mut fields: Vec<TokenStream> = sorted_properties
             .into_iter()
             .filter(|(field_name, _)| {
@@ -979,7 +1034,14 @@ impl CodeGenerator {
                 }
             })
             .map(|(field_name, prop)| {
-                let field_ident = Self::to_field_ident(&self.to_rust_field_name(field_name));
+                let raw = self.to_rust_field_name(field_name);
+                let mut chosen = raw.clone();
+                let mut suffix = 2;
+                while !used_field_idents.insert(chosen.clone()) {
+                    chosen = format!("{raw}_{suffix}");
+                    suffix += 1;
+                }
+                let field_ident = Self::to_field_ident(&chosen);
                 let is_required = required.contains(field_name);
                 let field_type =
                     self.generate_field_type(&schema.name, field_name, prop, is_required, analysis);
@@ -1073,19 +1135,31 @@ impl CodeGenerator {
                     nullable: false,
                 })
                 .collect();
-            return self.generate_union_enum(schema, &schema_refs);
+            return self.generate_union_enum(schema, &schema_refs, analysis);
         }
 
+        let enclosing = self.to_rust_type_name(&schema.name);
         let enum_variants = variants.iter().map(|variant| {
             let variant_name = format_ident!("{}", variant.rust_name);
             let variant_value = &variant.discriminator_value;
 
-            // Always use tuple variant that references the existing type
-            // This ensures the standalone event types are actually used
             let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.type_name));
+            // Box variant payloads that point at the enclosing enum or any
+            // schema in the analysis's recursive set, otherwise the enum has
+            // infinite size (E0072).
+            let payload = if self.to_rust_type_name(&variant.type_name) == enclosing
+                || analysis
+                    .dependencies
+                    .recursive_schemas
+                    .contains(&variant.type_name)
+            {
+                quote! { Box<#variant_type> }
+            } else {
+                quote! { #variant_type }
+            };
             quote! {
                 #[serde(rename = #variant_value)]
-                #variant_name(#variant_type),
+                #variant_name(#payload),
             }
         });
 
@@ -1178,6 +1252,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         variants: &[crate::analysis::SchemaRef],
+        analysis: &crate::analysis::SchemaAnalysis,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -1281,6 +1356,25 @@ impl CodeGenerator {
                 quote! { #type_ident }
             };
 
+            // Self-referential variant (variant payload type == enclosing
+            // enum) yields an infinite-size enum (E0072). Wrap in `Box<T>` to
+            // break the cycle. Observed in microsoft-graph.yaml.
+            let target_rust_name = self.to_rust_type_name(&variant.target);
+            let enclosing_name = self.to_rust_type_name(&schema.name);
+            let is_self_ref = target_rust_name == enclosing_name;
+            // Indirect cycles (stripe BankAccount → BankAccountCustomer →
+            // Customer → BankAccountCustomer): variants pointing into the
+            // analysis's recursive_schemas set must also be heap-allocated.
+            let is_recursive_target = analysis
+                .dependencies
+                .recursive_schemas
+                .contains(&variant.target);
+            let variant_type_tokens = if is_self_ref || is_recursive_target {
+                quote! { Box<#variant_type_tokens> }
+            } else {
+                variant_type_tokens
+            };
+
             quote! {
                 #variant_name_ident(#variant_type_tokens),
             }
@@ -1315,6 +1409,37 @@ impl CodeGenerator {
         })
     }
 
+    /// Walk a chain of type-alias `Reference`s starting from `target` and
+    /// return true if the chain reaches the schema named by
+    /// `enclosing_rust_name` (Rust name). Bounded depth to prevent infinite
+    /// loops on truly cyclic aliases.
+    fn target_aliases_back_to(
+        &self,
+        target: &str,
+        enclosing_rust_name: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> bool {
+        let mut current = target.to_string();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _ in 0..16 {
+            if !visited.insert(current.clone()) {
+                return true;
+            }
+            let Some(schema) = analysis.schemas.get(&current) else {
+                return false;
+            };
+            if let crate::analysis::SchemaType::Reference { target: next } = &schema.schema_type {
+                if self.to_rust_type_name(next) == enclosing_rust_name {
+                    return true;
+                }
+                current = next.clone();
+                continue;
+            }
+            return false;
+        }
+        false
+    }
+
     fn generate_field_type(
         &self,
         schema_name: &str,
@@ -1346,9 +1471,28 @@ impl CodeGenerator {
                 }
             }
             SchemaType::Reference { target } => {
-                let target_type = format_ident!("{}", self.to_rust_type_name(target));
-                // Wrap recursive references in Box<T> for heap allocation
-                if analysis.dependencies.recursive_schemas.contains(target) {
+                let target_rust_name = self.to_rust_type_name(target);
+                let target_type = format_ident!("{}", target_rust_name);
+                // Wrap recursive references in Box<T> for heap allocation.
+                // Three ways to detect the cycle:
+                // 1. Target is in the analysis-level recursive set (catches
+                //    direct + indirect cycles via the dependency graph).
+                // 2. Target's Rust name equals the enclosing struct's Rust
+                //    name (catches cloudflare-style cases where two distinct
+                //    spec schemas PascalCase to the same ident).
+                // 3. Target is a type alias whose resolution chain reaches
+                //    the enclosing schema (catches cal-com's
+                //    `ReassignBookingOutput20240813Data = Reassign...`
+                //    pattern: the synthesized inline name aliases back to
+                //    its parent).
+                let enclosing_rust_name = self.to_rust_type_name(schema_name);
+                let is_self_via_rust_name = target_rust_name == enclosing_rust_name;
+                let is_alias_chain_self =
+                    self.target_aliases_back_to(target, &enclosing_rust_name, analysis);
+                if analysis.dependencies.recursive_schemas.contains(target)
+                    || is_self_via_rust_name
+                    || is_alias_chain_self
+                {
                     quote! { Box<#target_type> }
                 } else {
                     quote! { #target_type }
@@ -1466,6 +1610,16 @@ impl CodeGenerator {
     }
 
     pub(crate) fn to_rust_enum_variant(&self, s: &str) -> String {
+        // Preserve sign for numeric values so e.g. `-1` and `1` produce
+        // distinct variants (`VariantNeg1` vs `Variant1`). Without this,
+        // strict-namespace enums in github.json collide on `1`/`-1`.
+        let neg_prefix =
+            if s.starts_with('-') && s.chars().skip(1).all(|c| c.is_ascii_digit() || c == '.') {
+                "Neg"
+            } else {
+                ""
+            };
+
         // Convert string to valid Rust enum variant (PascalCase)
         let mut result = String::new();
         let mut next_upper = true;
@@ -1518,7 +1672,11 @@ impl CodeGenerator {
 
         // Ensure variant starts with a letter (not a number)
         if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            result = format!("Variant{result}");
+            result = format!("Variant{neg_prefix}{result}");
+        } else if !neg_prefix.is_empty() {
+            // String happened to start with `-<digits>` but produced a
+            // non-empty alphabetic prefix. Tag the negative anyway.
+            result = format!("{neg_prefix}{result}");
         }
 
         // Handle special cases for enum variants
@@ -1732,10 +1890,53 @@ impl CodeGenerator {
             result = format!("Type{result}");
         }
 
+        // Avoid masking ubiquitous std types and traits. cloudflare has a
+        // schema literally named `Result`, gcore has `Default`; emitting
+        // `pub enum Result { ... }` shadows std::result::Result and breaks
+        // every method's `-> Result<T, ApiOpError<...>>`. Same for impls
+        // like `impl Default for HttpClient { ... }` when `Default` resolves
+        // to the local type alias.
+        if matches!(
+            result.as_str(),
+            "Result"
+                | "Option"
+                | "Box"
+                | "Vec"
+                | "String"
+                | "Some"
+                | "None"
+                | "Ok"
+                | "Err"
+                | "Default"
+                | "Clone"
+                | "Debug"
+                | "Send"
+                | "Sync"
+                | "Sized"
+                | "Iterator"
+                | "From"
+                | "Into"
+                | "TryFrom"
+                | "TryInto"
+                | "AsRef"
+                | "AsMut"
+        ) {
+            result.push_str("Type");
+        }
+
         result
     }
 
     fn to_rust_field_name(&self, s: &str) -> String {
+        // Track sign / leading-non-alpha so e.g. `+1` and `-1` produce
+        // distinct field names instead of both collapsing to `field_1`
+        // (observed in github.json's reactions schemas).
+        let leading_marker = match s.chars().next() {
+            Some('-') if s.len() > 1 => "neg_",
+            Some('+') if s.len() > 1 => "pos_",
+            _ => "",
+        };
+
         // Convert field name to snake_case properly
         let mut result = String::new();
         let mut prev_was_upper = false;
@@ -1783,9 +1984,17 @@ impl CodeGenerator {
 
         // Ensure field name starts with a letter or underscore (not a number)
         if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            result = format!("field_{result}");
+            result = format!("field_{leading_marker}{result}");
+        } else if !leading_marker.is_empty() {
+            result = format!("{leading_marker}{result}");
         }
 
+        // `self`, `super`, `crate`, `Self` are NOT permitted as raw identifiers
+        // (they trigger an `r#self cannot be a raw identifier` panic in
+        // proc_macro2). Suffix them instead.
+        if matches!(result.as_str(), "self" | "super" | "crate" | "Self") {
+            return format!("{result}_field");
+        }
         // Handle reserved keywords using raw identifiers (r#keyword)
         if Self::is_rust_keyword(&result) {
             format!("r#{result}")
@@ -1843,6 +2052,8 @@ impl CodeGenerator {
                 | "unsized"
                 | "virtual"
                 | "yield"
+                // Rust 2024 edition reservations.
+                | "gen"
         )
     }
 
@@ -2006,19 +2217,18 @@ impl CodeGenerator {
 
         match item_type {
             SchemaType::Primitive { rust_type } => {
-                // Handle complex types like serde_json::Value
-                if rust_type.contains("::") {
-                    let parts: Vec<&str> = rust_type.split("::").collect();
-                    if parts.len() == 2 {
-                        let module = format_ident!("{}", parts[0]);
-                        let type_name = format_ident!("{}", parts[1]);
-                        quote! { #module::#type_name }
-                    } else {
-                        // More than 2 parts, construct path
-                        let path_parts: Vec<_> =
-                            parts.iter().map(|p| format_ident!("{}", p)).collect();
-                        quote! { #(#path_parts)::* }
-                    }
+                // The string here may be anything from `i64` / `String` to
+                // `serde_json::Value` to `Vec<serde_json::Value>` to
+                // `BTreeMap<String, T>`. Parse it as a syn::Type so we get
+                // the right tokens regardless of generics.
+                if let Ok(parsed) = syn::parse_str::<syn::Type>(rust_type) {
+                    quote! { #parsed }
+                } else if rust_type.contains("::") {
+                    let parts: Vec<_> = rust_type
+                        .split("::")
+                        .map(|p| format_ident!("{}", p))
+                        .collect();
+                    quote! { #(#parts)::* }
                 } else {
                     let type_ident = format_ident!("{}", rust_type);
                     quote! { #type_ident }

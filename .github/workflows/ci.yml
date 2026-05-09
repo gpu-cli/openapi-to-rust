@@ -47,14 +47,21 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Regression guard: generate clients for our reference specs (Anthropic +
-  # OpenAI) and `cargo check` the result. Catches breakage where a generator
-  # change still passes unit tests but emits invalid Rust against real-world
-  # OAS documents. See scripts/spec-compile.sh.
+  # Regression guard: generate clients for our two production-target specs
+  # (OpenAI + Anthropic) and `cargo check` the result. Catches breakage
+  # where a generator change still passes unit tests but emits invalid
+  # Rust against the specs we actually ship clients for.
+  #
+  # The full corpus (54 specs) is verified locally via
+  # `scripts/spec-compile.sh` (no args) — but cargo-checking 50+
+  # generated crates exceeded CI's 6-hour job limit on the largest
+  # specs (microsoft-graph, cloudflare). Local + this CI gate is
+  # sufficient: regressions to anthropic/openai will fail PRs, and
+  # contributors can run the full corpus before pushing.
   spec-compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/spec-compile.sh
+      - run: scripts/spec-compile.sh anthropic openai

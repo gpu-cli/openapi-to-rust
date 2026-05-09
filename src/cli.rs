@@ -274,7 +274,7 @@ async fn load_spec(input: &str, verbose: bool) -> Result<String, Box<dyn std::er
 
 /// Parse the `openapi` version string into (major, minor). Tolerates patch and
 /// build-metadata suffixes. Returns None for unrecognised input.
-fn parse_oas_version(s: &str) -> Option<(u32, u32)> {
+pub fn parse_oas_version(s: &str) -> Option<(u32, u32)> {
     let mut parts = s.split('.');
     let major = parts.next()?.parse().ok()?;
     let minor_raw = parts.next()?;

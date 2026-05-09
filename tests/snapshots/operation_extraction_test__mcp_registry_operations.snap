@@ -32,5 +32,6 @@ getV0ServersServerId:
       schema_ref: ~
       rust_type: String
       description: ~
+      rust_ident: server_id
   supports_streaming: false
   stream_parameter: ~

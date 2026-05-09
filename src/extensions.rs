@@ -23,7 +23,7 @@
 //! `if`/`then`/`else`, etc.) directly from there. They are graduated to typed
 //! fields under the J5–J8 beads (Phase 2b).
 
-use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
+use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -96,14 +96,15 @@ impl<'de> Deserialize<'de> for Extensions {
             where
                 A: MapAccess<'de>,
             {
+                // We accept any leftover keys here so real-world specs that
+                // sprinkle non-`x-` fields in places they don't belong (we've
+                // observed `produces`, `in`, `type`, `density`, `title`,
+                // `description` on the wrong objects) still parse. The CLI
+                // surfaces non-`x-` keys as warnings via `non_extension_keys`
+                // so silent drops still get noticed.
                 let mut out: BTreeMap<String, Value> = BTreeMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     let value: Value = map.next_value()?;
-                    if !key.starts_with("x-") {
-                        return Err(A::Error::custom(format!(
-                            "unknown field `{key}` (OpenAPI specification extensions must start with `x-`)"
-                        )));
-                    }
                     out.insert(key, value);
                 }
                 Ok(Extensions(out))
@@ -111,5 +112,19 @@ impl<'de> Deserialize<'de> for Extensions {
         }
 
         d.deserialize_map(ExtVisitor)
+    }
+}
+
+impl Extensions {
+    /// Iterate keys that don't follow the OAS `x-*` extension convention.
+    /// These are typically OAS 2.0 leftovers (`produces`/`consumes`) or
+    /// fields placed on the wrong object level. The CLI prints them as a
+    /// warning so silent drops remain visible even though we no longer
+    /// reject them at deserialize time.
+    pub fn non_extension_keys(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .keys()
+            .filter(|k| !k.starts_with("x-"))
+            .map(String::as_str)
     }
 }

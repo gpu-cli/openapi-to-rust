@@ -165,8 +165,11 @@ fn test_complex_nested_schema() {
     // Verify status enum is generated
     assert!(result.contains("pub enum MessageBatchStatus"));
 
-    // Verify the last_id union type is generated
-    assert!(result.contains("BetaListResponseMessageBatchLastId"));
+    // The last_id property is `anyOf: [null, string]` — a nullable
+    // pattern. We unwrap to Option<String> rather than synthesizing a
+    // union wrapper type (avoids name collisions with referenced
+    // schemas; see analyze_object_schema's nullable-pattern handling).
+    assert!(result.contains("pub last_id: Option<String>"));
 
     // Check union types don't have underscores
     assert!(!result.contains("Beta_List_Response"));
