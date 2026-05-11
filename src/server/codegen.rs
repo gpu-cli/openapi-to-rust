@@ -128,8 +128,6 @@ impl<'a> ServerCodegen<'a> {
     }
 
     fn emit_router(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
-        // For now we emit one Router factory per tag. Multi-tag specs
-        // get one factory each; users `.merge()` them at the call site.
         let factories: Vec<TokenStream> = groups
             .iter()
             .map(|(tag, ops)| self.emit_router_for_trait(tag, ops))
@@ -141,6 +139,17 @@ impl<'a> ServerCodegen<'a> {
             .flatten()
             .filter_map(|op| self.emit_query_struct(op))
             .collect();
+
+        // When the picked operations span multiple tags, emit a
+        // top-level `build_router(impl1, impl2, ...)` that takes one
+        // generic per trait and `.merge()`s the per-tag factories.
+        // For a single-tag selection this is unnecessary noise — the
+        // user calls the per-tag factory directly.
+        let combined = if groups.len() > 1 {
+            Some(self.emit_combined_router(groups))
+        } else {
+            None
+        };
 
         quote! {
             //! Router factories — one per trait. Each takes any
@@ -159,6 +168,71 @@ impl<'a> ServerCodegen<'a> {
             #(#query_structs)*
 
             #(#factories)*
+
+            #combined
+        }
+    }
+
+    fn emit_combined_router(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
+        // Stable ordering: BTreeMap iteration is already alphabetical
+        // by tag, which gives us deterministic generic ordering across
+        // generator runs.
+        let entries: Vec<(syn::Ident, syn::Ident, syn::Ident)> = groups
+            .keys()
+            .enumerate()
+            .map(|(i, tag)| {
+                let trait_ident = trait_ident_for_tag(tag);
+                let factory = format_ident!("{}_router", trait_ident.to_string().to_snake_case());
+                let generic = format_ident!("T{}", i + 1);
+                (trait_ident, factory, generic)
+            })
+            .collect();
+
+        let generics: Vec<&syn::Ident> = entries.iter().map(|(_, _, g)| g).collect();
+        let args: Vec<TokenStream> = entries
+            .iter()
+            .map(|(trait_ident, _, g)| {
+                let arg_ident = format_ident!("{}", trait_ident.to_string().to_snake_case());
+                quote! { #arg_ident: #g }
+            })
+            .collect();
+        let bounds: Vec<TokenStream> = entries
+            .iter()
+            .map(|(trait_ident, _, g)| {
+                quote! { #g: #trait_ident + Clone + Send + Sync + 'static }
+            })
+            .collect();
+
+        // Fold the factories: `factory1(arg1).merge(factory2(arg2)).merge(...)`.
+        let first = &entries[0];
+        let first_arg = format_ident!("{}", first.0.to_string().to_snake_case());
+        let first_factory = &first.1;
+        let rest = entries
+            .iter()
+            .skip(1)
+            .map(|(trait_ident, factory, _)| {
+                let arg = format_ident!("{}", trait_ident.to_string().to_snake_case());
+                quote! { .merge(#factory(#arg)) }
+            })
+            .collect::<Vec<_>>();
+
+        let trait_names: Vec<String> = entries.iter().map(|(t, _, _)| t.to_string()).collect();
+        let doc = format!(
+            " Combined router spanning {} traits: {}.",
+            entries.len(),
+            trait_names.join(", "),
+        );
+
+        quote! {
+            #[doc = #doc]
+            pub fn build_router<#(#generics),*>(
+                #(#args),*
+            ) -> ::axum::Router
+            where
+                #(#bounds),*
+            {
+                #first_factory(#first_arg) #(#rest)*
+            }
         }
     }
 
@@ -235,13 +309,15 @@ impl<'a> ServerCodegen<'a> {
         }
 
         // Query parameters — extract via a per-op `<Op>Query` struct
-        // (emitted in the same router.rs above). Each query param
-        // appears in the trait method as `Option<T>`.
+        // (emitted in the same router.rs above). Required params are
+        // unwrapped here (short-circuit 400 if missing) so the trait
+        // method sees a `T` rather than `Option<T>`.
         let query_params: Vec<&_> = op
             .parameters
             .iter()
             .filter(|p| p.location == "query")
             .collect();
+        let mut required_query_checks: Vec<TokenStream> = Vec::new();
         if !query_params.is_empty() {
             let query_ident = format_ident!("{}Query", op.operation_id.to_pascal_case());
             extractors.push(quote! {
@@ -249,28 +325,71 @@ impl<'a> ServerCodegen<'a> {
             });
             for p in &query_params {
                 let f = format_ident!("{}", p.name.to_snake_case());
-                call_args.push(quote! { __q.#f });
+                let wire = p.name.as_str();
+                if p.required {
+                    let missing_msg = format!("missing required query parameter `{wire}`");
+                    required_query_checks.push(quote! {
+                        let #f = match __q.#f {
+                            Some(v) => v,
+                            None => return ::axum::response::IntoResponse::into_response(
+                                (
+                                    ::axum::http::StatusCode::BAD_REQUEST,
+                                    ::axum::Json(::serde_json::json!({
+                                        "error": #missing_msg
+                                    })),
+                                )
+                            ),
+                        };
+                    });
+                    call_args.push(quote! { #f });
+                } else {
+                    call_args.push(quote! { __q.#f });
+                }
             }
         }
 
         // Header parameters — extract via HeaderMap and read each
-        // header by name. Surface as Option<String> regardless of
-        // declared type (typed conversions can be re-added later).
+        // header by name. Required headers short-circuit with 400 if
+        // missing or non-UTF-8.
         let header_params: Vec<&_> = op
             .parameters
             .iter()
             .filter(|p| p.location == "header")
             .collect();
+        let mut required_header_checks: Vec<TokenStream> = Vec::new();
         if !header_params.is_empty() {
             extractors.push(quote! { __headers: ::axum::http::HeaderMap });
             for p in &header_params {
                 let wire = p.name.as_str();
-                call_args.push(quote! {
-                    __headers
-                        .get(#wire)
-                        .and_then(|v| v.to_str().ok())
-                        .map(::std::string::String::from)
-                });
+                let ident = format_ident!("{}", header_param_ident(&p.name));
+                if p.required {
+                    let missing_msg = format!("missing required header `{wire}`");
+                    required_header_checks.push(quote! {
+                        let #ident = match __headers
+                            .get(#wire)
+                            .and_then(|v| v.to_str().ok())
+                            .map(::std::string::String::from)
+                        {
+                            Some(v) => v,
+                            None => return ::axum::response::IntoResponse::into_response(
+                                (
+                                    ::axum::http::StatusCode::BAD_REQUEST,
+                                    ::axum::Json(::serde_json::json!({
+                                        "error": #missing_msg
+                                    })),
+                                )
+                            ),
+                        };
+                    });
+                    call_args.push(quote! { #ident });
+                } else {
+                    call_args.push(quote! {
+                        __headers
+                            .get(#wire)
+                            .and_then(|v| v.to_str().ok())
+                            .map(::std::string::String::from)
+                    });
+                }
             }
         }
 
@@ -291,21 +410,28 @@ impl<'a> ServerCodegen<'a> {
             }
         }
 
-        let response_ty = format_ident!("{}Response", op.operation_id.to_pascal_case());
-
+        let _ = format_ident!("{}Response", op.operation_id.to_pascal_case());
         // Keep referencing trait_ident so the where-bound name is
         // visible to downstream readers — clippy would otherwise flag
         // it as unused in some configurations.
         let _ = trait_ident;
 
+        // Handler returns `axum::response::Response` so the required-
+        // param short-circuit (400 BadRequest) and the trait method's
+        // typed response enum (via IntoResponse) can both flow out
+        // through the same return type.
         quote! {
             async fn #handler_ident<T>(
                 #(#extractors),*
-            ) -> #response_ty
+            ) -> ::axum::response::Response
             where
                 T: super::api::#trait_ident + Clone + Send + Sync + 'static,
             {
-                api.#trait_method(#(#call_args),*).await
+                #(#required_query_checks)*
+                #(#required_header_checks)*
+                ::axum::response::IntoResponse::into_response(
+                    api.#trait_method(#(#call_args),*).await,
+                )
             }
         }
     }
@@ -387,22 +513,25 @@ impl<'a> ServerCodegen<'a> {
             if p.location == "query" {
                 let ident = format_ident!("{}", p.name.to_snake_case());
                 let ty = parse_type(&p.rust_type);
-                // All query params are Option<T> on the trait — the
-                // typed Query struct generated alongside the trait
-                // populates None for absent keys regardless of the
-                // spec's `required: true`. Validation moves to the
-                // user's impl (return BadRequest if missing).
-                params.push(quote! { #ident: ::std::option::Option<#ty> });
+                // Required query params land as `T`; the handler
+                // validates presence and returns 400 if absent, so
+                // by the time the trait method sees the value it
+                // must be Some. Optional → `Option<T>`.
+                if p.required {
+                    params.push(quote! { #ident: #ty });
+                } else {
+                    params.push(quote! { #ident: ::std::option::Option<#ty> });
+                }
             }
         }
         for p in &op.parameters {
             if p.location == "header" {
                 let ident = format_ident!("{}", header_param_ident(&p.name));
-                // Headers are surfaced as Option<String>; required
-                // headers are still Option here for the same reason
-                // as query params (deserialization vs. trait
-                // signature stability).
-                params.push(quote! { #ident: ::std::option::Option<String> });
+                if p.required {
+                    params.push(quote! { #ident: String });
+                } else {
+                    params.push(quote! { #ident: ::std::option::Option<String> });
+                }
             }
         }
         if let Some(body) = body_type(op) {
@@ -629,10 +758,16 @@ fn emit_param_enum(name: &str, values: &[String]) -> TokenStream {
         .enumerate()
         .map(|(i, raw)| {
             let pascal = raw.to_pascal_case();
-            // Empty-string or pure-symbol values can collapse to ""
-            // after PascalCase; backstop with a positional name so
-            // the enum still compiles.
-            let v_name = if pascal.is_empty() {
+            // PascalCase can produce an empty string (pure-symbol
+            // input) or an identifier starting with a digit
+            // (e.g. `1d` stays `1d`) — both invalid as Rust idents.
+            // Fall back to a positional name so the enum compiles.
+            let starts_with_digit = pascal
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(true);
+            let v_name = if pascal.is_empty() || starts_with_digit {
                 format!("Variant{i}")
             } else {
                 pascal

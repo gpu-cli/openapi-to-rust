@@ -8,6 +8,9 @@ enable_async_client = false
 
 [server]
 framework = "axum"
-# createResponse exercises the body + SSE path; listInputItems
-# exercises path params + four query params (one of them an enum).
-operations = ["createResponse", "listInputItems"]
+# createResponse  — body + SSE path
+# listInputItems  — path + four optional query params (one is an enum)
+# usage-costs     — required query param (start_time) + lives on a
+#                   different tag, so it also exercises the multi-tag
+#                   combined `build_router` factory.
+operations = ["createResponse", "listInputItems", "usage-costs"]

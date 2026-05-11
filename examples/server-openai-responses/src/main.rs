@@ -23,8 +23,8 @@ use axum::response::sse::Event;
 use futures_util::stream;
 use gen::CreateResponse;
 use gen::server::{
-    CreateResponseResponse, ListInputItemsResponse, ResponsesApi, responses_api_router,
-    sse_response,
+    CreateResponseResponse, ListInputItemsResponse, ResponsesApi, UsageApi, UsageCostsResponse,
+    build_router, sse_response,
 };
 use std::convert::Infallible;
 
@@ -111,9 +111,37 @@ fn sse_event(name: &str, data: &str) -> Result<Event, Infallible> {
     Ok(Event::default().event(name).data(data))
 }
 
+#[axum::async_trait]
+impl UsageApi for AppState {
+    /// `start_time` is `i64` (not `Option`) — the generated handler
+    /// short-circuits with 400 if the client omits it, so by the
+    /// time we get here the value is guaranteed present.
+    async fn usage_costs(
+        &self,
+        start_time: i64,
+        _end_time: Option<i64>,
+        _bucket_width: Option<gen::UsageCostsBucketWidth>,
+        _project_ids: Option<String>,
+        _group_by: Option<String>,
+        _limit: Option<i64>,
+        _page: Option<String>,
+    ) -> UsageCostsResponse {
+        let body: gen::UsageResponse = serde_json::from_value(serde_json::json!({
+            "object": "page",
+            "data": [],
+            "has_more": false,
+            "next_page": "",
+        }))
+        .unwrap_or_else(|e| panic!("UsageResponse must deserialize: {e}; start_time={start_time}"));
+        UsageCostsResponse::Ok(body)
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let app = responses_api_router(AppState);
+    // Single combined router that takes both trait impls. Each tag's
+    // routes get mounted on the same axum::Router via `.merge()`.
+    let app = build_router(AppState, AppState);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
     println!("listening on http://{}", listener.local_addr().unwrap());
     axum::serve(listener, app).await.unwrap();
@@ -154,5 +182,15 @@ mod tests {
             .list_input_items("resp_abc".into(), Some(50), None, None, None)
             .await;
         assert!(matches!(r, ListInputItemsResponse::Ok(_)));
+    }
+
+    #[tokio::test]
+    async fn usage_costs_required_param_arrives_as_unwrapped() {
+        // start_time is `i64` not `Option<i64>` — the generated
+        // handler ensures it's always present.
+        let r = AppState
+            .usage_costs(1_700_000_000, None, None, None, None, None, None)
+            .await;
+        assert!(matches!(r, UsageCostsResponse::Ok(_)));
     }
 }
