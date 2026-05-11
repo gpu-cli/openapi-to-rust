@@ -280,6 +280,7 @@ pub fn run_generation_test(
         },
         streaming_config: None,
         nullable_field_overrides: std::collections::BTreeMap::new(),
+        extensible_enum_overrides: std::collections::BTreeMap::new(),
         schema_extensions: vec![],
         http_client_config: None,
         retry_config: None,

@@ -310,6 +310,7 @@ fn demonstrate_rust_api(
         type_mappings: std::collections::BTreeMap::new(),
         streaming_config: None,
         nullable_field_overrides: std::collections::BTreeMap::new(),
+        extensible_enum_overrides: std::collections::BTreeMap::new(),
         schema_extensions: vec![],
         enable_registry: false,
         registry_only: false,

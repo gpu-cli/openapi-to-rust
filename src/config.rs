@@ -158,6 +158,12 @@ pub struct ConfigFile {
     pub streaming: Option<StreamingSection>,
     #[serde(default)]
     pub nullable_overrides: BTreeMap<String, bool>,
+    /// Force a closed string-enum schema to be rendered as an extensible enum
+    /// (with a `Custom(String)` fallback variant). Use when the spec under-
+    /// declares the enum and the API returns values outside the declared set.
+    /// Format: `"SchemaName" = true`. Mirror of `nullable_overrides`.
+    #[serde(default)]
+    pub extensible_enums: BTreeMap<String, bool>,
     #[serde(default)]
     pub type_mappings: BTreeMap<String, String>,
     /// `[generator.types]` block — per-format type-mapping strategies.
@@ -547,6 +553,7 @@ impl ConfigFile {
             },
             streaming_config,
             nullable_field_overrides: self.nullable_overrides,
+            extensible_enum_overrides: self.extensible_enums,
             schema_extensions: self.generator.schema_extensions,
             http_client_config,
             retry_config,

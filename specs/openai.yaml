@@ -37749,6 +37749,7 @@ components:
             - type: string
               enum:
                 - in-memory
+                - in_memory
                 - 24h
               description: >
                 The retention policy for the prompt cache. Set to `24h` to enable extended prompt caching,

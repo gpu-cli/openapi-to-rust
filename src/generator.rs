@@ -116,6 +116,13 @@ pub struct GeneratorConfig {
     /// Fields that should be treated as nullable even if not marked in the spec
     /// Format: "SchemaName.fieldName" -> true
     pub nullable_field_overrides: BTreeMap<String, bool>,
+    /// String-enum schemas that should be rendered as extensible (with a
+    /// `Custom(String)` fallback variant) instead of closed enums. Useful when
+    /// the spec declares a fixed set of values but the API actually returns
+    /// values outside that set (real-world drift: Cloudflare's r2_bucket_location
+    /// declares lowercase but returns uppercase).
+    /// Format: "SchemaName" -> true
+    pub extensible_enum_overrides: BTreeMap<String, bool>,
     /// Additional schema extension files to merge into the main spec
     /// These files will be merged additively using simple JSON object merging
     pub schema_extensions: Vec<PathBuf>,
@@ -149,6 +156,7 @@ impl Default for GeneratorConfig {
             type_mappings: default_type_mappings(),
             streaming_config: None,
             nullable_field_overrides: BTreeMap::new(),
+            extensible_enum_overrides: BTreeMap::new(),
             schema_extensions: Vec::new(),
             http_client_config: None,
             retry_config: None,
@@ -795,7 +803,25 @@ impl CodeGenerator {
             }
             SchemaType::StringEnum { values } => {
                 let ext = analysis.enum_extensions.get(&schema.name);
-                self.generate_string_enum(schema, values, ext)
+                // [extensible_enums] override: opt a closed string-enum into an
+                // extensible enum when the spec is known to lag the API (e.g.
+                // Cloudflare R2 returning "WNAM" against a lowercase-only enum).
+                // Accept either the raw spec name (e.g. "r2_bucket_location")
+                // or the rendered Rust type name (e.g. "R2BucketLocation") so
+                // users can write whichever they see in the generated code.
+                let rust_name = self.to_rust_type_name(&schema.name);
+                let force_extensible = self
+                    .config
+                    .extensible_enum_overrides
+                    .get(&schema.name)
+                    .or_else(|| self.config.extensible_enum_overrides.get(&rust_name))
+                    .copied()
+                    .unwrap_or(false);
+                if force_extensible {
+                    self.generate_extensible_enum(schema, values, ext)
+                } else {
+                    self.generate_string_enum(schema, values, ext)
+                }
             }
             SchemaType::ExtensibleEnum { known_values } => {
                 let ext = analysis.enum_extensions.get(&schema.name);

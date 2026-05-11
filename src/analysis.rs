@@ -1079,6 +1079,44 @@ impl SchemaAnalyzer {
         })
     }
 
+    /// True when this branch of an anyOf/oneOf is (or resolves to) an
+    /// object — the only kind of schema serde can deserialize via an
+    /// internally-tagged enum. False for string/number/bool/array branches
+    /// or refs to those, including string-enums.
+    ///
+    /// Used to detect the "hybrid string-or-object" union pattern (see bug
+    /// openapi-generator-dpd) so we can downgrade those unions to
+    /// `#[serde(untagged)]`.
+    fn branch_resolves_to_object(&self, schema: &Schema) -> bool {
+        // Follow $ref one hop, then ask the same question of the target.
+        if let Some(ref_str) = schema.reference() {
+            return match self
+                .extract_schema_name(ref_str)
+                .and_then(|n| self.schemas.get(n))
+            {
+                Some(target) => self.branch_resolves_to_object(target),
+                None => false,
+            };
+        }
+        // allOf compositions are object-shaped; same for anyOf/oneOf
+        // wrappers (those will reduce to objects or to further unions).
+        if matches!(
+            schema,
+            Schema::AllOf { .. } | Schema::AnyOf { .. } | Schema::OneOf { .. }
+        ) {
+            return true;
+        }
+        if matches!(schema.schema_type(), Some(OpenApiSchemaType::Object)) {
+            return true;
+        }
+        if schema.inferred_type() == Some(OpenApiSchemaType::Object) {
+            return true;
+        }
+        // Anything else (string, integer, number, boolean, array, null,
+        // string-enum, etc.) cannot carry a JSON tag field.
+        false
+    }
+
     /// Scan all variants to find any common property that has a const/single-enum value
     /// across all variants. Returns the field name if found.
     /// Prioritizes "type" if it matches (most common convention).
@@ -2387,11 +2425,17 @@ impl SchemaAnalyzer {
                 )?;
                 let prop_details = prop_schema.details();
 
+                // Bug openapi-generator-bgo: pick up 3.1-style nullability
+                // (anyOf/oneOf with a `type: null` branch) in addition to the
+                // 3.0 `nullable: true` keyword. Without this, properties merged
+                // through allOf composition lose their null-branch detection
+                // (real hit: OpenAI Response.incomplete_details).
+                let nullable = prop_details.is_nullable() || prop_schema.is_nullable_pattern();
                 merged_properties.insert(
                     prop_name.clone(),
                     PropertyInfo {
                         schema_type: prop_type,
-                        nullable: prop_details.is_nullable(),
+                        nullable,
                         description: prop_details.description.clone(),
                         default: prop_details.default.clone(),
                         serde_attrs: Vec::new(),
@@ -2440,6 +2484,18 @@ impl SchemaAnalyzer {
         // If there's no discriminator, we should create an untagged union
         if discriminator.is_none() {
             // Handle untagged unions (oneOf without discriminator)
+            return self.analyze_untagged_oneof_union(one_of_schemas, parent_name, dependencies);
+        }
+
+        // Bug openapi-generator-dpd: if any branch resolves to a non-object
+        // schema (e.g. a string-enum like ToolChoiceOptions), serde cannot
+        // deserialize it via an internally-tagged enum because there is no
+        // JSON object to read the tag from. Fall back to an untagged union
+        // so the scalar branch can still match.
+        if one_of_schemas
+            .iter()
+            .any(|s| !self.branch_resolves_to_object(s))
+        {
             return self.analyze_untagged_oneof_union(one_of_schemas, parent_name, dependencies);
         }
 
