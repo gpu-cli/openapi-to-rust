@@ -348,9 +348,8 @@ impl<'a> ServerCodegen<'a> {
         // need it.
         let stream_alias = if any_streaming {
             quote! {
-                /// Stream payload carried by `*Stream` variants. Build with
-                /// `Box::pin(your_stream)` where each yielded item is a
-                /// pre-constructed `axum::response::sse::Event`.
+                /// Stream payload carried by `*Stream` variants. Each
+                /// yielded item is a pre-built `axum::response::sse::Event`.
                 pub type ServerEventStream = ::std::pin::Pin<
                     Box<
                         dyn ::futures_core::Stream<
@@ -362,6 +361,23 @@ impl<'a> ServerCodegen<'a> {
                             + 'static,
                     >,
                 >;
+
+                /// Wrap any `Stream<Item = Result<Event, Infallible>>` in
+                /// a `Sse<ServerEventStream>` ready to drop into the
+                /// `OkStream` variant. Replaces the
+                /// `Sse::new(Box::pin(...))` dance.
+                pub fn sse_response<S>(stream: S) -> ::axum::response::sse::Sse<ServerEventStream>
+                where
+                    S: ::futures_core::Stream<
+                            Item = ::std::result::Result<
+                                ::axum::response::sse::Event,
+                                ::std::convert::Infallible,
+                            >,
+                        > + ::std::marker::Send
+                        + 'static,
+                {
+                    ::axum::response::sse::Sse::new(Box::pin(stream))
+                }
             }
         } else {
             quote! {}

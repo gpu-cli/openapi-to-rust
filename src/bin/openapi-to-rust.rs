@@ -86,6 +86,10 @@ enum ServerCommands {
         /// Print the proposed change without writing.
         #[arg(long)]
         dry_run: bool,
+        /// After updating the TOML, immediately run `generate` to
+        /// emit code for the new selectors.
+        #[arg(long)]
+        regenerate: bool,
     },
     /// Remove a selector entry from `[server].operations`.
     Remove {
@@ -277,6 +281,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         server_files.len(),
                         out.display()
                     );
+                    print_server_hint(&analysis, server_section);
                 }
             }
 
@@ -321,7 +326,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 config,
                 all_tag,
                 dry_run,
-            } => run_server_add(selector, spec, config, all_tag, dry_run),
+                regenerate,
+            } => run_server_add(selector, spec, config, all_tag, dry_run, regenerate),
             ServerCommands::Remove {
                 selector,
                 config,
@@ -395,6 +401,7 @@ fn run_server_add(
     config: PathBuf,
     all_tag: Option<String>,
     dry_run: bool,
+    regenerate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let spec_path = resolve_spec_path(spec, &config)?;
     let analysis = load_analysis(&spec_path)?;
@@ -455,12 +462,31 @@ fn run_server_add(
         }
     }
     if !dry_run && !added.is_empty() {
+        let next_step = if regenerate {
+            "Regenerating now..."
+        } else {
+            "Run `openapi-to-rust generate` to emit code."
+        };
         println!(
-            "\n✓ Added {} entr{} to {}. Run `openapi-to-rust generate` to emit code.",
+            "\n✓ Added {} entr{} to {}. {next_step}",
             added.len(),
             if added.len() == 1 { "y" } else { "ies" },
             config.display(),
         );
+        if regenerate {
+            // Re-exec ourselves in `generate` mode against the same
+            // config. We do this via the binary path (current_exe) so
+            // we pick up the same compiled artefact the user is using.
+            let exe = std::env::current_exe()?;
+            let status = std::process::Command::new(exe)
+                .arg("generate")
+                .arg("--config")
+                .arg(&config)
+                .status()?;
+            if !status.success() {
+                return Err(format!("regenerate failed with status {status}").into());
+            }
+        }
     }
     Ok(())
 }
@@ -510,6 +536,74 @@ fn print_add_summary(
         );
     }
     Ok(())
+}
+
+/// Surface a paste-ready impl skeleton at the end of `generate`.
+/// Reads the picked operations from the analysis to name the trait,
+/// method, and body type concretely. Goes to stderr so it doesn't
+/// pollute machine-readable stdout consumers.
+fn print_server_hint(
+    analysis: &openapi_to_rust::SchemaAnalysis,
+    server: &openapi_to_rust::config::ServerSection,
+) {
+    use heck::{ToPascalCase, ToSnakeCase};
+
+    // Pick the first resolved op to ground the skeleton in concrete
+    // names. Showing one is enough — users extrapolate to siblings.
+    let first_op_id = server.operations.first().and_then(|raw| {
+        Selector::parse(raw).ok().and_then(|sel| match sel {
+            Selector::OperationId(id) => Some(id),
+            Selector::MethodPath { method, path } => analysis
+                .operations
+                .values()
+                .find(|op| op.method == method && op.path == path)
+                .map(|op| op.operation_id.clone()),
+            Selector::Tag(t) => analysis
+                .operations
+                .values()
+                .find(|op| op.tags.iter().any(|tag| tag == &t))
+                .map(|op| op.operation_id.clone()),
+        })
+    });
+
+    let Some(first_op_id) = first_op_id else {
+        return;
+    };
+    let Some(op) = analysis.operations.get(&first_op_id) else {
+        return;
+    };
+    let method = op.operation_id.to_snake_case();
+    let response_ty = format!("{}Response", op.operation_id.to_pascal_case());
+    let body_param = match &op.request_body {
+        Some(rb) => match rb.schema_name() {
+            Some(name) => format!(", body: {name}"),
+            None => String::new(),
+        },
+        None => String::new(),
+    };
+    let tag = op.tags.first().cloned().unwrap_or_else(|| "Server".into());
+    let trait_name = format!("{}Api", tag.to_pascal_case());
+    let router_fn = format!("{}_router", trait_name.to_snake_case());
+
+    eprintln!();
+    eprintln!("📝 Next step — implement the trait:");
+    eprintln!();
+    eprintln!("   #[derive(Clone)]");
+    eprintln!("   pub struct AppState {{ /* state goes here */ }}");
+    eprintln!();
+    eprintln!("   #[axum::async_trait]");
+    eprintln!("   impl {trait_name} for AppState {{");
+    eprintln!("       async fn {method}(&self{body_param}) -> {response_ty} {{");
+    eprintln!("           todo!()");
+    eprintln!("       }}");
+    eprintln!("   }}");
+    eprintln!();
+    eprintln!("   // In main():");
+    eprintln!("   let app = {router_fn}(AppState {{ /* … */ }});");
+    eprintln!();
+    if op.supports_streaming {
+        eprintln!("   For streaming, return `{response_ty}::OkStream(sse_response(your_stream))`.");
+    }
 }
 
 fn run_server_remove(

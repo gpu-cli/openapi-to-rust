@@ -19,12 +19,11 @@
 
 pub mod gen;
 
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::Event;
 use futures_util::stream;
 use gen::CreateResponse;
-use gen::server::{CreateResponseResponse, ResponsesApi, ServerEventStream, responses_api_router};
+use gen::server::{CreateResponseResponse, ResponsesApi, responses_api_router, sse_response};
 use std::convert::Infallible;
-use std::time::Duration;
 
 #[derive(Clone)]
 struct AppState;
@@ -76,10 +75,10 @@ fn create_response_streaming() -> CreateResponseResponse {
         sse_event("response.output_text.delta", r#"{"delta":"world"}"#),
         sse_event("response.completed", r#"{"id":"resp_demo"}"#),
     ]);
-    let pinned: ServerEventStream = Box::pin(events);
-    CreateResponseResponse::OkStream(
-        Sse::new(pinned).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))),
-    )
+    // `sse_response` is the generated helper — wraps any
+    // `Stream<Item = Result<Event, Infallible>>` so the user
+    // doesn't have to import axum::Sse or `Box::pin` it manually.
+    CreateResponseResponse::OkStream(sse_response(events))
 }
 
 fn sse_event(name: &str, data: &str) -> Result<Event, Infallible> {

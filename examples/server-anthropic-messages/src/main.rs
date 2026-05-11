@@ -27,12 +27,11 @@
 
 pub mod gen;
 
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::Event;
 use futures_util::stream;
 use gen::CreateMessageParams;
-use gen::server::{MessagesPostResponse, ServerApi, ServerEventStream, server_api_router};
+use gen::server::{MessagesPostResponse, ServerApi, server_api_router, sse_response};
 use std::convert::Infallible;
-use std::time::Duration;
 
 #[derive(Clone)]
 struct AppState;
@@ -99,10 +98,7 @@ fn messages_streaming() -> MessagesPostResponse {
         sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
         sse_event("message_stop", r#"{"type":"message_stop"}"#),
     ]);
-    let pinned: ServerEventStream = Box::pin(events);
-    MessagesPostResponse::OkStream(
-        Sse::new(pinned).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))),
-    )
+    MessagesPostResponse::OkStream(sse_response(events))
 }
 
 fn sse_event(name: &str, data: &str) -> Result<Event, Infallible> {
