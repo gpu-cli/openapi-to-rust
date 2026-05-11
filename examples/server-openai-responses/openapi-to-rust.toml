@@ -8,4 +8,6 @@ enable_async_client = false
 
 [server]
 framework = "axum"
-operations = ["createResponse"]
+# createResponse exercises the body + SSE path; listInputItems
+# exercises path params + four query params (one of them an enum).
+operations = ["createResponse", "listInputItems"]

@@ -134,6 +134,14 @@ impl<'a> ServerCodegen<'a> {
             .iter()
             .map(|(tag, ops)| self.emit_router_for_trait(tag, ops))
             .collect();
+
+        // Per-op Query structs — one per op that has any query params.
+        let query_structs: Vec<TokenStream> = groups
+            .values()
+            .flatten()
+            .filter_map(|op| self.emit_query_struct(op))
+            .collect();
+
         quote! {
             //! Router factories — one per trait. Each takes any
             //! `T: <TraitName> + Clone + Send + Sync + 'static` and
@@ -141,8 +149,14 @@ impl<'a> ServerCodegen<'a> {
 
             use super::api::*;
             use super::errors::*;
+            // Pull schemas directly from the types module (always a
+            // sibling of mod.rs). Doesn't rely on the parent module
+            // re-exporting types::*, so users can mount the generated
+            // tree at any path without rewriting these imports.
             #[allow(unused_imports)]
-            use super::super::*;
+            use super::super::types::*;
+
+            #(#query_structs)*
 
             #(#factories)*
         }
@@ -220,9 +234,45 @@ impl<'a> ServerCodegen<'a> {
             }
         }
 
-        // Query/header parameters are dropped from the trait
-        // signature in this slice (see emit_method_sig); the next
-        // slice swaps them for typed axum extractors.
+        // Query parameters — extract via a per-op `<Op>Query` struct
+        // (emitted in the same router.rs above). Each query param
+        // appears in the trait method as `Option<T>`.
+        let query_params: Vec<&_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == "query")
+            .collect();
+        if !query_params.is_empty() {
+            let query_ident = format_ident!("{}Query", op.operation_id.to_pascal_case());
+            extractors.push(quote! {
+                ::axum::extract::Query(__q): ::axum::extract::Query<#query_ident>
+            });
+            for p in &query_params {
+                let f = format_ident!("{}", p.name.to_snake_case());
+                call_args.push(quote! { __q.#f });
+            }
+        }
+
+        // Header parameters — extract via HeaderMap and read each
+        // header by name. Surface as Option<String> regardless of
+        // declared type (typed conversions can be re-added later).
+        let header_params: Vec<&_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == "header")
+            .collect();
+        if !header_params.is_empty() {
+            extractors.push(quote! { __headers: ::axum::http::HeaderMap });
+            for p in &header_params {
+                let wire = p.name.as_str();
+                call_args.push(quote! {
+                    __headers
+                        .get(#wire)
+                        .and_then(|v| v.to_str().ok())
+                        .map(::std::string::String::from)
+                });
+            }
+        }
 
         // Body
         let body_ty_opt = body_type(op);
@@ -266,6 +316,24 @@ impl<'a> ServerCodegen<'a> {
             .iter()
             .map(|(tag, ops)| self.emit_trait(tag, ops))
             .collect();
+
+        // Inline string enums declared on parameters get synthetic
+        // type names (e.g. `ListInputItemsOrder`). The analyzer
+        // surfaces enum_values; we emit the enum here so the trait
+        // signature compiles. Dedup by name in case two ops in the
+        // same picked set share the same synthetic name.
+        let mut emitted: std::collections::BTreeSet<String> = Default::default();
+        let mut param_enums: Vec<TokenStream> = Vec::new();
+        for op in groups.values().flatten() {
+            for p in &op.parameters {
+                if let Some(values) = &p.enum_values {
+                    if emitted.insert(p.rust_type.clone()) {
+                        param_enums.push(emit_param_enum(&p.rust_type, values));
+                    }
+                }
+            }
+        }
+
         quote! {
             //! Per-tag traits. Implement one of these on your own
             //! struct; the router (P5) wires it into axum.
@@ -273,12 +341,14 @@ impl<'a> ServerCodegen<'a> {
             #![allow(clippy::too_many_arguments)]
 
             use super::errors::*;
-            // Pull schemas (request/response types) in from the parent
-            // generated module — types live in `super::types::*` but
-            // the parent module re-exports them, so `super::super::*`
-            // is the canonical path here.
+            // Schemas live in `<parent>/types.rs`. Reaching them via
+            // `super::super::types::*` instead of a glob on the
+            // parent module keeps these imports stable regardless of
+            // how the user mounts the generated tree.
             #[allow(unused_imports)]
-            use super::super::*;
+            use super::super::types::*;
+
+            #(#param_enums)*
 
             #(#traits)*
         }
@@ -301,16 +371,38 @@ impl<'a> ServerCodegen<'a> {
         let name = format_ident!("{}", op.operation_id.to_snake_case());
         let response_ty = format_ident!("{}Response", op.operation_id.to_pascal_case());
 
-        // Path params first (in spec order), then body.
-        // Query and header params are deferred to the next slice
-        // (typed Axum extractors). Skipping them here keeps the trait
-        // signature stable and the canonical-case codegen clean.
+        // Order: path → query → header → body. Required params keep
+        // their declared rust_type; optional params wrap in Option<…>.
+        // This mirrors what the router handler extracts so positional
+        // ordering matches the call site exactly.
         let mut params: Vec<TokenStream> = Vec::new();
         for p in &op.parameters {
             if p.location == "path" {
                 let ident = format_ident!("{}", p.name.to_snake_case());
                 let ty = parse_type(&p.rust_type);
                 params.push(quote! { #ident: #ty });
+            }
+        }
+        for p in &op.parameters {
+            if p.location == "query" {
+                let ident = format_ident!("{}", p.name.to_snake_case());
+                let ty = parse_type(&p.rust_type);
+                // All query params are Option<T> on the trait — the
+                // typed Query struct generated alongside the trait
+                // populates None for absent keys regardless of the
+                // spec's `required: true`. Validation moves to the
+                // user's impl (return BadRequest if missing).
+                params.push(quote! { #ident: ::std::option::Option<#ty> });
+            }
+        }
+        for p in &op.parameters {
+            if p.location == "header" {
+                let ident = format_ident!("{}", header_param_ident(&p.name));
+                // Headers are surfaced as Option<String>; required
+                // headers are still Option here for the same reason
+                // as query params (deserialization vs. trait
+                // signature stability).
+                params.push(quote! { #ident: ::std::option::Option<String> });
             }
         }
         if let Some(body) = body_type(op) {
@@ -335,6 +427,49 @@ impl<'a> ServerCodegen<'a> {
             #[doc = #route_doc]
             async fn #name(&self, #(#params),*) -> #response_ty;
         }
+    }
+
+    /// Per-op `<Op>Query` struct emitted into router.rs when the op
+    /// has any query parameters. Drives axum's `Query<T>` extractor.
+    fn emit_query_struct(&self, op: &OperationInfo) -> Option<TokenStream> {
+        let query_params: Vec<&_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == "query")
+            .collect();
+        if query_params.is_empty() {
+            return None;
+        }
+        let ident = format_ident!("{}Query", op.operation_id.to_pascal_case());
+        let fields: Vec<TokenStream> = query_params
+            .iter()
+            .map(|p| {
+                let f_ident = format_ident!("{}", p.name.to_snake_case());
+                let ty = parse_type(&p.rust_type);
+                let serde_rename = if p.name.to_snake_case() == p.name {
+                    quote! {}
+                } else {
+                    let wire = p.name.as_str();
+                    quote! { #[serde(rename = #wire)] }
+                };
+                quote! {
+                    #serde_rename
+                    #[serde(default)]
+                    pub #f_ident: ::std::option::Option<#ty>
+                }
+            })
+            .collect();
+        let doc = format!(
+            " Query parameters for `{} {}` (operationId `{}`).",
+            op.method, op.path, op.operation_id
+        );
+        Some(quote! {
+            #[doc = #doc]
+            #[derive(Debug, Default, ::serde::Deserialize)]
+            pub struct #ident {
+                #(#fields),*
+            }
+        })
     }
 
     fn emit_errors(&self, ops: &[&OperationInfo]) -> TokenStream {
@@ -401,12 +536,12 @@ impl<'a> ServerCodegen<'a> {
                 response::IntoResponse,
                 Json,
             };
-            // Pull schemas (request/response types) in from the parent
-            // generated module — types live in `super::types::*` but
-            // the parent module re-exports them, so `super::super::*`
-            // is the canonical path here.
+            // Schemas live in `<parent>/types.rs`. Reaching them via
+            // `super::super::types::*` instead of a glob on the
+            // parent module keeps these imports stable regardless of
+            // how the user mounts the generated tree.
             #[allow(unused_imports)]
-            use super::super::*;
+            use super::super::types::*;
 
             #stream_alias
 
@@ -472,6 +607,53 @@ impl<'a> ServerCodegen<'a> {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Convert a wire-level header name (e.g. `anthropic-version`,
+/// `X-Request-Id`) to a Rust identifier (`anthropic_version`,
+/// `x_request_id`). Snake_case lowercases + replaces hyphens.
+fn header_param_ident(name: &str) -> String {
+    name.replace('-', "_").to_snake_case()
+}
+
+/// Emit a string-enum type for a parameter whose inline schema
+/// declared `enum: [...]`. The analyzer sets `rust_type` to a
+/// synthetic name (`{OpId}{Param}` in PascalCase) and surfaces the
+/// values; the codegen layer is what actually writes the enum.
+fn emit_param_enum(name: &str, values: &[String]) -> TokenStream {
+    let enum_ident = format_ident!("{}", name);
+    let variants: Vec<TokenStream> = values
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| {
+            let pascal = raw.to_pascal_case();
+            // Empty-string or pure-symbol values can collapse to ""
+            // after PascalCase; backstop with a positional name so
+            // the enum still compiles.
+            let v_name = if pascal.is_empty() {
+                format!("Variant{i}")
+            } else {
+                pascal
+            };
+            let v_ident = format_ident!("{}", v_name);
+            let default_marker = if i == 0 {
+                quote! { #[default] }
+            } else {
+                quote! {}
+            };
+            quote! {
+                #default_marker
+                #[serde(rename = #raw)]
+                #v_ident
+            }
+        })
+        .collect();
+    quote! {
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Deserialize, ::serde::Serialize, Default)]
+        pub enum #enum_ident {
+            #(#variants),*
         }
     }
 }

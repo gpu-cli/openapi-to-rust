@@ -182,6 +182,12 @@ pub struct GeneratorSection {
     #[validate(custom(function = "validate_spec_path_exists"))]
     pub spec_path: PathBuf,
     pub output_dir: PathBuf,
+    /// Informational label, not a directory or module path. The
+    /// generator writes the same files (mod.rs, types.rs, server/*)
+    /// regardless of this value. It shows up only in the generated
+    /// mod.rs header doc comment as a hint and is used by the
+    /// streaming codegen for naming the SSE client module. You
+    /// mount the tree at whatever Rust module path you prefer.
     #[validate(length(min = 1, message = "module_name cannot be empty"))]
     pub module_name: String,
     /// Schema extension files to merge into the main spec before codegen.

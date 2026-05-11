@@ -101,7 +101,12 @@ pub struct GeneratorConfig {
     pub spec_path: PathBuf,
     /// Output directory for generated code (e.g., "src/gen")
     pub output_dir: PathBuf,
-    /// Name of the generated module
+    /// Informational label for the generated module. Does NOT pick
+    /// the on-disk directory (that's `output_dir`) or the Rust module
+    /// path the user mounts the tree at — both of those are the
+    /// user's choice. The label is surfaced in the generated mod.rs
+    /// header as a hint and is otherwise used only by the streaming
+    /// codegen for naming the SSE client module.
     pub module_name: String,
     /// Enable SSE streaming client generation
     pub enable_sse_client: bool,
@@ -743,20 +748,34 @@ impl CodeGenerator {
             }
         }
 
+        // `module_name` is a configurable *label* — it does NOT pick
+        // the on-disk directory (that's `output_dir`) and it does NOT
+        // determine the Rust module path the user mounts this tree
+        // at. Surfacing it in the header doc comment is the most
+        // honest place: a hint to the user about what name was
+        // configured and how to mount it.
+        let mount_hint = format!(
+            "//! Configured `module_name` = `{name}`. Mount this tree under your\n\
+             //! preferred path, e.g. `pub mod {name};` in your crate root.\n",
+            name = self.config.module_name,
+        );
+
         let content = format!(
             r#"//! Generated API modules
 //!
 //! This module exports all generated API types and clients.
 //! Do not edit manually - regenerate using the appropriate script.
-
+//!
+{mount_hint}
 #![allow(unused_imports)]
 
-{}
+{decls}
 
-{}
+{uses}
 "#,
-            module_declarations.join("\n"),
-            pub_uses.join("\n")
+            mount_hint = mount_hint,
+            decls = module_declarations.join("\n"),
+            uses = pub_uses.join("\n"),
         );
 
         Ok(content)

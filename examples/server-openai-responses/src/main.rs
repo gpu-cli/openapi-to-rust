@@ -22,7 +22,10 @@ pub mod gen;
 use axum::response::sse::Event;
 use futures_util::stream;
 use gen::CreateResponse;
-use gen::server::{CreateResponseResponse, ResponsesApi, responses_api_router, sse_response};
+use gen::server::{
+    CreateResponseResponse, ListInputItemsResponse, ResponsesApi, responses_api_router,
+    sse_response,
+};
 use std::convert::Infallible;
 
 #[derive(Clone)]
@@ -36,6 +39,29 @@ impl ResponsesApi for AppState {
         } else {
             create_response_unary(body)
         }
+    }
+
+    async fn list_input_items(
+        &self,
+        response_id: String,
+        limit: Option<i64>,
+        order: Option<gen::ListInputItemsOrder>,
+        _after: Option<String>,
+        _include: Option<String>,
+    ) -> ListInputItemsResponse {
+        // Echo the params back in a minimal valid ResponseItemList so
+        // the test can introspect what the handler saw. Real services
+        // would hit storage here.
+        let _ = (response_id, limit, order);
+        let body: gen::ResponseItemList = serde_json::from_value(serde_json::json!({
+            "data": [],
+            "object": "list",
+            "first_id": "",
+            "last_id": "",
+            "has_more": false,
+        }))
+        .expect("ResponseItemList must deserialize");
+        ListInputItemsResponse::Ok(body)
     }
 }
 
@@ -120,5 +146,13 @@ mod tests {
     async fn stream_path_returns_ok_stream_variant() {
         let r = AppState.create_response(make_body(Some(true))).await;
         assert!(matches!(r, CreateResponseResponse::OkStream(_)));
+    }
+
+    #[tokio::test]
+    async fn list_input_items_accepts_path_and_query_params() {
+        let r = AppState
+            .list_input_items("resp_abc".into(), Some(50), None, None, None)
+            .await;
+        assert!(matches!(r, ListInputItemsResponse::Ok(_)));
     }
 }

@@ -38,7 +38,11 @@ struct AppState;
 
 #[axum::async_trait]
 impl ServerApi for AppState {
-    async fn messages_post(&self, body: CreateMessageParams) -> MessagesPostResponse {
+    async fn messages_post(
+        &self,
+        _anthropic_version: Option<String>,
+        body: CreateMessageParams,
+    ) -> MessagesPostResponse {
         if body.stream == Some(true) {
             messages_streaming()
         } else {
@@ -131,13 +135,13 @@ mod tests {
 
     #[tokio::test]
     async fn unary_path_returns_ok_variant() {
-        let r = AppState.messages_post(make_body(None)).await;
+        let r = AppState.messages_post(None, make_body(None)).await;
         assert!(matches!(r, MessagesPostResponse::Ok(_)));
     }
 
     #[tokio::test]
     async fn stream_path_returns_ok_stream_variant() {
-        let r = AppState.messages_post(make_body(Some(true))).await;
+        let r = AppState.messages_post(None, make_body(Some(true))).await;
         assert!(matches!(r, MessagesPostResponse::OkStream(_)));
     }
 }
