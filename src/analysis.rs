@@ -311,6 +311,10 @@ pub struct OperationInfo {
     pub supports_streaming: bool,
     /// Stream parameter name if applicable
     pub stream_parameter: Option<String>,
+    /// Tags declared on the operation. Empty when the spec sets none.
+    /// Used by the server codegen selector grammar (e.g. `tag:Chat`)
+    /// and by `openapi-to-rust server list` for grouping.
+    pub tags: Vec<String>,
 }
 
 /// Content type and schema for a request body
@@ -4232,6 +4236,7 @@ impl SchemaAnalyzer {
             parameters: Vec::new(),
             supports_streaming: false, // Will be determined by StreamingConfig, not spec
             stream_parameter: None,    // Will be determined by StreamingConfig, not spec
+            tags: operation.tags.clone().unwrap_or_default(),
         };
 
         // Extract request body schema with content-type awareness

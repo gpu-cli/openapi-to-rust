@@ -189,7 +189,13 @@ Reuses the reachability pass that the client generator already has.
 3. `server add` / `server remove` — TOML edits.
 4. Trait + response-enum emitter.
 5. Router factory + extractors + reachability pruning.
-6. Snapshot tests against `specs/openai.yaml`, canonical case
-   `createChatCompletion`.
+6. Snapshot tests against the two canonical specs:
+   - OpenAI Responses API — `createResponse` in `specs/openai.yaml`
+     (POST `/v1/responses`, SSE via `stream: true`)
+   - Anthropic Messages API — `messages_post` in `specs/anthropic.yaml`
+     (POST `/v1/messages`, SSE via `stream: true`)
+
+   Both must work end-to-end. They drive everything: streaming, complex
+   request unions, header params (`anthropic-version`), 4XX response groups.
 
 Each phase ships standalone and is reviewable independently.

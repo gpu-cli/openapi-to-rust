@@ -22,3 +22,4 @@ getItem:
       rust_ident: item_id
   supports_streaming: false
   stream_parameter: ~
+  tags: []

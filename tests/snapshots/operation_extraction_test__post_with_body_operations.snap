@@ -17,3 +17,4 @@ createItem:
   parameters: []
   supports_streaming: false
   stream_parameter: ~
+  tags: []

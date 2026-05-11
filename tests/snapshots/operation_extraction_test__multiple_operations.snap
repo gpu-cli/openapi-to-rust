@@ -21,6 +21,7 @@ deleteItem:
       rust_ident: id
   supports_streaming: false
   stream_parameter: ~
+  tags: []
 duplicateItem:
   operation_id: duplicateItem
   method: POST
@@ -41,6 +42,7 @@ duplicateItem:
       rust_ident: id
   supports_streaming: false
   stream_parameter: ~
+  tags: []
 getItem:
   operation_id: getItem
   method: GET
@@ -61,6 +63,7 @@ getItem:
       rust_ident: id
   supports_streaming: false
   stream_parameter: ~
+  tags: []
 updateItem:
   operation_id: updateItem
   method: PUT
@@ -83,3 +86,4 @@ updateItem:
       rust_ident: id
   supports_streaming: false
   stream_parameter: ~
+  tags: []

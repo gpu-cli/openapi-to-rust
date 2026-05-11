@@ -1,5 +1,9 @@
 use clap::{Parser, Subcommand};
 use openapi_to_rust::cli::{json_from_str_lossy, yaml_to_json_value};
+use openapi_to_rust::server::{
+    OperationIndex,
+    list::{ListFilter, ListOutput, render as render_list},
+};
 use openapi_to_rust::{CodeGenerator, ConfigFile, SchemaAnalyzer};
 use std::path::PathBuf;
 
@@ -30,6 +34,37 @@ enum Commands {
         /// Path to configuration file (openapi-to-rust.toml)
         #[arg(short, long, default_value = "openapi-to-rust.toml")]
         config: PathBuf,
+    },
+    /// Server codegen commands (opt-in Axum scaffolding).
+    Server {
+        #[command(subcommand)]
+        action: ServerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommands {
+    /// List every operation in a spec. Read-only.
+    List {
+        /// Path to the OpenAPI spec (.yaml/.yml/.json). If omitted,
+        /// the spec_path from openapi-to-rust.toml is used.
+        #[arg(long)]
+        spec: Option<PathBuf>,
+        /// Path to TOML config to read spec_path from when --spec is absent.
+        #[arg(long, default_value = "openapi-to-rust.toml")]
+        config: PathBuf,
+        /// Substring match against tag names (case insensitive).
+        #[arg(long)]
+        tag: Option<String>,
+        /// Exact HTTP method filter (GET, POST, ...; case insensitive).
+        #[arg(long)]
+        method: Option<String>,
+        /// Substring match against operationId and path.
+        #[arg(long)]
+        grep: Option<String>,
+        /// Emit JSON instead of an aligned table.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -190,5 +225,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(())
         }
+        Commands::Server { action } => match action {
+            ServerCommands::List {
+                spec,
+                config,
+                tag,
+                method,
+                grep,
+                json,
+            } => run_server_list(spec, config, tag, method, grep, json),
+        },
     }
+}
+
+fn run_server_list(
+    spec: Option<PathBuf>,
+    config: PathBuf,
+    tag: Option<String>,
+    method: Option<String>,
+    grep: Option<String>,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spec_path = match spec {
+        Some(p) => p,
+        None => {
+            let cf = ConfigFile::load(&config).map_err(|e| {
+                format!(
+                    "no --spec provided and failed to load {}: {}",
+                    config.display(),
+                    e
+                )
+            })?;
+            cf.into_generator_config().spec_path
+        }
+    };
+
+    let spec_content = std::fs::read_to_string(&spec_path)?;
+    let spec_value: serde_json::Value = if spec_path.extension()
+        == Some(std::ffi::OsStr::new("yaml"))
+        || spec_path.extension() == Some(std::ffi::OsStr::new("yml"))
+    {
+        yaml_to_json_value(&spec_content)?
+    } else {
+        json_from_str_lossy(&spec_content)?
+    };
+
+    let mut analyzer = SchemaAnalyzer::new(spec_value)?;
+    let analysis = analyzer.analyze()?;
+    let index = OperationIndex::from_analysis(&analysis);
+
+    let filter = ListFilter { tag, method, grep };
+    let output = if json {
+        ListOutput::Json
+    } else {
+        ListOutput::Table
+    };
+    let (body, _count) = render_list(&index, &filter, output);
+    print!("{body}");
+    Ok(())
 }

@@ -10,6 +10,7 @@ pub mod http_error;
 pub mod openapi;
 pub mod patterns;
 pub mod registry_generator;
+pub mod server;
 pub mod streaming;
 pub mod type_mapping;
 

@@ -15,6 +15,7 @@ getV0Servers:
   parameters: []
   supports_streaming: false
   stream_parameter: ~
+  tags: []
 getV0ServersServerId:
   operation_id: getV0ServersServerId
   method: GET
@@ -35,3 +36,4 @@ getV0ServersServerId:
       rust_ident: server_id
   supports_streaming: false
   stream_parameter: ~
+  tags: []

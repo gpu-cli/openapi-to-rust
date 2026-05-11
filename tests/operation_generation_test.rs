@@ -53,6 +53,7 @@ fn test_generate_get_operation() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -92,6 +93,7 @@ fn test_generate_post_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -134,6 +136,7 @@ fn test_generate_put_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -166,6 +169,7 @@ fn test_generate_delete_operation() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -201,6 +205,7 @@ fn test_generate_patch_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -238,6 +243,7 @@ fn test_method_name_from_operation_id() {
             request_body_required: false,
             supports_streaming: false,
             stream_parameter: None,
+            tags: Vec::new(),
         };
 
         let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -274,6 +280,7 @@ fn test_method_with_response_type() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -304,6 +311,7 @@ fn test_method_without_response_type() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -346,6 +354,7 @@ fn test_error_handling_generation() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -379,6 +388,7 @@ fn test_url_construction() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis1 = create_test_analysis_with_operations(vec![operation1]);
@@ -402,6 +412,7 @@ fn test_url_construction() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis2 = create_test_analysis_with_operations(vec![operation2]);
@@ -430,6 +441,7 @@ fn test_bearer_auth_injection() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -460,6 +472,7 @@ fn test_custom_headers_injection() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -493,6 +506,7 @@ fn test_multiple_operations() {
             request_body_required: false,
             supports_streaming: false,
             stream_parameter: None,
+            tags: Vec::new(),
         },
         OperationInfo {
             operation_id: "createUser".to_string(),
@@ -512,6 +526,7 @@ fn test_multiple_operations() {
             request_body_required: true,
             supports_streaming: false,
             stream_parameter: None,
+            tags: Vec::new(),
         },
         OperationInfo {
             operation_id: "deleteUser".to_string(),
@@ -525,6 +540,7 @@ fn test_multiple_operations() {
             request_body_required: false,
             supports_streaming: false,
             stream_parameter: None,
+            tags: Vec::new(),
         },
     ];
 
@@ -560,6 +576,7 @@ fn test_doc_comment_generation() {
         request_body_required: false,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -593,6 +610,7 @@ fn test_generate_form_urlencoded_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -624,6 +642,7 @@ fn test_generate_multipart_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -653,6 +672,7 @@ fn test_generate_octet_stream_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -684,6 +704,7 @@ fn test_generate_text_plain_operation() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![operation]);
@@ -722,6 +743,7 @@ fn test_request_body_schema_name_pascal_cased() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let form_op = OperationInfo {
@@ -738,6 +760,7 @@ fn test_request_body_schema_name_pascal_cased() {
         request_body_required: true,
         supports_streaming: false,
         stream_parameter: None,
+        tags: Vec::new(),
     };
 
     let analysis = create_test_analysis_with_operations(vec![json_op, form_op]);
