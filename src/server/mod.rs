@@ -8,6 +8,7 @@
 
 use crate::analysis::{OperationInfo, SchemaAnalysis};
 
+pub mod codegen;
 pub mod edit;
 pub mod list;
 pub mod selector;

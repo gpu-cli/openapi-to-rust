@@ -1,0 +1,14 @@
+[generator]
+spec_path = "../../specs/anthropic.yaml"
+output_dir = "src/gen"
+module_name = "anthropic"
+# Overlay declares text/event-stream on the messages_post 200 response,
+# so the generator emits an OkStream variant alongside Ok(Message).
+schema_extensions = ["sse-overlay.json"]
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+operations = ["messages_post"]

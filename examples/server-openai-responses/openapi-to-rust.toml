@@ -1,0 +1,11 @@
+[generator]
+spec_path = "../../specs/openai.yaml"
+output_dir = "src/gen"
+module_name = "openai"
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+operations = ["createResponse"]
