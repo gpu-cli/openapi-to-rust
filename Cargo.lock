@@ -957,6 +957,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
  "url",
  "validator",
 ]

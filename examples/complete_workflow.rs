@@ -315,6 +315,7 @@ fn demonstrate_rust_api(
         enable_registry: false,
         registry_only: false,
         types: openapi_to_rust::TypeMappingConfig::default(),
+        server: None,
     };
 
     // Generate code

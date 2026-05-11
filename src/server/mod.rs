@@ -8,7 +8,11 @@
 
 use crate::analysis::{OperationInfo, SchemaAnalysis};
 
+pub mod edit;
 pub mod list;
+pub mod selector;
+
+pub use selector::{Resolution, Selector, SelectorParseError, SelectorResolveError, resolve};
 
 /// Read-only snapshot of every operation in a spec, in the order the
 /// analyzer surfaced them. Built once per command invocation.

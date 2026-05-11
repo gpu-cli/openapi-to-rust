@@ -156,6 +156,11 @@ pub struct ConfigFile {
     #[serde(default)]
     #[validate(nested)]
     pub streaming: Option<StreamingSection>,
+    /// Server codegen opt-in. Absent or empty operations list ⇒ no
+    /// server code emitted. See `docs/planning/server-codegen.md`.
+    #[serde(default)]
+    #[validate(nested)]
+    pub server: Option<ServerSection>,
     #[serde(default)]
     pub nullable_overrides: BTreeMap<String, bool>,
     /// Force a closed string-enum schema to be rendered as an extensible enum
@@ -199,6 +204,37 @@ pub struct FeaturesSection {
     /// Generate only the operation registry (skip types, client, streaming)
     #[serde(default)]
     pub registry_only: bool,
+}
+
+/// Opt-in server codegen scope.
+///
+/// `operations` accepts three selector forms, parsed by
+/// [`crate::server::Selector::parse`]:
+///   - `operationId` (recommended)
+///   - `METHOD /path`
+///   - `tag:<name>`
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+pub struct ServerSection {
+    /// Target framework. Only `"axum"` is currently supported.
+    #[validate(custom(function = "validate_server_framework"))]
+    pub framework: String,
+    /// Selectors picking which operations get server scaffolding.
+    /// Empty ⇒ section is a no-op.
+    #[serde(default)]
+    pub operations: Vec<String>,
+}
+
+impl ServerSection {
+    /// Parse each `operations` entry into a [`crate::server::Selector`].
+    /// Returns the first parse error encountered.
+    pub fn parsed_selectors(
+        &self,
+    ) -> Result<Vec<crate::server::Selector>, crate::server::SelectorParseError> {
+        self.operations
+            .iter()
+            .map(|s| crate::server::Selector::parse(s))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Validate)]
@@ -327,6 +363,18 @@ fn validate_spec_path_exists(path: &Path) -> Result<(), validator::ValidationErr
         return Err(error);
     }
     Ok(())
+}
+
+fn validate_server_framework(framework: &str) -> Result<(), validator::ValidationError> {
+    if framework == "axum" {
+        Ok(())
+    } else {
+        let mut err = validator::ValidationError::new("invalid_framework");
+        err.message = Some(
+            format!("framework must be \"axum\" (got \"{framework}\"); other frameworks are not supported yet").into(),
+        );
+        Err(err)
+    }
 }
 
 fn validate_auth_type(auth_type: &str) -> Result<(), validator::ValidationError> {
@@ -562,6 +610,7 @@ impl ConfigFile {
             enable_registry: self.features.enable_registry,
             registry_only: self.features.registry_only,
             types: self.types,
+            server: self.server,
         }
     }
 }

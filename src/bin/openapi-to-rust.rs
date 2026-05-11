@@ -1,8 +1,10 @@
 use clap::{Parser, Subcommand};
 use openapi_to_rust::cli::{json_from_str_lossy, yaml_to_json_value};
 use openapi_to_rust::server::{
-    OperationIndex,
+    OperationIndex, Selector,
+    edit::Editor as ServerEditor,
     list::{ListFilter, ListOutput, render as render_list},
+    resolve as resolve_selectors,
 };
 use openapi_to_rust::{CodeGenerator, ConfigFile, SchemaAnalyzer};
 use std::path::PathBuf;
@@ -66,12 +68,51 @@ enum ServerCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Add a selector to `[server].operations` in the TOML config.
+    /// Does not regenerate unless `--regenerate` is passed.
+    Add {
+        /// Selector: `operationId` | `METHOD /path` | `tag:<name>`.
+        selector: Option<String>,
+        /// Path to the OpenAPI spec. Defaults to the one in the config.
+        #[arg(long)]
+        spec: Option<PathBuf>,
+        /// Path to the TOML config to edit.
+        #[arg(long, default_value = "openapi-to-rust.toml")]
+        config: PathBuf,
+        /// Expand a tag and add each operationId individually
+        /// (instead of adding a `tag:` selector).
+        #[arg(long)]
+        all_tag: Option<String>,
+        /// Print the proposed change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove a selector entry from `[server].operations`.
+    Remove {
+        /// Selector to remove. Matched verbatim against the TOML list.
+        selector: String,
+        /// Path to the TOML config to edit.
+        #[arg(long, default_value = "openapi-to-rust.toml")]
+        config: PathBuf,
+        /// Print the proposed change without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let cli = Cli::parse();
+    if let Err(e) = run(cli).await {
+        // Use Display, not Debug, so thiserror messages render with
+        // their fuzzy-match suggestions (`Did you mean ...?`) instead
+        // of as raw enum debug output.
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
 
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Validate { config } => {
             println!("📖 Validating configuration from: {}", config.display());
@@ -234,8 +275,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 grep,
                 json,
             } => run_server_list(spec, config, tag, method, grep, json),
+            ServerCommands::Add {
+                selector,
+                spec,
+                config,
+                all_tag,
+                dry_run,
+            } => run_server_add(selector, spec, config, all_tag, dry_run),
+            ServerCommands::Remove {
+                selector,
+                config,
+                dry_run,
+            } => run_server_remove(selector, config, dry_run),
         },
     }
+}
+
+fn resolve_spec_path(
+    spec: Option<PathBuf>,
+    config: &std::path::Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    match spec {
+        Some(p) => Ok(p),
+        None => {
+            let cf = ConfigFile::load(config).map_err(|e| {
+                format!(
+                    "no --spec provided and failed to load {}: {}",
+                    config.display(),
+                    e
+                )
+            })?;
+            Ok(cf.into_generator_config().spec_path)
+        }
+    }
+}
+
+fn load_analysis(
+    spec_path: &std::path::Path,
+) -> Result<openapi_to_rust::SchemaAnalysis, Box<dyn std::error::Error>> {
+    let spec_content = std::fs::read_to_string(spec_path)?;
+    let spec_value: serde_json::Value = if spec_path.extension()
+        == Some(std::ffi::OsStr::new("yaml"))
+        || spec_path.extension() == Some(std::ffi::OsStr::new("yml"))
+    {
+        yaml_to_json_value(&spec_content)?
+    } else {
+        json_from_str_lossy(&spec_content)?
+    };
+    let mut analyzer = SchemaAnalyzer::new(spec_value)?;
+    Ok(analyzer.analyze()?)
 }
 
 fn run_server_list(
@@ -246,32 +334,8 @@ fn run_server_list(
     grep: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let spec_path = match spec {
-        Some(p) => p,
-        None => {
-            let cf = ConfigFile::load(&config).map_err(|e| {
-                format!(
-                    "no --spec provided and failed to load {}: {}",
-                    config.display(),
-                    e
-                )
-            })?;
-            cf.into_generator_config().spec_path
-        }
-    };
-
-    let spec_content = std::fs::read_to_string(&spec_path)?;
-    let spec_value: serde_json::Value = if spec_path.extension()
-        == Some(std::ffi::OsStr::new("yaml"))
-        || spec_path.extension() == Some(std::ffi::OsStr::new("yml"))
-    {
-        yaml_to_json_value(&spec_content)?
-    } else {
-        json_from_str_lossy(&spec_content)?
-    };
-
-    let mut analyzer = SchemaAnalyzer::new(spec_value)?;
-    let analysis = analyzer.analyze()?;
+    let spec_path = resolve_spec_path(spec, &config)?;
+    let analysis = load_analysis(&spec_path)?;
     let index = OperationIndex::from_analysis(&analysis);
 
     let filter = ListFilter { tag, method, grep };
@@ -282,5 +346,153 @@ fn run_server_list(
     };
     let (body, _count) = render_list(&index, &filter, output);
     print!("{body}");
+    Ok(())
+}
+
+fn run_server_add(
+    selector: Option<String>,
+    spec: Option<PathBuf>,
+    config: PathBuf,
+    all_tag: Option<String>,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let spec_path = resolve_spec_path(spec, &config)?;
+    let analysis = load_analysis(&spec_path)?;
+    let index = OperationIndex::from_analysis(&analysis);
+
+    // Determine which selectors to add. --all-tag expands; otherwise
+    // the single positional selector is added verbatim.
+    let to_add: Vec<String> = match (&selector, &all_tag) {
+        (Some(_), Some(_)) => {
+            return Err("provide either <selector> or --all-tag, not both".into());
+        }
+        (None, None) => {
+            return Err("missing argument: provide <selector> or --all-tag <name>".into());
+        }
+        (Some(s), None) => vec![s.clone()],
+        (None, Some(tag)) => {
+            let sel = Selector::Tag(tag.clone());
+            let res = resolve_selectors(&[sel], &index)?;
+            res.operations
+                .iter()
+                .map(|op| op.operation_id.clone())
+                .collect()
+        }
+    };
+
+    // Validate every selector resolves before touching the file.
+    for s in &to_add {
+        let parsed = Selector::parse(s)?;
+        let _ = resolve_selectors(&[parsed], &index)?;
+    }
+
+    let mut editor = ServerEditor::open(&config)?;
+    let mut added: Vec<String> = Vec::new();
+    let mut already_present: Vec<String> = Vec::new();
+    for s in &to_add {
+        if editor.add(s)? {
+            added.push(s.clone());
+        } else {
+            already_present.push(s.clone());
+        }
+    }
+
+    if dry_run {
+        println!("--- dry-run: proposed config ---");
+        print!("{}", editor.rendered());
+        println!("--- end ---");
+    } else {
+        editor.save()?;
+    }
+
+    // Summary
+    for s in &added {
+        print_add_summary(s, &analysis, &index)?;
+    }
+    if !already_present.is_empty() {
+        for s in &already_present {
+            println!("• `{s}` already in [server].operations — no change.");
+        }
+    }
+    if !dry_run && !added.is_empty() {
+        println!(
+            "\n✓ Added {} entr{} to {}. Run `openapi-to-rust generate` to emit code.",
+            added.len(),
+            if added.len() == 1 { "y" } else { "ies" },
+            config.display(),
+        );
+    }
+    Ok(())
+}
+
+fn print_add_summary(
+    selector_str: &str,
+    analysis: &openapi_to_rust::SchemaAnalysis,
+    index: &OperationIndex,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parsed = Selector::parse(selector_str)?;
+    let res = resolve_selectors(&[parsed], index)?;
+    for op in &res.operations {
+        let info = analysis
+            .operations
+            .get(&op.operation_id)
+            .ok_or("operation found in index but missing from analysis")?;
+        let tag_part = if op.tags.is_empty() {
+            "<untagged>".to_string()
+        } else {
+            op.tags.join(",")
+        };
+        println!(
+            "\n+ `{}`\n  {} {}  (tag: {})",
+            selector_str, op.method, op.path, tag_part
+        );
+        if let Some(rb) = &info.request_body {
+            if let Some(name) = rb.schema_name() {
+                println!("  Request:  {name}");
+            } else {
+                println!("  Request:  (non-JSON body)");
+            }
+        } else {
+            println!("  Request:  (none)");
+        }
+        if !info.response_schemas.is_empty() {
+            let mut parts: Vec<String> = info
+                .response_schemas
+                .iter()
+                .map(|(code, ty)| format!("{code}={ty}"))
+                .collect();
+            parts.sort();
+            println!("  Response: {}", parts.join("  "));
+        }
+        println!(
+            "  Streaming: {}",
+            if op.supports_streaming { "yes" } else { "no" }
+        );
+    }
+    Ok(())
+}
+
+fn run_server_remove(
+    selector: String,
+    config: PathBuf,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut editor = ServerEditor::open(&config)?;
+    let removed = editor.remove(&selector)?;
+    if !removed {
+        println!("• `{selector}` not present in [server].operations — no change.");
+        return Ok(());
+    }
+    if dry_run {
+        println!("--- dry-run: proposed config ---");
+        print!("{}", editor.rendered());
+        println!("--- end ---");
+    } else {
+        editor.save()?;
+        println!(
+            "✓ Removed `{selector}` from {}. Handler code in your crate may now be dead — review.",
+            config.display()
+        );
+    }
     Ok(())
 }

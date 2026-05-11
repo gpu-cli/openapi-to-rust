@@ -31,6 +31,7 @@ tempfile = "3.0"
 insta = { version = "1.41", features = ["yaml"] }
 url = "2.5"
 toml = "0.8"
+toml_edit = "0.22"
 validator = { version = "0.20", features = ["derive"] }
 specta = { version = "2.0.0-rc", features = ["derive"], optional = true }
 heck = "0.5"

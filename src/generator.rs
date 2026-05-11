@@ -142,6 +142,9 @@ pub struct GeneratorConfig {
     /// TOML section. Q2.0 introduces this field; with the default value
     /// every mapping preserves pre-refactor behavior.
     pub types: crate::type_mapping::TypeMappingConfig,
+    /// Opt-in server codegen scope. `None` ⇒ emit no server code.
+    /// Set by the `[server]` section in the TOML config.
+    pub server: Option<crate::config::ServerSection>,
 }
 
 impl Default for GeneratorConfig {
@@ -165,6 +168,7 @@ impl Default for GeneratorConfig {
             enable_registry: false,
             registry_only: false,
             types: crate::type_mapping::TypeMappingConfig::default(),
+            server: None,
         }
     }
 }
