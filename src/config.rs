@@ -228,6 +228,14 @@ pub struct ServerSection {
     /// Empty ⇒ section is a no-op.
     #[serde(default)]
     pub operations: Vec<String>,
+    /// Emit only the model types reachable (transitively) from the
+    /// picked operations. Off by default because the bundled
+    /// `types.rs` is shared with the HTTP client generator and
+    /// pruning would silently drop types client code still needs.
+    /// Enable when generating a server-only crate to cut the
+    /// emitted surface dramatically (often 100× for spec-heavy APIs).
+    #[serde(default)]
+    pub prune_models: bool,
 }
 
 impl ServerSection {

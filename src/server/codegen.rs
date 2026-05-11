@@ -18,6 +18,165 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Compute the set of schema names transitively reachable from the
+/// request/response/parameter shapes of the given operations.
+///
+/// Used by `[server].prune_models = true` to drop unreferenced types
+/// from `types.rs`. Walks every `$ref` in each schema's raw JSON
+/// (`AnalyzedSchema.original`) rather than the analyzer's
+/// `dependencies` field — the latter is incomplete for some
+/// schemas (e.g. struct fields whose target schemas weren't
+/// individually tracked).
+///
+/// Inline parameter enums (whose `rust_type` is a synthetic name
+/// without a matching `analysis.schemas` entry) are not the
+/// responsibility of this walk — they're emitted directly by the
+/// server codegen from `parameter.enum_values`.
+pub fn reachable_schemas(
+    analysis: &SchemaAnalysis,
+    ops: &[&OperationInfo],
+) -> std::collections::BTreeSet<String> {
+    let mut keep: std::collections::BTreeSet<String> = Default::default();
+    let mut queue: Vec<String> = Vec::new();
+
+    let seed =
+        |name: &str, queue: &mut Vec<String>, keep: &mut std::collections::BTreeSet<String>| {
+            if !name.is_empty() && keep.insert(name.to_string()) {
+                queue.push(name.to_string());
+            }
+        };
+
+    for op in ops {
+        if let Some(rb) = &op.request_body
+            && let Some(name) = rb.schema_name()
+        {
+            seed(name, &mut queue, &mut keep);
+        }
+        for ty in op.response_schemas.values() {
+            seed(ty, &mut queue, &mut keep);
+        }
+        for p in &op.parameters {
+            if let Some(name) = &p.schema_ref {
+                seed(name, &mut queue, &mut keep);
+            }
+        }
+    }
+
+    // Synthetic types: the analyzer registers per-struct inline
+    // enums (e.g. `WebSearchApproximateLocation` + a `type` field
+    // with an inline enum → `WebSearchApproximateLocationType`) as
+    // schemas, but nothing in the spec $refs them. The codegen
+    // emits them as siblings of the parent struct's emission.
+    //
+    // Prefix-matching to a parent is unsafe because real specs use
+    // prefix-named sibling schemas (`Response` vs.
+    // `ResponsesServerEvent`). Instead, seed the BFS with every
+    // name that is never `$ref`-d anywhere in the spec. Those names
+    // and everything they transitively reach get retained. Yes this
+    // over-keeps for very large specs with rich never-referenced
+    // top-level islands; the alternative is missing-type compile
+    // errors, which we can't surface cleanly to the user.
+    let ref_named = collect_all_ref_names(analysis);
+    for name in analysis.schemas.keys() {
+        if !ref_named.contains(name) && keep.insert(name.clone()) {
+            queue.push(name.clone());
+        }
+    }
+
+    while let Some(name) = queue.pop() {
+        if let Some(schema) = analysis.schemas.get(&name) {
+            // Walk the raw JSON for every `$ref` string and feed
+            // the referenced schema names back into the queue.
+            collect_refs(&schema.original, &mut queue, &mut keep);
+            // Belt-and-braces: also include the analyzer's tracked
+            // dependencies, which sometimes catch refs that live
+            // outside the immediate JSON tree (e.g. allOf compositions
+            // resolved before the snapshot was captured).
+            for dep in &schema.dependencies {
+                seed(dep, &mut queue, &mut keep);
+            }
+        }
+    }
+
+    keep
+}
+
+/// Collect every `#/components/schemas/<Name>` referenced anywhere
+/// in the spec snapshot (including from operations). Used to
+/// distinguish spec-named schemas from analyzer-synthesised ones
+/// during pruning.
+fn collect_all_ref_names(analysis: &SchemaAnalysis) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = Default::default();
+    for schema in analysis.schemas.values() {
+        gather_refs(&schema.original, &mut out);
+    }
+    // Operations reference schemas via request body, response
+    // bodies, and parameter schemas. Include those names too —
+    // otherwise normal spec types reached only via operations end
+    // up classified as synthetics.
+    for op in analysis.operations.values() {
+        if let Some(rb) = &op.request_body
+            && let Some(name) = rb.schema_name()
+        {
+            out.insert(name.to_string());
+        }
+        for ty in op.response_schemas.values() {
+            out.insert(ty.clone());
+        }
+        for p in &op.parameters {
+            if let Some(name) = &p.schema_ref {
+                out.insert(name.clone());
+            }
+        }
+    }
+    out
+}
+
+fn gather_refs(value: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == "$ref"
+                    && let Some(s) = v.as_str()
+                    && let Some(name) = s.strip_prefix("#/components/schemas/")
+                {
+                    out.insert(name.to_string());
+                }
+                gather_refs(v, out);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|v| gather_refs(v, out)),
+        _ => {}
+    }
+}
+
+fn collect_refs(
+    value: &serde_json::Value,
+    queue: &mut Vec<String>,
+    keep: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == "$ref"
+                    && let Some(s) = v.as_str()
+                    && let Some(name) = s.strip_prefix("#/components/schemas/")
+                    && keep.insert(name.to_string())
+                {
+                    queue.push(name.to_string());
+                }
+                collect_refs(v, queue, keep);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                collect_refs(v, queue, keep);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ServerCodegenError {
     #[error("server selector: {0}")]

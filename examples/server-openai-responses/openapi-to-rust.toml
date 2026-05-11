@@ -14,3 +14,8 @@ framework = "axum"
 #                   different tag, so it also exercises the multi-tag
 #                   combined `build_router` factory.
 operations = ["createResponse", "listInputItems", "usage-costs"]
+# Drop schemas not reachable from the picked operations. Cuts the
+# 2154-schema OpenAI spec down to just what these three ops touch.
+# Safe here because we don't generate the HTTP client (those would
+# also lose types).
+prune_models = true

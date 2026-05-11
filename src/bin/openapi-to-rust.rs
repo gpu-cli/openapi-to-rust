@@ -230,6 +230,29 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("📊 Found {} schemas", analysis.schemas.len());
             println!("📊 Found {} operations", analysis.operations.len());
 
+            // Optional: prune `analysis.schemas` to the transitive
+            // closure reachable from the picked server operations.
+            // Opt-in via `[server] prune_models = true`. When the HTTP
+            // client is also enabled we warn that it'll lose types not
+            // covered by the server scope.
+            if let Some(server_section) = generator_config.server.as_ref()
+                && server_section.prune_models
+                && !server_section.operations.is_empty()
+            {
+                let pruned_count = prune_analysis_models(&mut analysis, server_section)?;
+                println!(
+                    "✂️  Pruned {pruned_count} schema(s) outside the server scope ({} remain)",
+                    analysis.schemas.len()
+                );
+                if generator_config.enable_async_client || generator_config.enable_sse_client {
+                    eprintln!(
+                        "⚠️  prune_models = true: the HTTP client will only see types \
+                         reachable from picked server operations. Set prune_models = false \
+                         or extend [server].operations to keep additional types."
+                    );
+                }
+            }
+
             // Generate code
             println!("⚙️  Generating code...");
             let generator = CodeGenerator::new(generator_config);
@@ -536,6 +559,38 @@ fn print_add_summary(
         );
     }
     Ok(())
+}
+
+/// Drop schemas from `analysis.schemas` that are unreachable from
+/// the operations picked by `[server].operations`. Returns the count
+/// of schemas removed.
+fn prune_analysis_models(
+    analysis: &mut openapi_to_rust::SchemaAnalysis,
+    server: &openapi_to_rust::config::ServerSection,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    use openapi_to_rust::server::OperationIndex;
+    use openapi_to_rust::server::codegen::reachable_schemas;
+
+    let index = OperationIndex::from_analysis(analysis);
+    let selectors: Vec<Selector> = server
+        .operations
+        .iter()
+        .map(|s| Selector::parse(s))
+        .collect::<Result<_, _>>()?;
+    let resolution = resolve_selectors(&selectors, &index)?;
+
+    // Translate resolved summaries back to full OperationInfo refs
+    // so reachability can walk request/response/parameter shapes.
+    let ops: Vec<&openapi_to_rust::analysis::OperationInfo> = resolution
+        .operations
+        .iter()
+        .filter_map(|s| analysis.operations.get(&s.operation_id))
+        .collect();
+
+    let keep = reachable_schemas(analysis, &ops);
+    let before = analysis.schemas.len();
+    analysis.schemas.retain(|k, _| keep.contains(k));
+    Ok(before - analysis.schemas.len())
 }
 
 /// Surface a paste-ready impl skeleton at the end of `generate`.
