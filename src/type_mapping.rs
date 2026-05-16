@@ -269,9 +269,15 @@ pub enum UuidStrategy {
 pub enum ByteStrategy {
     String,
     /// `Vec<u8>` round-tripped via an inlined `base64_serde` module
-    /// (default).
+    /// using the standard padded alphabet (default).
     #[default]
     Base64,
+    /// `Vec<u8>` round-tripped via the same `base64_serde` module
+    /// but using the URL-safe, unpadded alphabet (RFC 7515 §2).
+    /// Required for JWKs, DPoP thumbprints, and other JOSE-adjacent
+    /// fields. Spec-global: a single generated module is emitted, so
+    /// all `format: byte` fields in the spec share this alphabet.
+    Base64UrlUnpadded,
     /// `Vec<u8>` with no codec (caller responsible for encoding).
     VecU8,
 }
@@ -708,11 +714,13 @@ impl TypeMapper {
         match strat {
             ByteStrategy::String => MappedType::plain("String"),
             ByteStrategy::VecU8 => MappedType::plain("Vec<u8>"),
-            ByteStrategy::Base64 => {
+            ByteStrategy::Base64 | ByteStrategy::Base64UrlUnpadded => {
                 self.record(TypeFeature::Base64);
                 // Path is resolved relative to the generated
                 // module; the helper module is emitted as
-                // `base64_serde` at the top of `types.rs`.
+                // `base64_serde` at the top of `types.rs`. The
+                // alphabet (standard vs url-unpadded) is picked
+                // once at codec-emit time from the config.
                 MappedType::with_codec("Vec<u8>", "base64_serde", TypeFeature::Base64)
             }
         }
@@ -871,6 +879,33 @@ mod tests {
         assert_eq!(mt.rust_type, "Vec<u8>");
         assert_eq!(mt.serde_with.as_deref(), Some("base64_serde"));
         assert_eq!(mt.feature, Some(TypeFeature::Base64));
+    }
+
+    #[test]
+    fn byte_url_unpadded_strategy_reuses_base64_codec_path() {
+        // The new variant uses the same codec module name and
+        // TypeFeature as the default — the alphabet difference is
+        // resolved at codec-emit time in generator.rs, not here.
+        let mut cfg = TypeMappingConfig::default();
+        cfg.byte = ByteStrategy::Base64UrlUnpadded;
+        let m = TypeMapper::new(cfg);
+        let mt = m.string_format(Some("byte"));
+        assert_eq!(mt.rust_type, "Vec<u8>");
+        assert_eq!(mt.serde_with.as_deref(), Some("base64_serde"));
+        assert_eq!(mt.feature, Some(TypeFeature::Base64));
+    }
+
+    #[test]
+    fn byte_strategy_parses_url_unpadded_via_toml() {
+        // Locks the snake_case key (`base64_url_unpadded`) that
+        // consumers will write in `[generator.types]`.
+        let cfg: TypeMappingConfig =
+            toml::from_str(r#"byte = "base64_url_unpadded""#).expect("parse");
+        assert_eq!(cfg.byte, ByteStrategy::Base64UrlUnpadded);
+
+        // Default key still parses unchanged.
+        let cfg: TypeMappingConfig = toml::from_str(r#"byte = "base64""#).expect("parse");
+        assert_eq!(cfg.byte, ByteStrategy::Base64);
     }
 
     #[test]

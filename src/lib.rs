@@ -24,7 +24,8 @@ pub use http_config::{AuthConfig, HttpClientConfig, RetryConfig};
 pub use http_error::{ApiError, ApiOpError, HttpError, HttpResult};
 pub use openapi::{OpenApiSpec, Schema, SchemaType};
 pub use type_mapping::{
-    DepRequirement, MappedType, TypeFeature, TypeMapper, TypeMappingConfig, UsedFeatures,
+    ByteStrategy, DepRequirement, MappedType, TypeFeature, TypeMapper, TypeMappingConfig,
+    UsedFeatures,
 };
 
 pub type Result<T> = std::result::Result<T, GeneratorError>;

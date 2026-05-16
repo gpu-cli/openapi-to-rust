@@ -12,7 +12,7 @@
 //! `SchemaType::Primitive.serde_with`.
 
 use openapi_to_rust::{
-    CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
+    ByteStrategy, CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
 };
 use serde_json::json;
 
@@ -142,6 +142,59 @@ fn byte_default_emits_vec_u8_with_base64_codec() {
     assert!(
         code.contains("mod base64_serde"),
         "Generated file should include the base64_serde helper module. Code:\n{code}"
+    );
+}
+
+#[test]
+fn byte_url_unpadded_emits_url_safe_no_pad_engine() {
+    // ByteStrategy::Base64UrlUnpadded must swap the alphabet in
+    // the inlined `base64_serde` helper to RFC 7515 §2 (URL-safe,
+    // unpadded). Per-field codec attribute stays `base64_serde`
+    // so the variant is opaque to call sites.
+    let mut types = TypeMappingConfig::default();
+    types.byte = ByteStrategy::Base64UrlUnpadded;
+    let mapper = TypeMapper::new(types.clone());
+
+    let mut analyzer =
+        SchemaAnalyzer::with_type_mapper(spec_with_format("byte"), mapper).expect("analyzer");
+    let mut analysis = analyzer.analyze().expect("analyze");
+    let cfg = GeneratorConfig {
+        module_name: "sample".into(),
+        types,
+        ..Default::default()
+    };
+    let codegen = CodeGenerator::new(cfg);
+    let code = codegen.generate(&mut analysis).expect("generate");
+
+    assert!(
+        code.contains("URL_SAFE_NO_PAD"),
+        "url-unpadded strategy must reference URL_SAFE_NO_PAD. Code:\n{code}"
+    );
+    assert!(
+        !code.contains("STANDARD"),
+        "url-unpadded strategy must not reference STANDARD. Code:\n{code}"
+    );
+    assert!(
+        code.contains(r#"with = "base64_serde""#),
+        "per-field attribute stays `base64_serde`. Code:\n{code}"
+    );
+}
+
+#[test]
+fn byte_default_emits_standard_engine() {
+    // Sanity: the default `Base64` variant must still emit STANDARD
+    // (padded). Locks the historical default in place.
+    let code = generate(
+        spec_with_format("byte"),
+        TypeMapper::new(TypeMappingConfig::default()),
+    );
+    assert!(
+        code.contains("STANDARD"),
+        "default byte strategy must reference STANDARD. Code:\n{code}"
+    );
+    assert!(
+        !code.contains("URL_SAFE_NO_PAD"),
+        "default byte strategy must not reference URL_SAFE_NO_PAD. Code:\n{code}"
     );
 }
 

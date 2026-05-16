@@ -398,27 +398,38 @@ impl CodeGenerator {
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::Base64)
         {
+            // Pick the alphabet once at emit time. URL-safe unpadded
+            // is RFC 7515 §2 (JWK thumbprints, DPoP, JWS); standard
+            // padded is the historical default. The codec module
+            // name stays `base64_serde` either way so per-field
+            // `#[serde(with = ...)]` attributes don't need to know.
+            let engine_ident = match self.config.types.byte {
+                crate::type_mapping::ByteStrategy::Base64UrlUnpadded => {
+                    quote::format_ident!("URL_SAFE_NO_PAD")
+                }
+                _ => quote::format_ident!("STANDARD"),
+            };
             quote! {
                 /// base64 codec for `Vec<u8>` fields produced from
                 /// `format: byte`. Used via `#[serde(with = "base64_serde")]`
                 /// for required/non-null fields; `with = "base64_serde::option"`
                 /// for the Option<Vec<u8>> case.
                 mod base64_serde {
-                    use base64::{Engine as _, engine::general_purpose::STANDARD};
+                    use base64::{Engine as _, engine::general_purpose::#engine_ident as ENGINE};
                     use serde::{Deserialize, Deserializer, Serializer};
 
                     pub fn serialize<S: Serializer>(
                         bytes: &Vec<u8>,
                         ser: S,
                     ) -> Result<S::Ok, S::Error> {
-                        ser.serialize_str(&STANDARD.encode(bytes))
+                        ser.serialize_str(&ENGINE.encode(bytes))
                     }
 
                     pub fn deserialize<'de, D: Deserializer<'de>>(
                         de: D,
                     ) -> Result<Vec<u8>, D::Error> {
                         let s = String::deserialize(de)?;
-                        STANDARD
+                        ENGINE
                             .decode(s.as_bytes())
                             .map_err(serde::de::Error::custom)
                     }
@@ -447,7 +458,7 @@ impl CodeGenerator {
                         ) -> Result<Option<Vec<u8>>, D::Error> {
                             let opt = Option::<String>::deserialize(de)?;
                             opt.map(|s| {
-                                STANDARD
+                                ENGINE
                                     .decode(s.as_bytes())
                                     .map_err(serde::de::Error::custom)
                             })
