@@ -11,6 +11,12 @@ homepage = "https://github.com/gpu-cli/openapi-to-rust"
 keywords = ["openapi", "codegen", "rust", "sse", "api-client"]
 categories = ["development-tools", "web-programming"]
 readme = "README.md"
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE",
+]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
