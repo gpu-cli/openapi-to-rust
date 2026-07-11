@@ -111,14 +111,20 @@ impl TypeFeature {
             Self::Chrono => DepRequirement::new("chrono", "0.4").with_features(&["serde"]),
             // `serde` alone doesn't enable `time::serde::rfc3339`;
             // the codec modules are gated on formatting/parsing.
-            Self::Time => {
-                DepRequirement::new("time", "0.3").with_features(&["serde", "formatting", "parsing"])
-            }
+            Self::Time => DepRequirement::new("time", "0.3").with_features(&[
+                "serde",
+                "formatting",
+                "parsing",
+            ]),
             // `macros` on top: Date/Time have no built-in serde
             // codec, so the generated code declares one via
             // `time::serde::format_description!`.
-            Self::TimeDate | Self::TimeTime => DepRequirement::new("time", "0.3")
-                .with_features(&["serde", "formatting", "parsing", "macros"]),
+            Self::TimeDate | Self::TimeTime => DepRequirement::new("time", "0.3").with_features(&[
+                "serde",
+                "formatting",
+                "parsing",
+                "macros",
+            ]),
             Self::Iso8601 => DepRequirement::new("iso8601", "0.6"),
             Self::Uuid => DepRequirement::new("uuid", "1").with_features(&["serde", "v4"]),
             Self::Bytes => DepRequirement::new("bytes", "1").with_features(&["serde"]),
