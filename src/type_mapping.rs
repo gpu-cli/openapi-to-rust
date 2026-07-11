@@ -87,6 +87,13 @@ impl MappedType {
 pub enum TypeFeature {
     Chrono,
     Time,
+    /// `time::Date` via the generated `time_date_format` codec.
+    /// Tracked separately from [`TypeFeature::Time`] so the
+    /// generator only emits the `time::serde::format_description!`
+    /// helper when a `format: date` field actually exists.
+    TimeDate,
+    /// `time::Time` via the generated `time_time_format` codec.
+    TimeTime,
     Iso8601,
     Uuid,
     Bytes,
@@ -102,7 +109,22 @@ impl TypeFeature {
     pub fn dep_requirement(self) -> DepRequirement {
         match self {
             Self::Chrono => DepRequirement::new("chrono", "0.4").with_features(&["serde"]),
-            Self::Time => DepRequirement::new("time", "0.3").with_features(&["serde"]),
+            // `serde` alone doesn't enable `time::serde::rfc3339`;
+            // the codec modules are gated on formatting/parsing.
+            Self::Time => DepRequirement::new("time", "0.3").with_features(&[
+                "serde",
+                "formatting",
+                "parsing",
+            ]),
+            // `macros` on top: Date/Time have no built-in serde
+            // codec, so the generated code declares one via
+            // `time::serde::format_description!`.
+            Self::TimeDate | Self::TimeTime => DepRequirement::new("time", "0.3").with_features(&[
+                "serde",
+                "formatting",
+                "parsing",
+                "macros",
+            ]),
             Self::Iso8601 => DepRequirement::new("iso8601", "0.6"),
             Self::Uuid => DepRequirement::new("uuid", "1").with_features(&["serde", "v4"]),
             Self::Bytes => DepRequirement::new("bytes", "1").with_features(&["serde"]),
@@ -189,8 +211,23 @@ pub fn render_required_deps_toml(deps: &[DepRequirement]) -> Option<String> {
 pub fn collect_dep_requirements(used: &UsedFeatures) -> Vec<DepRequirement> {
     let mut deps: Vec<DepRequirement> = used.iter().map(|f| f.dep_requirement()).collect();
     deps.sort_by_key(|d| d.crate_name);
-    deps.dedup_by_key(|d| d.crate_name);
-    deps
+    // Several features can point at the same crate with different
+    // feature lists (e.g. Time vs TimeDate both need `time`); union
+    // the features so the single emitted line satisfies all of them.
+    let mut merged: Vec<DepRequirement> = Vec::new();
+    for dep in deps {
+        match merged.last_mut() {
+            Some(last) if last.crate_name == dep.crate_name => {
+                for feat in dep.features {
+                    if !last.features.contains(&feat) {
+                        last.features.push(feat);
+                    }
+                }
+            }
+            _ => merged.push(dep),
+        }
+    }
+    merged
 }
 
 /// Tracks which optional crates the generator emitted code for.
@@ -655,8 +692,12 @@ impl TypeMapper {
                 MappedType::with_feature("chrono::NaiveDate", TypeFeature::Chrono)
             }
             DateStrategy::Time => {
-                self.record(TypeFeature::Time);
-                MappedType::with_codec("time::Date", "time::serde::iso8601", TypeFeature::Time)
+                self.record(TypeFeature::TimeDate);
+                // `time::serde::iso8601` only supports
+                // OffsetDateTime; `time_date_format` is a codec
+                // module the generator emits into the file via
+                // `time::serde::format_description!` (GH #25).
+                MappedType::with_codec("time::Date", "time_date_format", TypeFeature::TimeDate)
             }
         }
     }
@@ -669,8 +710,10 @@ impl TypeMapper {
                 MappedType::with_feature("chrono::NaiveTime", TypeFeature::Chrono)
             }
             DateStrategy::Time => {
-                self.record(TypeFeature::Time);
-                MappedType::with_codec("time::Time", "time::serde::iso8601", TypeFeature::Time)
+                self.record(TypeFeature::TimeTime);
+                // Same story as `time::Date`: no built-in codec, so
+                // the generator emits `time_time_format`.
+                MappedType::with_codec("time::Time", "time_time_format", TypeFeature::TimeTime)
             }
         }
     }

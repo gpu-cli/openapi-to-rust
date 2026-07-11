@@ -460,6 +460,47 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        // `time::Date` / `time::Time` have no built-in serde codec
+        // in the `time` crate (`time::serde::iso8601` is
+        // OffsetDateTime-only — GH #25), so declare one per type via
+        // the `format_description!` macro. It expands to a module
+        // (with an `::option` submodule) referenced from fields as
+        // `#[serde(with = "time_date_format")]` etc.
+        let time_date_helper = if analysis
+            .used_type_features
+            .contains(crate::type_mapping::TypeFeature::TimeDate)
+        {
+            quote! {
+                time::serde::format_description!(
+                    time_date_format,
+                    Date,
+                    "[year]-[month]-[day]"
+                );
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        // RFC 3339 partial-time. `[optional [...]]` groups always
+        // format their contents, so whole seconds serialize with a
+        // trailing ".0" — in exchange, parsing accepts inputs both
+        // with and without fractional seconds.
+        let time_time_helper = if analysis
+            .used_type_features
+            .contains(crate::type_mapping::TypeFeature::TimeTime)
+        {
+            quote! {
+                time::serde::format_description!(
+                    version = 2,
+                    time_time_format,
+                    Time,
+                    "[hour]:[minute]:[second][optional [.[subsecond]]]"
+                );
+            }
+        } else {
+            TokenStream::new()
+        };
+
         // Generate file with imports and types (no module wrapper).
         let generated = quote! {
             //! Generated types from OpenAPI specification
@@ -475,6 +516,10 @@ impl CodeGenerator {
             use serde::{Deserialize, Serialize};
 
             #base64_helper
+
+            #time_date_helper
+
+            #time_time_helper
 
             #type_definitions
         };
@@ -1888,6 +1933,13 @@ impl CodeGenerator {
                 codec.clone()
             };
             attrs.push(quote! { with = #codec_path });
+            // A `with` codec disables serde's implicit
+            // missing-field → None handling for Option fields
+            // (serde-rs/serde#2878); without `default` a request
+            // that simply omits the field fails to deserialize.
+            if is_option_wrapped {
+                attrs.push(quote! { default });
+            }
         }
 
         if attrs.is_empty() {
