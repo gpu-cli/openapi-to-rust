@@ -4561,14 +4561,23 @@ impl SchemaAnalyzer {
                     }
                 }
             } else if let Some(schema_type) = schema.schema_type() {
+                // Route integer/number through the same TypeMapper the schema
+                // property path uses (see analyze_property), so `format: int32`
+                // yields `i32` and `[type_mappings]`/strategy config applies to
+                // parameters too. Hardcoding `i64`/`f64` here previously made
+                // `format` and config impossible to honour for query/path params.
+                let format = schema.details().format.clone();
                 rust_type = match schema_type {
-                    crate::openapi::SchemaType::Boolean => "bool",
-                    crate::openapi::SchemaType::Integer => "i64",
-                    crate::openapi::SchemaType::Number => "f64",
-                    crate::openapi::SchemaType::String => "String",
-                    _ => "String",
-                }
-                .to_string();
+                    crate::openapi::SchemaType::Boolean => "bool".to_string(),
+                    crate::openapi::SchemaType::Integer => {
+                        self.type_mapper.integer_format(format.as_deref()).rust_type
+                    }
+                    crate::openapi::SchemaType::Number => {
+                        self.type_mapper.number_format(format.as_deref()).rust_type
+                    }
+                    crate::openapi::SchemaType::String => "String".to_string(),
+                    _ => "String".to_string(),
+                };
 
                 if matches!(schema_type, crate::openapi::SchemaType::String) {
                     let details = schema.details();
