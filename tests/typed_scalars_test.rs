@@ -306,3 +306,153 @@ fn no_format_property_remains_string() {
         "string with no format must remain String. Code:\n{code}"
     );
 }
+
+// =====================================================================
+// GH #25: DateStrategy::Time for `format: date` / `format: time`.
+// `time::serde::iso8601` only supports OffsetDateTime, so the
+// generator must emit its own codec modules via
+// `time::serde::format_description!` instead.
+// =====================================================================
+
+fn time_strategy_mapper() -> TypeMapper {
+    use openapi_to_rust::type_mapping::DateStrategy;
+    TypeMapper::new(TypeMappingConfig {
+        date_time: DateStrategy::Time,
+        date: DateStrategy::Time,
+        time: DateStrategy::Time,
+        ..TypeMappingConfig::default()
+    })
+}
+
+/// The exact shape from GH #25: an *optional* `format: date` field.
+fn spec_with_optional_format(format: &str) -> serde_json::Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "fmt", "version": "1.0.0" },
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Sample": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string", "format": format }
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[test]
+fn date_with_time_strategy_emits_generated_codec() {
+    let code = generate(spec_with_format("date"), time_strategy_mapper());
+    assert!(
+        code.contains("pub value: time::Date"),
+        "date should map to time::Date under DateStrategy::Time. Code:\n{code}"
+    );
+    assert!(
+        code.contains(r#"with = "time_date_format""#),
+        "required date field should use the generated codec. Code:\n{code}"
+    );
+    assert!(
+        code.contains("time::serde::format_description!"),
+        "the codec module declaration must be emitted. Code:\n{code}"
+    );
+    assert!(
+        !code.contains("time::serde::iso8601"),
+        "iso8601 codec is OffsetDateTime-only and must not appear (GH #25). Code:\n{code}"
+    );
+}
+
+#[test]
+fn optional_date_with_time_strategy_uses_option_codec() {
+    let code = generate(spec_with_optional_format("date"), time_strategy_mapper());
+    assert!(
+        code.contains("pub value: Option<time::Date>"),
+        "optional date should be Option<time::Date>. Code:\n{code}"
+    );
+    assert!(
+        code.contains(r#"with = "time_date_format::option""#),
+        "optional date field should use the ::option submodule. Code:\n{code}"
+    );
+}
+
+#[test]
+fn time_with_time_strategy_emits_generated_codec() {
+    let code = generate(spec_with_optional_format("time"), time_strategy_mapper());
+    assert!(
+        code.contains("pub value: Option<time::Time>"),
+        "optional time should be Option<time::Time>. Code:\n{code}"
+    );
+    assert!(
+        code.contains(r#"with = "time_time_format::option""#),
+        "optional time field should use the ::option submodule. Code:\n{code}"
+    );
+    assert!(
+        code.contains("time_time_format"),
+        "the time codec module declaration must be emitted. Code:\n{code}"
+    );
+}
+
+#[test]
+fn date_time_with_time_strategy_does_not_emit_codec_modules() {
+    // OffsetDateTime has a built-in rfc3339 codec; the generated
+    // format_description modules are gated on date/time usage.
+    let code = generate(spec_with_format("date-time"), time_strategy_mapper());
+    assert!(
+        code.contains(r#"with = "time::serde::rfc3339""#),
+        "date-time keeps the built-in rfc3339 codec. Code:\n{code}"
+    );
+    assert!(
+        !code.contains("format_description!"),
+        "no codec module should be emitted without date/time fields. Code:\n{code}"
+    );
+}
+
+#[test]
+fn time_dep_requirement_includes_macro_features() {
+    // The generated format_description! invocation needs `macros`;
+    // even rfc3339 needs formatting+parsing. A bare `serde` feature
+    // produces code that doesn't compile.
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "fmt", "version": "1.0.0" },
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Sample": {
+                    "type": "object",
+                    "required": ["a"],
+                    "properties": {
+                        "a": { "type": "string", "format": "date-time" },
+                        "b": { "type": "string", "format": "date" }
+                    }
+                }
+            }
+        }
+    });
+    let mut analyzer =
+        SchemaAnalyzer::with_type_mapper(spec, time_strategy_mapper()).expect("analyzer");
+    let mut analysis = analyzer.analyze().expect("analyze");
+    let cfg = GeneratorConfig {
+        module_name: "sample".into(),
+        ..Default::default()
+    };
+    let codegen = CodeGenerator::new(cfg);
+    let result = codegen.generate_all(&mut analysis).expect("generate_all");
+
+    // One merged `time` line carrying the union of required features.
+    let time_deps: Vec<_> = result
+        .required_deps
+        .iter()
+        .filter(|d| d.crate_name == "time")
+        .collect();
+    assert_eq!(time_deps.len(), 1, "deps: {:?}", result.required_deps);
+    for feat in ["serde", "formatting", "parsing", "macros"] {
+        assert!(
+            time_deps[0].features.contains(&feat),
+            "time dep must include feature {feat}. Got: {:?}",
+            time_deps[0].features
+        );
+    }
+}
