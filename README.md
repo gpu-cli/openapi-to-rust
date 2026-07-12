@@ -551,6 +551,36 @@ cargo run -p openapi-to-rust -- generate --config examples/server-anthropic-mess
 cargo run --manifest-path examples/server-anthropic-messages/Cargo.toml
 ```
 
+## Breaking changes (pre-1.0)
+
+Until 1.0.0, a minor version bump may change the generated API surface —
+usually because the previous output was wrong on the wire. Regenerating makes
+the compiler point at every affected call site; there is no silent behavior
+change without a signature change.
+
+### 0.6.0 (unreleased)
+
+Object- and array-schema **query parameters** are now serialized according to
+their OpenAPI `style`/`explode` (issue [#27](https://github.com/gpu-cli/openapi-to-rust/issues/27)).
+Previously every such parameter was `Option<impl AsRef<str>>` and the caller's
+string went out as a single opaque `name=<string>` pair — which no server
+expecting the declared style could parse. Signatures change as follows:
+
+| Parameter shape | Old argument | New argument | Wire format |
+|---|---|---|---|
+| object, form + explode=true (OAS defaults) | `Option<impl AsRef<str>>` | `Option<Struct>` | `?color=red&size=5` |
+| object, form + explode=false | `Option<impl AsRef<str>>` | `Option<Struct>` | `?filter=color,red,size,5` |
+| object, deepObject | `Option<impl AsRef<str>>` | `Option<Struct>` | `?filter[color]=red` |
+| array, form + explode=true (OAS defaults) | `Option<impl AsRef<str>>` | `Option<Vec<T>>` | `?tags=a&tags=b` |
+| array, form + explode=false | `Option<impl AsRef<str>>` | `Option<Vec<T>>` | `?tags=a,b,c` |
+
+`Struct` is the referenced component model for `$ref` schemas or a
+synthesized `{Operation}{Param}` struct for inline objects. `T` is the scalar
+item type (via the same type mapping as properties) or the referenced
+string-enum model. Unchanged (still the opaque string passthrough): deepObject
+arrays, `spaceDelimited`/`pipeDelimited`, arrays of objects, and server-side
+extraction (tracked separately).
+
 ## Release notes
 
 ### 0.5 (this release)

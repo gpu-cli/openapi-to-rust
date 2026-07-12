@@ -769,34 +769,164 @@ impl CodeGenerator {
         }
 
         let mut param_building = Vec::new();
-        let mut exploded_objects = Vec::new();
+        // Serialization applied on `req` directly, after the pair-vector
+        // block: form-exploded objects and deepObject objects, whose keys
+        // aren't the static parameter name.
+        let mut req_appends = Vec::new();
 
         for param in query_params {
+            use crate::analysis::QuerySerialization;
+
             // Use snake_case for Rust variable name with keyword escaping
             let param_name_snake = self.param_ident_str(param);
             let param_name = Self::to_field_ident(&param_name_snake);
 
-            if param.form_explode_object {
-                // form-exploded object (issue #27): reqwest serializes the
-                // struct through serde_urlencoded, so each property becomes
-                // its own `key=value` pair. The parameter's own name never
-                // appears in the query string per RFC 6570 form-explosion.
-                if param.required {
-                    exploded_objects.push(quote! {
-                        req = req.query(&#param_name);
-                    });
-                } else {
-                    exploded_objects.push(quote! {
-                        if let Some(v) = #param_name {
-                            req = req.query(&v);
-                        }
-                    });
-                }
-                continue;
-            }
-
             // Use the original parameter name from OpenAPI spec as the query string key
             let param_key = &param.name;
+
+            match &param.query_serialization {
+                Some(QuerySerialization::FormExplodedObject) => {
+                    // Issue #27: reqwest serializes the struct through
+                    // serde_urlencoded, so each property becomes its own
+                    // `key=value` pair; the parameter's own name never
+                    // appears in the query string (RFC 6570 form-explosion).
+                    if param.required {
+                        req_appends.push(quote! {
+                            req = req.query(&#param_name);
+                        });
+                    } else {
+                        req_appends.push(quote! {
+                            if let Some(v) = #param_name {
+                                req = req.query(&v);
+                            }
+                        });
+                    }
+                    continue;
+                }
+                Some(QuerySerialization::DeepObject) => {
+                    // `?filter[color]=red&filter[size]=5`. Property values
+                    // stringify through their JSON form; Null (unset
+                    // Option) properties are skipped.
+                    let apply = quote! {
+                        if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&v) {
+                            let mut deep_params: Vec<(String, String)> = Vec::new();
+                            for (k, val) in map {
+                                let s = match val {
+                                    serde_json::Value::Null => continue,
+                                    serde_json::Value::String(s) => s,
+                                    other => other.to_string(),
+                                };
+                                deep_params.push((format!("{}[{}]", #param_key, k), s));
+                            }
+                            if !deep_params.is_empty() {
+                                req = req.query(&deep_params);
+                            }
+                        }
+                    };
+                    if param.required {
+                        req_appends.push(quote! {
+                            {
+                                let v = #param_name;
+                                #apply
+                            }
+                        });
+                    } else {
+                        req_appends.push(quote! {
+                            if let Some(v) = #param_name {
+                                #apply
+                            }
+                        });
+                    }
+                    continue;
+                }
+                Some(QuerySerialization::FormObject) => {
+                    // `?filter=color,red,size,big` — one pair whose value is
+                    // the comma-joined key,value list (RFC 6570 form,
+                    // explode=false).
+                    let apply = quote! {
+                        if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&v) {
+                            let mut parts: Vec<String> = Vec::new();
+                            for (k, val) in map {
+                                let s = match val {
+                                    serde_json::Value::Null => continue,
+                                    serde_json::Value::String(s) => s,
+                                    other => other.to_string(),
+                                };
+                                parts.push(k);
+                                parts.push(s);
+                            }
+                            if !parts.is_empty() {
+                                query_params.push((#param_key, parts.join(",")));
+                            }
+                        }
+                    };
+                    if param.required {
+                        param_building.push(quote! {
+                            {
+                                let v = #param_name;
+                                #apply
+                            }
+                        });
+                    } else {
+                        param_building.push(quote! {
+                            if let Some(v) = #param_name {
+                                #apply
+                            }
+                        });
+                    }
+                    continue;
+                }
+                Some(QuerySerialization::FormExplodedArray { .. }) => {
+                    // `?tags=a&tags=b` — one pair per element.
+                    if param.required {
+                        param_building.push(quote! {
+                            for item in #param_name {
+                                query_params.push((#param_key, item.to_string()));
+                            }
+                        });
+                    } else {
+                        param_building.push(quote! {
+                            if let Some(v) = #param_name {
+                                for item in v {
+                                    query_params.push((#param_key, item.to_string()));
+                                }
+                            }
+                        });
+                    }
+                    continue;
+                }
+                Some(QuerySerialization::FormArray { .. }) => {
+                    // `?tags=a,b,c` — one comma-joined pair. Empty vectors
+                    // are omitted entirely.
+                    let apply = quote! {
+                        if !v.is_empty() {
+                            query_params.push((
+                                #param_key,
+                                v.iter()
+                                    .map(|item| item.to_string())
+                                    .collect::<Vec<String>>()
+                                    .join(","),
+                            ));
+                        }
+                    };
+                    if param.required {
+                        param_building.push(quote! {
+                            {
+                                let v = #param_name;
+                                #apply
+                            }
+                        });
+                    } else {
+                        param_building.push(quote! {
+                            if let Some(v) = #param_name {
+                                #apply
+                            }
+                        });
+                    }
+                    continue;
+                }
+                None => {}
+            }
 
             if param.required {
                 // Required parameters: always add
@@ -827,7 +957,7 @@ impl CodeGenerator {
             }
         }
 
-        // Ops whose query params are all form-exploded objects skip the
+        // Ops whose query params all serialize on `req` directly skip the
         // pair-vector block entirely.
         let pairs_block = if param_building.is_empty() {
             quote! {}
@@ -846,7 +976,7 @@ impl CodeGenerator {
         quote! {
             // Add query parameters
             #pairs_block
-            #(#exploded_objects)*
+            #(#req_appends)*
         }
     }
 
@@ -1040,6 +1170,29 @@ impl CodeGenerator {
 
     /// Get the Rust type for a parameter
     fn get_param_rust_type(&self, param: &crate::analysis::ParameterInfo) -> TokenStream {
+        use crate::analysis::QuerySerialization;
+        // Typed form-style arrays take Vec<item> (openapi-generator-anu).
+        // Scalars parse as-is (they may be type paths from [type_mappings]);
+        // enum refs are raw schema names and go through the same
+        // to_rust_type_name sanitization as every other schema reference
+        // (cloudflare has enum schemas like `resource-sharing_resource_type`).
+        if let Some(
+            QuerySerialization::FormExplodedArray { item_type }
+            | QuerySerialization::FormArray { item_type },
+        ) = &param.query_serialization
+        {
+            use crate::analysis::ArrayItemType;
+            let item_ty: syn::Type = match item_type {
+                ArrayItemType::Scalar(rust_type) => syn::parse_str(rust_type)
+                    .unwrap_or_else(|_| panic!("invalid scalar item type `{rust_type}`")),
+                ArrayItemType::EnumRef(schema_name) => {
+                    let rust_name = self.to_rust_type_name(schema_name);
+                    syn::parse_str(&rust_name)
+                        .unwrap_or_else(|_| panic!("invalid enum item type `{rust_name}`"))
+                }
+            };
+            return quote! { Vec<#item_ty> };
+        }
         // T10: $ref-typed parameters used to lose their type because we only
         // consulted `rust_type` (which stays "String"). Now: prefer the
         // resolved schema reference if present.

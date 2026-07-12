@@ -7,11 +7,13 @@
 //! must become its own query pair: `?color=red&size=big` — the parameter name
 //! itself never appears in the query string.
 //!
-//! Now: the analyzer types those parameters as a struct (synthesized for
-//! inline schemas, resolved for $refs) and the client emits `req.query(&v)`,
-//! which reqwest/serde_urlencoded serializes property-by-property. Styles we
-//! don't generate yet (deepObject, form with explode=false) keep the string
-//! fallback.
+//! Now (T14 / openapi-generator-anu): the analyzer assigns each object/array
+//! query param a `QuerySerialization` from its style/explode + schema shape,
+//! and the client generates the matching wire format — form-exploded objects
+//! via `req.query(&v)`, explode=false objects comma-joined, deepObject
+//! objects with bracketed keys, form arrays as `Vec<T>` (repeated or
+//! comma-joined pairs). Shapes with no defined/wired format (deepObject
+//! arrays, arrays of objects, space/pipeDelimited) keep the string fallback.
 //!
 //! Method-body assertions use the raw token-stream spacing
 //! (`filter : Option < FindWidgetsFilter >`), matching
@@ -176,9 +178,9 @@ fn ref_object_query_param_uses_referenced_struct() {
 }
 
 #[test]
-fn explode_false_keeps_string_fallback() {
-    // form + explode=false (`?filter=color,red,size,big`) isn't generated
-    // yet — the parameter must keep the pre-#27 string passthrough.
+fn explode_false_object_serializes_comma_joined() {
+    // form + explode=false object: `?filter=color,red,size,big` — one pair,
+    // comma-joined key,value list (RFC 6570 form without explosion).
     let code = generate_methods(spec_with_filter_param(json!({
         "name": "filter",
         "in": "query",
@@ -187,18 +189,22 @@ fn explode_false_keeps_string_fallback() {
     })));
 
     assert!(
-        code.contains("filter : Option < impl AsRef < str > >"),
-        "explode=false object param should keep the string fallback; got:\n{code}"
+        code.contains("filter : Option < FindWidgetsFilter >"),
+        "explode=false object param should be typed as the synthesized struct; got:\n{code}"
     );
     assert!(
-        !code.contains("FindWidgetsFilter"),
-        "no struct should be synthesized for explode=false; got:\n{code}"
+        code.contains("parts . join (\",\")"),
+        "explode=false object must comma-join key,value parts; got:\n{code}"
+    );
+    assert!(
+        code.contains("query_params . push ((\"filter\" , parts . join (\",\")))"),
+        "explode=false object keeps the parameter name as the single key; got:\n{code}"
     );
 }
 
 #[test]
-fn deep_object_style_keeps_string_fallback() {
-    // deepObject (`?filter[color]=red`) isn't generated yet — string fallback.
+fn deep_object_style_serializes_bracketed_keys() {
+    // deepObject: `?filter[color]=red&filter[size]=5`.
     let code = generate_methods(spec_with_filter_param(json!({
         "name": "filter",
         "in": "query",
@@ -208,8 +214,131 @@ fn deep_object_style_keeps_string_fallback() {
     })));
 
     assert!(
-        code.contains("filter : Option < impl AsRef < str > >"),
-        "deepObject param should keep the string fallback; got:\n{code}"
+        code.contains("filter : Option < FindWidgetsFilter >"),
+        "deepObject param should be typed as the synthesized struct; got:\n{code}"
+    );
+    assert!(
+        code.contains("format ! (\"{}[{}]\" , \"filter\" , k)"),
+        "deepObject must emit bracketed `filter[key]` query keys; got:\n{code}"
+    );
+    assert!(
+        code.contains("req = req . query (& deep_params)"),
+        "deepObject pairs must be appended to the request; got:\n{code}"
+    );
+}
+
+#[test]
+fn deep_object_array_keeps_string_fallback() {
+    // deepObject on an *array* schema (stripe's `expand[]`) is undefined in
+    // OAS 3.x — keeps the opaque string fallback.
+    let code = generate_methods(spec_with_filter_param(json!({
+        "name": "expand",
+        "in": "query",
+        "style": "deepObject",
+        "explode": true,
+        "schema": {"type": "array", "items": {"type": "string"}}
+    })));
+
+    assert!(
+        code.contains("expand : Option < impl AsRef < str > >"),
+        "deepObject array param should keep the string fallback; got:\n{code}"
+    );
+}
+
+#[test]
+fn form_exploded_array_repeats_pairs() {
+    // form + explode=true array (the OAS defaults): `?tags=a&tags=b`.
+    let code = generate_methods(spec_with_filter_param(json!({
+        "name": "tags",
+        "in": "query",
+        "schema": {"type": "array", "items": {"type": "string"}}
+    })));
+
+    assert!(
+        code.contains("tags : Option < Vec < String > >"),
+        "exploded string array should be typed Vec<String>; got:\n{code}"
+    );
+    assert!(
+        code.contains("for item in v { query_params . push ((\"tags\" , item . to_string ())) ; }"),
+        "exploded array must push one pair per element; got:\n{code}"
+    );
+}
+
+#[test]
+fn form_exploded_array_types_integer_items_through_type_mapper() {
+    let code = generate_methods(spec_with_filter_param(json!({
+        "name": "ids",
+        "in": "query",
+        "required": true,
+        "schema": {"type": "array", "items": {"type": "integer", "format": "int32"}}
+    })));
+
+    assert!(
+        code.contains("ids : Vec < i32 >"),
+        "required int32 array should be a bare Vec<i32>; got:\n{code}"
+    );
+    assert!(
+        code.contains("for item in ids"),
+        "required exploded array iterates the argument directly; got:\n{code}"
+    );
+}
+
+#[test]
+fn form_noexplode_array_joins_with_commas() {
+    // form + explode=false array: `?tags=a,b,c`; empty vectors are omitted.
+    let code = generate_methods(spec_with_filter_param(json!({
+        "name": "tags",
+        "in": "query",
+        "explode": false,
+        "schema": {"type": "array", "items": {"type": "string"}}
+    })));
+
+    assert!(
+        code.contains("tags : Option < Vec < String > >"),
+        "non-exploded string array should be typed Vec<String>; got:\n{code}"
+    );
+    assert!(
+        code.contains(". join (\",\")"),
+        "non-exploded array must comma-join its items; got:\n{code}"
+    );
+    assert!(
+        code.contains("if ! v . is_empty ()"),
+        "empty non-exploded arrays must be omitted; got:\n{code}"
+    );
+}
+
+#[test]
+fn array_of_ref_string_enum_items_uses_enum_type() {
+    let mut spec = spec_with_filter_param(json!({
+        "name": "status",
+        "in": "query",
+        "schema": {"type": "array", "items": {"$ref": "#/components/schemas/WidgetStatus"}}
+    }));
+    spec["components"] = json!({
+        "schemas": {
+            "WidgetStatus": {"type": "string", "enum": ["active", "retired"]}
+        }
+    });
+    let code = generate_methods(spec);
+
+    assert!(
+        code.contains("status : Option < Vec < WidgetStatus > >"),
+        "array of $ref string-enum items should be Vec<Enum>; got:\n{code}"
+    );
+}
+
+#[test]
+fn array_of_objects_keeps_string_fallback() {
+    // Arrays of objects have no defined form serialization — fallback.
+    let code = generate_methods(spec_with_filter_param(json!({
+        "name": "filters",
+        "in": "query",
+        "schema": {"type": "array", "items": {"type": "object", "properties": {"k": {"type": "string"}}}}
+    })));
+
+    assert!(
+        code.contains("filters : Option < impl AsRef < str > >"),
+        "array-of-objects param should keep the string fallback; got:\n{code}"
     );
 }
 
@@ -254,6 +383,23 @@ fn reqwest_query_serializes_struct_as_exploded_pairs() {
         req.url().as_str(),
         "https://api.example.com/widgets",
         "all-None struct must not leave a dangling `?`"
+    );
+}
+
+/// Runtime pin for the deepObject wire format: reqwest percent-encodes the
+/// brackets in `filter[color]` (form-urlencoded rules), which servers decode
+/// transparently — Stripe et al. accept `filter%5Bcolor%5D=red`.
+#[test]
+fn reqwest_query_percent_encodes_deep_object_brackets() {
+    let deep: Vec<(String, String)> = vec![("filter[color]".to_string(), "red".to_string())];
+    let req = reqwest::Client::new()
+        .get("https://api.example.com/widgets")
+        .query(&deep)
+        .build()
+        .expect("request builds");
+    assert_eq!(
+        req.url().as_str(),
+        "https://api.example.com/widgets?filter%5Bcolor%5D=red"
     );
 }
 
