@@ -769,11 +769,31 @@ impl CodeGenerator {
         }
 
         let mut param_building = Vec::new();
+        let mut exploded_objects = Vec::new();
 
         for param in query_params {
             // Use snake_case for Rust variable name with keyword escaping
             let param_name_snake = self.param_ident_str(param);
             let param_name = Self::to_field_ident(&param_name_snake);
+
+            if param.form_explode_object {
+                // form-exploded object (issue #27): reqwest serializes the
+                // struct through serde_urlencoded, so each property becomes
+                // its own `key=value` pair. The parameter's own name never
+                // appears in the query string per RFC 6570 form-explosion.
+                if param.required {
+                    exploded_objects.push(quote! {
+                        req = req.query(&#param_name);
+                    });
+                } else {
+                    exploded_objects.push(quote! {
+                        if let Some(v) = #param_name {
+                            req = req.query(&v);
+                        }
+                    });
+                }
+                continue;
+            }
 
             // Use the original parameter name from OpenAPI spec as the query string key
             let param_key = &param.name;
@@ -807,15 +827,26 @@ impl CodeGenerator {
             }
         }
 
-        quote! {
-            // Add query parameters
-            {
-                let mut query_params: Vec<(&str, String)> = Vec::new();
-                #(#param_building)*
-                if !query_params.is_empty() {
-                    req = req.query(&query_params);
+        // Ops whose query params are all form-exploded objects skip the
+        // pair-vector block entirely.
+        let pairs_block = if param_building.is_empty() {
+            quote! {}
+        } else {
+            quote! {
+                {
+                    let mut query_params: Vec<(&str, String)> = Vec::new();
+                    #(#param_building)*
+                    if !query_params.is_empty() {
+                        req = req.query(&query_params);
+                    }
                 }
             }
+        };
+
+        quote! {
+            // Add query parameters
+            #pairs_block
+            #(#exploded_objects)*
         }
     }
 

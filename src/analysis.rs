@@ -391,6 +391,15 @@ pub struct ParameterInfo {
     /// Empty/none = use sanitize from `name`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rust_ident: Option<String>,
+    /// True for a query parameter whose schema is an object and whose
+    /// style/explode resolve to form + explode=true (the OAS 3.x defaults
+    /// for query). Per RFC 6570 form-explosion each object property becomes
+    /// its own query pair (`?color=red&size=big`); the parameter name itself
+    /// never appears in the query string. When set, `schema_ref` holds the
+    /// struct type generated/resolved for the object and the client emits
+    /// `req.query(&value)` instead of a single `name=value` pair. Issue #27.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub form_explode_object: bool,
 }
 
 impl Default for DependencyGraph {
@@ -4325,7 +4334,10 @@ impl SchemaAnalyzer {
         // Extract parameters (operation-level first, then merge path-item-level)
         if let Some(parameters) = &operation.parameters {
             for param in parameters {
-                let resolved = self.resolve_parameter(param);
+                // into_owned: analyze_parameter needs `&mut self` (it may
+                // register an inline object schema for form-exploded query
+                // params), which can't coexist with the Cow's `&self` borrow.
+                let resolved = self.resolve_parameter(param).into_owned();
                 if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
                     op_info.parameters.push(param_info);
                 }
@@ -4340,7 +4352,7 @@ impl SchemaAnalyzer {
                 .map(|p| (p.name.clone(), p.location.clone()))
                 .collect();
             for param in path_params {
-                let resolved = self.resolve_parameter(param);
+                let resolved = self.resolve_parameter(param).into_owned();
                 if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
                     if !existing_keys
                         .contains(&(param_info.name.clone(), param_info.location.clone()))
@@ -4399,6 +4411,7 @@ impl SchemaAnalyzer {
                 description: None,
                 enum_values: None,
                 rust_ident: None,
+                form_explode_object: false,
             });
         }
 
@@ -4510,9 +4523,10 @@ impl SchemaAnalyzer {
     /// alongside the operation methods. See issue #10 follow-up.
     /// Look up `#/components/schemas/{name}` in the raw OpenAPI document and
     /// decide whether it's a string with enum values. Used by analyze_parameter
-    /// (T10) so that only string-enum refs flow through to the codegen-typed
-    /// parameter path; struct/object refs stay as `String` until we have
-    /// proper deepObject / form-style query serialization (T14).
+    /// (T10). String-enum refs flow through to the codegen-typed parameter
+    /// path; object refs are typed only when form-exploded (issue #27), and
+    /// other struct refs stay `String` until deepObject / explode=false
+    /// serialization is generated (T14).
     fn referenced_schema_is_string_enum(&self, name: &str) -> bool {
         let Some(schema_value) = self
             .openapi_spec
@@ -4533,7 +4547,7 @@ impl SchemaAnalyzer {
     }
 
     fn analyze_parameter(
-        &self,
+        &mut self,
         param: &crate::openapi::Parameter,
         operation_id: &str,
     ) -> Result<Option<ParameterInfo>> {
@@ -4546,20 +4560,43 @@ impl SchemaAnalyzer {
         let mut rust_type = "String".to_string();
         let mut schema_ref = None;
         let mut enum_values: Option<Vec<String>> = None;
+        let mut form_explode_object = false;
+
+        // OAS 3.x defaults for `in: query` are style=form, and explode=true
+        // when the style is form. So an object query parameter with nothing
+        // specified is *already* form-exploded per spec (issue #27).
+        let form_exploded_query = location == "query"
+            && matches!(param.style.as_deref(), None | Some("form"))
+            && param.explode.unwrap_or(true);
 
         if let Some(schema) = &param.schema {
             if let Some(ref_str) = schema.reference() {
                 // T10: keep the resolved type when the target is a string-enum
                 // (then `Display`/`as_str` are emitted, see generate_string_enum).
-                // For struct/object refs we fall back to `String` here — those
-                // need deepObject / form / serde_urlencoded handling that's
-                // not yet generated; emitting the typed name would produce
-                // `(struct).to_string()` and not compile.
+                // Object refs on form-exploded query params keep the resolved
+                // struct type too — the client serializes each property as its
+                // own query pair via `req.query(&value)` (issue #27). Other
+                // struct/object refs (deepObject, explode=false) still fall
+                // back to `String` — those wire formats aren't generated yet.
                 if let Some(name) = self.extract_schema_name(ref_str) {
                     if self.referenced_schema_is_string_enum(name) {
                         schema_ref = Some(name.to_string());
+                    } else if form_exploded_query && self.referenced_schema_is_object(name) {
+                        schema_ref = Some(name.to_string());
+                        form_explode_object = true;
                     }
                 }
+            } else if form_exploded_query && Self::schema_is_inline_object(schema) {
+                // Inline object schema on a form-exploded query parameter:
+                // synthesize a struct (e.g. `FindWidgetsFilter`) so the
+                // caller passes typed fields instead of a pre-encoded string.
+                let op_pascal = operation_id.replace('.', "_").to_pascal_case();
+                let param_pascal = name.to_pascal_case();
+                let synthetic_name = format!("{op_pascal}{param_pascal}");
+                let mut deps = HashSet::new();
+                self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
+                schema_ref = Some(synthetic_name);
+                form_explode_object = true;
             } else if let Some(schema_type) = schema.schema_type() {
                 // Route integer/number through the same TypeMapper the schema
                 // property path uses (see analyze_property), so `format: int32`
@@ -4604,6 +4641,34 @@ impl SchemaAnalyzer {
             description: param.description.clone(),
             enum_values,
             rust_ident: None,
+            form_explode_object,
         }))
+    }
+
+    /// True when `#/components/schemas/{name}` is an object schema — declared
+    /// `type: object` or, absent a `type`, carrying `properties`. Used to
+    /// decide whether a $ref query parameter can be form-exploded (issue #27).
+    fn referenced_schema_is_object(&self, name: &str) -> bool {
+        let Some(schema_value) = self
+            .openapi_spec
+            .get("components")
+            .and_then(|c| c.get("schemas"))
+            .and_then(|s| s.get(name))
+        else {
+            return false;
+        };
+        match schema_value.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t == "object",
+            None => schema_value.get("properties").is_some(),
+        }
+    }
+
+    /// Inline-schema counterpart of [`Self::referenced_schema_is_object`].
+    fn schema_is_inline_object(schema: &crate::openapi::Schema) -> bool {
+        match schema.schema_type() {
+            Some(crate::openapi::SchemaType::Object) => true,
+            None => schema.details().properties.is_some(),
+            _ => false,
+        }
     }
 }
