@@ -2,8 +2,11 @@
 # Smoke-test that generated clients for every spec under specs/ compile cleanly.
 #
 # Auto-discovers specs/*.yaml and specs/*.json. Each spec produces a separate
-# scratch crate; we run the `openapi-to-rust` generator into it and then
-# `cargo check`. Any regression here means a real-world spec stops compiling.
+# scratch crate; we run the `openapi-to-rust` generator into it, then check
+# all scratch crates as ONE cargo workspace: a single dependency resolution,
+# a single target-dir lock, and cargo schedules the per-crate checks across
+# all cores itself. Any regression here means a real-world spec stops
+# compiling.
 #
 # Usage:
 #   scripts/spec-compile.sh                        # all specs in specs/
@@ -16,6 +19,13 @@
 #   SPEC_COMPILE_LIMIT=N    process only the first N alphabetically-sorted specs
 #   SPEC_COMPILE_PARSE_ONLY=1  skip cargo check; only verify the generator
 #                              parses+emits without errors. Faster.
+#   SPEC_COMPILE_TARGET_DIR=path  shared cargo target dir for the scratch
+#                              workspace (default tmp/spec-compile-target).
+#                              Dependency artifacts (reqwest, chrono, …)
+#                              compile once and are reused by all specs — and
+#                              by later runs, since the dir survives this
+#                              script's per-run cleanup. Wipe it to force a
+#                              cold build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,6 +43,13 @@ WORKSPACE="$(pwd)"
 ROOT="$WORKSPACE/tmp/spec-compile"
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
+
+# Shared target dir for the scratch workspace. Deliberately OUTSIDE $ROOT so
+# it survives the rm -rf above and stays warm across runs. Only exported for
+# the `cargo check` step — the generator build above must keep using the
+# workspace target/.
+SCRATCH_TARGET="${SPEC_COMPILE_TARGET_DIR:-$WORKSPACE/tmp/spec-compile-target}"
+mkdir -p "$SCRATCH_TARGET"
 
 # Discover specs. Sort for deterministic output.
 mapfile -t ALL_SPECS < <(find specs -maxdepth 1 -type f \( -name "*.yaml" -o -name "*.json" \) | sort)
@@ -63,10 +80,12 @@ fi
 echo "[spec-compile] running ${#SPECS[@]} spec(s)"
 echo
 
+# ---- Phase 1: generate a scratch crate per spec -------------------------
 passed=()
 failed_gen=()
 failed_check=()
 skipped=()
+gen_ok=()
 for entry in "${SPECS[@]}"; do
   IFS='|' read -r name spec_path <<<"$entry"
 
@@ -138,26 +157,57 @@ EOF
     continue
   fi
 
-  if [ "${SPEC_COMPILE_PARSE_ONLY:-}" = "1" ]; then
-    echo "GEN-OK"
-    passed+=("$name")
-    [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$dir"
-    continue
-  fi
-
-  # Cargo check step
-  log="$dir/check.log"
-  if ! ( cd "$dir" && cargo check $OFFLINE ) >"$log" 2>&1; then
-    err_count=$(grep -cE "^error" "$log" || true)
-    echo "CHECK-FAIL ($err_count errs)"
-    failed_check+=("$name")
-    continue
-  fi
-
-  echo "PASS"
-  passed+=("$name")
-  [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$dir"
+  echo "GEN-OK"
+  gen_ok+=("$name")
 done
+
+if [ "${SPEC_COMPILE_PARSE_ONLY:-}" = "1" ]; then
+  passed=("${gen_ok[@]}")
+  [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
+elif [ ${#gen_ok[@]} -gt 0 ]; then
+  # ---- Phase 2: check everything as one workspace ------------------------
+  {
+    echo "[workspace]"
+    echo "resolver = \"2\""
+    echo "members = ["
+    for name in "${gen_ok[@]}"; do
+      echo "  \"$name\","
+    done
+    echo "]"
+  } >"$ROOT/Cargo.toml"
+
+  echo
+  echo "[spec-compile] cargo check (workspace of ${#gen_ok[@]} crates)..."
+  ws_log="$ROOT/check.log"
+  if ( cd "$ROOT" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check --workspace --keep-going $OFFLINE ) >"$ws_log" 2>&1; then
+    passed=("${gen_ok[@]}")
+    for name in "${gen_ok[@]}"; do
+      printf "%-30s PASS\n" "$name"
+    done
+    [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
+  else
+    # Attribute failures per crate. Everything that compiles is already
+    # cached from the workspace pass, so these re-checks are cheap. Passing
+    # crates are cleaned up only after the loop — they must stay on disk
+    # while they're still members of the workspace being checked.
+    for name in "${gen_ok[@]}"; do
+      log="$ROOT/$name/check.log"
+      if ( cd "$ROOT" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check -p "spec-compile-$name" $OFFLINE ) >"$log" 2>&1; then
+        printf "%-30s PASS\n" "$name"
+        passed+=("$name")
+      else
+        err_count=$(grep -cE "^error" "$log" || true)
+        printf "%-30s CHECK-FAIL (%s errs)\n" "$name" "$err_count"
+        failed_check+=("$name")
+      fi
+    done
+    if [ "${SPEC_COMPILE_KEEP:-}" != "1" ]; then
+      for name in "${passed[@]}"; do
+        rm -rf "$ROOT/$name"
+      done
+    fi
+  fi
+fi
 
 echo
 echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed, ${#failed_check[@]} check-failed, ${#skipped[@]} skipped"

@@ -391,6 +391,52 @@ pub struct ParameterInfo {
     /// Empty/none = use sanitize from `name`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rust_ident: Option<String>,
+    /// Wire serialization for object/array query parameters, decided from
+    /// the parameter's `style`/`explode` and schema shape (T14, GH #27).
+    /// `None` = plain single `name=value` pair (scalars, string enums, and
+    /// the opaque-string fallback for styles that aren't generated yet).
+    /// For the object modes, `schema_ref` holds the struct type
+    /// generated/resolved for the object schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_serialization: Option<QuerySerialization>,
+}
+
+/// How the client serializes an object- or array-schema query parameter
+/// onto the request URL. Consumed by `ClientGenerator::generate_query_params`
+/// and `get_param_rust_type`; server codegen and the registry deliberately
+/// keep the `String` fallback for now (openapi-generator-0jz).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum QuerySerialization {
+    /// style=form + explode=true object (the OAS 3.x defaults for query):
+    /// each property is its own pair — `?color=red&size=big`. The parameter
+    /// name never appears in the query string (RFC 6570 form-explosion).
+    FormExplodedObject,
+    /// style=form + explode=false object: one comma-joined key,value list —
+    /// `?filter=color,red,size,big`.
+    FormObject,
+    /// style=deepObject (explode=true) object: bracketed keys —
+    /// `?filter[color]=red`.
+    DeepObject,
+    /// style=form + explode=true array: repeated pairs — `?tags=a&tags=b`.
+    /// Parameter typed `Vec<item_type>`.
+    FormExplodedArray { item_type: ArrayItemType },
+    /// style=form + explode=false array: one comma-joined pair —
+    /// `?tags=a,b,c`. Parameter typed `Vec<item_type>`.
+    FormArray { item_type: ArrayItemType },
+}
+
+/// Item type of a typed array query parameter. The two variants need
+/// different handling in codegen: scalars are already Rust type strings
+/// (possibly paths like `rust_decimal::Decimal` from `[type_mappings]`),
+/// while enum refs are raw *schema names* that must run through
+/// `to_rust_type_name` sanitization (cloudflare:
+/// `resource-sharing_resource_type`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum ArrayItemType {
+    /// A Rust scalar type string from the TypeMapper (`String`, `i32`, …).
+    Scalar(String),
+    /// The schema name of a referenced string enum (emits `Display`).
+    EnumRef(String),
 }
 
 impl Default for DependencyGraph {
@@ -4325,7 +4371,10 @@ impl SchemaAnalyzer {
         // Extract parameters (operation-level first, then merge path-item-level)
         if let Some(parameters) = &operation.parameters {
             for param in parameters {
-                let resolved = self.resolve_parameter(param);
+                // into_owned: analyze_parameter needs `&mut self` (it may
+                // register an inline object schema for form-exploded query
+                // params), which can't coexist with the Cow's `&self` borrow.
+                let resolved = self.resolve_parameter(param).into_owned();
                 if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
                     op_info.parameters.push(param_info);
                 }
@@ -4340,7 +4389,7 @@ impl SchemaAnalyzer {
                 .map(|p| (p.name.clone(), p.location.clone()))
                 .collect();
             for param in path_params {
-                let resolved = self.resolve_parameter(param);
+                let resolved = self.resolve_parameter(param).into_owned();
                 if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
                     if !existing_keys
                         .contains(&(param_info.name.clone(), param_info.location.clone()))
@@ -4399,6 +4448,7 @@ impl SchemaAnalyzer {
                 description: None,
                 enum_values: None,
                 rust_ident: None,
+                query_serialization: None,
             });
         }
 
@@ -4510,9 +4560,10 @@ impl SchemaAnalyzer {
     /// alongside the operation methods. See issue #10 follow-up.
     /// Look up `#/components/schemas/{name}` in the raw OpenAPI document and
     /// decide whether it's a string with enum values. Used by analyze_parameter
-    /// (T10) so that only string-enum refs flow through to the codegen-typed
-    /// parameter path; struct/object refs stay as `String` until we have
-    /// proper deepObject / form-style query serialization (T14).
+    /// (T10). String-enum refs flow through to the codegen-typed parameter
+    /// path; object refs are typed only when form-exploded (issue #27), and
+    /// other struct refs stay `String` until deepObject / explode=false
+    /// serialization is generated (T14).
     fn referenced_schema_is_string_enum(&self, name: &str) -> bool {
         let Some(schema_value) = self
             .openapi_spec
@@ -4533,7 +4584,7 @@ impl SchemaAnalyzer {
     }
 
     fn analyze_parameter(
-        &self,
+        &mut self,
         param: &crate::openapi::Parameter,
         operation_id: &str,
     ) -> Result<Option<ParameterInfo>> {
@@ -4546,20 +4597,79 @@ impl SchemaAnalyzer {
         let mut rust_type = "String".to_string();
         let mut schema_ref = None;
         let mut enum_values: Option<Vec<String>> = None;
+        let mut query_serialization: Option<QuerySerialization> = None;
+
+        // OAS 3.x style/explode resolution for `in: query`. Defaults are
+        // style=form and — for form only — explode=true, so an object/array
+        // query parameter with nothing specified is already form-exploded
+        // per spec (issue #27). deepObject is only defined with explode=true;
+        // an explicit explode=false there is undefined and keeps the fallback.
+        let is_query = location == "query";
+        let form_style = matches!(param.style.as_deref(), None | Some("form"));
+        let form_exploded = form_style && param.explode.unwrap_or(true);
+        let deep_object =
+            param.style.as_deref() == Some("deepObject") && param.explode != Some(false);
+
+        let object_serialization = if !is_query {
+            None
+        } else if deep_object {
+            Some(QuerySerialization::DeepObject)
+        } else if form_exploded {
+            Some(QuerySerialization::FormExplodedObject)
+        } else if form_style {
+            Some(QuerySerialization::FormObject)
+        } else {
+            None
+        };
 
         if let Some(schema) = &param.schema {
             if let Some(ref_str) = schema.reference() {
                 // T10: keep the resolved type when the target is a string-enum
                 // (then `Display`/`as_str` are emitted, see generate_string_enum).
-                // For struct/object refs we fall back to `String` here — those
-                // need deepObject / form / serde_urlencoded handling that's
-                // not yet generated; emitting the typed name would produce
-                // `(struct).to_string()` and not compile.
+                // Object refs on query params with a generated wire style keep
+                // the resolved struct type too (T14/issue #27); anything else
+                // stays on the opaque `String` fallback.
                 if let Some(name) = self.extract_schema_name(ref_str) {
                     if self.referenced_schema_is_string_enum(name) {
                         schema_ref = Some(name.to_string());
+                    } else if object_serialization.is_some()
+                        && self.referenced_schema_is_object(name)
+                    {
+                        schema_ref = Some(name.to_string());
+                        query_serialization = object_serialization.clone();
                     }
                 }
+            } else if object_serialization.is_some() && Self::schema_is_inline_object(schema) {
+                // Inline object schema on a query parameter with a generated
+                // wire style: synthesize a struct (e.g. `FindWidgetsFilter`)
+                // so the caller passes typed fields instead of a pre-encoded
+                // string.
+                let op_pascal = operation_id.replace('.', "_").to_pascal_case();
+                let param_pascal = name.to_pascal_case();
+                let synthetic_name = format!("{op_pascal}{param_pascal}");
+                let mut deps = HashSet::new();
+                self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
+                schema_ref = Some(synthetic_name);
+                query_serialization = object_serialization.clone();
+            } else if is_query
+                && form_style
+                && matches!(
+                    schema.schema_type(),
+                    Some(crate::openapi::SchemaType::Array)
+                )
+                && let Some(item_type) = self.array_param_item_type(schema)
+            {
+                // Typed form-style array (openapi-generator-anu): the client
+                // takes `Vec<item_type>` and emits repeated (explode=true) or
+                // comma-joined (explode=false) pairs. `rust_type` deliberately
+                // stays "String": server codegen and the registry key off it
+                // (openapi-generator-0jz). Arrays whose items don't type
+                // (objects, nested arrays) fall through to the fallback.
+                query_serialization = Some(if form_exploded {
+                    QuerySerialization::FormExplodedArray { item_type }
+                } else {
+                    QuerySerialization::FormArray { item_type }
+                });
             } else if let Some(schema_type) = schema.schema_type() {
                 // Route integer/number through the same TypeMapper the schema
                 // property path uses (see analyze_property), so `format: int32`
@@ -4604,6 +4714,65 @@ impl SchemaAnalyzer {
             description: param.description.clone(),
             enum_values,
             rust_ident: None,
+            query_serialization,
         }))
+    }
+
+    /// Rust item type for a typed array query parameter
+    /// (openapi-generator-anu). Scalar items map through the TypeMapper;
+    /// $ref items resolve only when the target is a generated string enum
+    /// (those emit `Display`, so `item.to_string()` works in the client).
+    /// Anything else — objects, nested arrays — returns None and the
+    /// parameter keeps the opaque-string fallback. Inline-enum'd string
+    /// items stay plain `String`: the op-scoped enum synthesis (issue #10)
+    /// is wired for scalar params only.
+    fn array_param_item_type(&self, schema: &crate::openapi::Schema) -> Option<ArrayItemType> {
+        let items = schema.details().items.as_deref()?;
+        if let Some(ref_str) = items.reference() {
+            let name = self.extract_schema_name(ref_str)?;
+            return self
+                .referenced_schema_is_string_enum(name)
+                .then(|| ArrayItemType::EnumRef(name.to_string()));
+        }
+        let format = items.details().format.clone();
+        let scalar = match items.schema_type()? {
+            crate::openapi::SchemaType::String => "String".to_string(),
+            crate::openapi::SchemaType::Integer => {
+                self.type_mapper.integer_format(format.as_deref()).rust_type
+            }
+            crate::openapi::SchemaType::Number => {
+                self.type_mapper.number_format(format.as_deref()).rust_type
+            }
+            crate::openapi::SchemaType::Boolean => "bool".to_string(),
+            _ => return None,
+        };
+        Some(ArrayItemType::Scalar(scalar))
+    }
+
+    /// True when `#/components/schemas/{name}` is an object schema — declared
+    /// `type: object` or, absent a `type`, carrying `properties`. Used to
+    /// decide whether a $ref query parameter can be form-exploded (issue #27).
+    fn referenced_schema_is_object(&self, name: &str) -> bool {
+        let Some(schema_value) = self
+            .openapi_spec
+            .get("components")
+            .and_then(|c| c.get("schemas"))
+            .and_then(|s| s.get(name))
+        else {
+            return false;
+        };
+        match schema_value.get("type").and_then(|v| v.as_str()) {
+            Some(t) => t == "object",
+            None => schema_value.get("properties").is_some(),
+        }
+    }
+
+    /// Inline-schema counterpart of [`Self::referenced_schema_is_object`].
+    fn schema_is_inline_object(schema: &crate::openapi::Schema) -> bool {
+        match schema.schema_type() {
+            Some(crate::openapi::SchemaType::Object) => true,
+            None => schema.details().properties.is_some(),
+            _ => false,
+        }
     }
 }
