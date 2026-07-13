@@ -16,6 +16,14 @@
 #   SPEC_COMPILE_LIMIT=N    process only the first N alphabetically-sorted specs
 #   SPEC_COMPILE_PARSE_ONLY=1  skip cargo check; only verify the generator
 #                              parses+emits without errors. Faster.
+#   SPEC_COMPILE_TARGET_DIR=path  shared cargo target dir for the scratch
+#                              crates (default tmp/spec-compile-target).
+#                              Every scratch crate has an identical dep tree,
+#                              so dependency artifacts (reqwest, chrono, …)
+#                              compile once and are reused by all specs — and
+#                              by later runs, since the dir survives this
+#                              script's per-run cleanup. Wipe it to force a
+#                              cold build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,6 +41,13 @@ WORKSPACE="$(pwd)"
 ROOT="$WORKSPACE/tmp/spec-compile"
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
+
+# Shared target dir for all scratch-crate checks. Deliberately OUTSIDE $ROOT
+# so it survives the rm -rf above and stays warm across runs. Only exported
+# for the `cargo check` step — the generator build above must keep using the
+# workspace target/.
+SCRATCH_TARGET="${SPEC_COMPILE_TARGET_DIR:-$WORKSPACE/tmp/spec-compile-target}"
+mkdir -p "$SCRATCH_TARGET"
 
 # Discover specs. Sort for deterministic output.
 mapfile -t ALL_SPECS < <(find specs -maxdepth 1 -type f \( -name "*.yaml" -o -name "*.json" \) | sort)
@@ -147,7 +162,7 @@ EOF
 
   # Cargo check step
   log="$dir/check.log"
-  if ! ( cd "$dir" && cargo check $OFFLINE ) >"$log" 2>&1; then
+  if ! ( cd "$dir" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check $OFFLINE ) >"$log" 2>&1; then
     err_count=$(grep -cE "^error" "$log" || true)
     echo "CHECK-FAIL ($err_count errs)"
     failed_check+=("$name")
