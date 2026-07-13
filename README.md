@@ -11,6 +11,10 @@ We originally built this internally at [GPU CLI](https://gpu-cli.sh) to generate
 
 It currently compiles cleanly against **54 real-world specs** in `specs/` (Stripe, OpenAI, Anthropic, Cloudflare's 14k-schema spec, GitHub, Discord, Microsoft Graph, Spotify, Twilio, …), guarded by CI.
 
+## What's new in 0.6
+
+- **Typed query parameter serialization** ([#27](https://github.com/gpu-cli/openapi-to-rust/issues/27)) — object and array query params are generated per their OAS `style`/`explode`: form-exploded objects become struct arguments serialized as `?color=red&size=5`, explode=false objects comma-join, deepObject objects emit `?filter[color]=red`, and form arrays become `Vec<T>` (repeated or comma-joined). **Breaking for regenerated clients** — the old `Option<impl AsRef<str>>` passthrough put a single opaque `name=<string>` pair on the wire, which no server expecting the declared style could parse. See [Breaking changes (pre-1.0)](#breaking-changes-pre-10).
+
 ## What's new in 0.5
 
 - **Server codegen (Axum)** — opt-in `[server]` section emits a trait per tag, a status-code-typed response enum (with `IntoResponse`), an SSE-aware variant, and a `Router` factory. Pick operations one-by-one or `--all-tag`. Two end-to-end examples ship in `examples/server-{openai-responses,anthropic-messages}/`.
@@ -558,7 +562,7 @@ usually because the previous output was wrong on the wire. Regenerating makes
 the compiler point at every affected call site; there is no silent behavior
 change without a signature change.
 
-### 0.6.0 (unreleased)
+### 0.6.0
 
 Object- and array-schema **query parameters** are now serialized according to
 their OpenAPI `style`/`explode` (issue [#27](https://github.com/gpu-cli/openapi-to-rust/issues/27)).
@@ -583,7 +587,14 @@ extraction (tracked separately).
 
 ## Release notes
 
-### 0.5 (this release)
+### 0.6 (this release)
+
+**Typed query parameter serialization** ([#27](https://github.com/gpu-cli/openapi-to-rust/issues/27))
+- Object and array query parameters are generated per their OAS `style`/`explode` instead of an opaque `Option<impl AsRef<str>>` passthrough: form-exploded objects (`?color=red&size=5`), explode=false objects (`?filter=color,red,size,5`), deepObject objects (`?filter[color]=red`), and `Vec<T>` form arrays (repeated or comma-joined pairs, scalar or string-enum items).
+- **Breaking for regenerated clients** — see [Breaking changes (pre-1.0)](#breaking-changes-pre-10) for the full signature table.
+- `scripts/spec-compile.sh` checks all scratch crates as one cargo workspace against a shared persistent target dir — full-sweep verification dropped from hours to minutes.
+
+### 0.5
 
 **Server codegen (Axum)**
 - `[server]` TOML section with selector grammar (operationId / `METHOD /path` / `tag:<name>`).
