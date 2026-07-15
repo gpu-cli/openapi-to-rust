@@ -17,12 +17,15 @@ use std::collections::BTreeMap;
 impl CodeGenerator {
     /// Generate the registry.rs file content
     pub fn generate_registry(&self, analysis: &SchemaAnalysis) -> crate::Result<String> {
+        let provenance_attribute = self.provenance_attribute();
         let custom_methods = registry_custom_methods(analysis);
         let registry_types = Self::generate_registry_types(&custom_methods);
         let operation_defs = self.generate_operation_defs(analysis, &custom_methods);
 
         let tokens = quote! {
             //! Auto-generated operation registry. Do not edit.
+
+            #provenance_attribute
 
             #registry_types
             #operation_defs

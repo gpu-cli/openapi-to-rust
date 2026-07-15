@@ -1,12 +1,13 @@
 use clap::{Parser, Subcommand};
-use openapi_to_rust::cli::{json_from_str_lossy, yaml_to_json_value};
+use openapi_to_rust::cli::{load_spec, parse_spec, sanitize_source_provenance};
 use openapi_to_rust::server::{
     OperationIndex, Selector,
     edit::Editor as ServerEditor,
     list::{ListFilter, ListOutput, render as render_list},
     resolve as resolve_selectors,
 };
-use openapi_to_rust::{CodeGenerator, ConfigFile, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, ConfigFile, GeneratorConfig, SchemaAnalyzer};
+use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -22,15 +23,68 @@ struct Cli {
 enum Commands {
     /// Generate code from OpenAPI spec
     Generate {
-        /// Path to configuration file (openapi-to-rust.toml)
-        #[arg(short, long, default_value = "openapi-to-rust.toml")]
-        config: PathBuf,
+        /// Local OpenAPI file or HTTPS URL. Omit to use config mode.
+        source: Option<String>,
+        /// Path to configuration file. Defaults to openapi-to-rust.toml when
+        /// no positional source is supplied.
+        #[arg(short, long, conflicts_with = "source")]
+        config: Option<PathBuf>,
+        /// Direct-mode output directory.
+        #[arg(long, requires = "source")]
+        output_dir: Option<PathBuf>,
+        /// Direct-mode generated module label.
+        #[arg(long, requires = "source")]
+        module_name: Option<String>,
+        /// Direct mode: emit model types without an HTTP client.
+        #[arg(long, requires = "source")]
+        types_only: bool,
         /// Force every typed-scalar strategy back to "string" (Q2).
         /// Useful for bisecting regressions caused by typed-scalar
         /// adoption — overrides any `[generator.types]` settings in
         /// the TOML config.
         #[arg(long)]
         types_conservative: bool,
+        /// Analyze and render in memory without writing files.
+        #[arg(long, conflicts_with = "check")]
+        dry_run: bool,
+        /// Exit unsuccessfully when generated files are missing or stale.
+        #[arg(long, conflicts_with = "dry_run")]
+        check: bool,
+        /// Suppress successful human-readable output.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+        /// Emit one machine-readable JSON result on stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a valid starter openapi-to-rust.toml.
+    Init {
+        /// Local OpenAPI file or HTTPS URL.
+        source: String,
+        /// Starter configuration path.
+        #[arg(short, long, default_value = "openapi-to-rust.toml")]
+        config: PathBuf,
+        /// Output directory recorded in the starter config.
+        #[arg(long, default_value = "src/generated")]
+        output_dir: PathBuf,
+        /// Generated module label (derived from the source when omitted).
+        #[arg(long)]
+        module_name: Option<String>,
+        /// Configure model generation without an HTTP client.
+        #[arg(long)]
+        types_only: bool,
+        /// Replace an existing configuration file.
+        #[arg(long)]
+        force: bool,
+        /// Validate and print/describe the starter config without writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Suppress successful human-readable output.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+        /// Emit one machine-readable JSON result on stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Validate configuration file without generating code
     Validate {
@@ -107,11 +161,21 @@ enum ServerCommands {
 
 fn main() {
     let cli = Cli::parse();
+    let machine_readable_error = matches!(
+        &cli.command,
+        Commands::Generate { json: true, .. } | Commands::Init { json: true, .. }
+    );
     if let Err(e) = run(cli) {
-        // Use Display, not Debug, so thiserror messages render with
-        // their fuzzy-match suggestions (`Did you mean ...?`) instead
-        // of as raw enum debug output.
-        eprintln!("Error: {e}");
+        if machine_readable_error {
+            println!(
+                "{}",
+                serde_json::json!({ "status": "error", "error": e.to_string() })
+            );
+        } else {
+            // Use Display, not Debug, so thiserror messages render with
+            // fuzzy-match suggestions instead of raw enum debug output.
+            eprintln!("Error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -135,156 +199,49 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Generate {
+            source,
             config,
+            output_dir,
+            module_name,
+            types_only,
             types_conservative,
-        } => {
-            println!("📖 Reading configuration from: {}", config.display());
-
-            // Load configuration from TOML
-            let config_file = match ConfigFile::load(&config) {
-                Ok(cf) => cf,
-                Err(e) => {
-                    eprintln!("❌ Failed to load configuration:");
-                    eprintln!("{}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            let mut generator_config = config_file.into_generator_config();
-
-            // CLI override: `--types-conservative` collapses every
-            // Q2 typed-scalar strategy back to plain `String`. Useful
-            // for bisecting regressions caused by typed-scalar
-            // adoption without editing the TOML config.
-            if types_conservative {
-                generator_config.types = openapi_to_rust::TypeMappingConfig::conservative();
-            }
-
-            println!(
-                "📄 Reading OpenAPI spec: {}",
-                generator_config.spec_path.display()
-            );
-
-            // Read and parse OpenAPI spec
-            let spec_content = std::fs::read_to_string(&generator_config.spec_path)?;
-            let spec_value: serde_json::Value = if generator_config.spec_path.extension()
-                == Some(std::ffi::OsStr::new("yaml"))
-                || generator_config.spec_path.extension() == Some(std::ffi::OsStr::new("yml"))
-            {
-                yaml_to_json_value(&spec_content)?
-            } else {
-                json_from_str_lossy(&spec_content)?
-            };
-
-            // Version gate: surface unsupported OAS major.minor early.
-            let oas_version = spec_value
-                .get("openapi")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            match openapi_to_rust::cli::parse_oas_version(oas_version) {
-                Some((3, 0)) | Some((3, 1)) => {}
-                Some((3, 2)) => {
-                    eprintln!("⚠️  OpenAPI {oas_version}: 3.2 is experimentally supported.");
-                }
-                Some((major, minor)) => {
-                    eprintln!(
-                        "❌ Unsupported OpenAPI version: {major}.{minor} ({oas_version:?}). \
-                         This generator targets 3.0.x, 3.1.x, and (experimentally) 3.2.x. \
-                         Swagger 2.0 and OAS 1.x are not supported."
-                    );
-                    std::process::exit(1);
-                }
-                None => {
-                    let hint = if spec_value.get("swagger").is_some() {
-                        " (looks like Swagger 2.0 — out of scope)"
-                    } else {
-                        ""
-                    };
-                    eprintln!(
-                        "❌ Missing or unrecognised `openapi` field{hint}. Expected something like \"3.1.0\", got: {oas_version:?}"
-                    );
-                    std::process::exit(1);
-                }
-            }
-
-            // Analyze schemas (with extensions if configured). Build a
-            // TypeMapper from the user's [generator.types] config so
-            // per-format strategies drive type generation (Q2.0).
-            println!("🔍 Analyzing schemas...");
-            let type_mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
-            let mut analyzer = if generator_config.schema_extensions.is_empty() {
-                SchemaAnalyzer::with_type_mapper(spec_value, type_mapper)?
-            } else {
-                println!(
-                    "📎 Merging {} schema extension(s)",
-                    generator_config.schema_extensions.len()
-                );
-                SchemaAnalyzer::new_with_extensions_and_type_mapper(
-                    spec_value,
-                    &generator_config.schema_extensions,
-                    type_mapper,
-                )?
-            };
-            let mut analysis = analyzer.analyze()?;
-
-            println!("📊 Found {} schemas", analysis.schemas.len());
-            println!("📊 Found {} operations", analysis.operations.len());
-
-            // Generate code
-            println!("⚙️  Generating code...");
-            let generator = CodeGenerator::new(generator_config);
-            let result = generator.generate_all(&mut analysis)?;
-
-            if result.pruned_schemas > 0 {
-                println!(
-                    "✂️  Pruned {} schema(s) outside the selected client/server scope ({} remain)",
-                    result.pruned_schemas,
-                    analysis.schemas.len()
-                );
-            }
-
-            // Write files
-            generator.write_files(&result)?;
-
-            println!(
-                "✅ Generated {} files to {}",
-                result.files.len(),
-                generator.config().output_dir.display()
-            );
-
-            // Server files are generated and written as part of the same
-            // result as types and clients so dependency reporting is complete.
-            if !generator.config().registry_only
-                && let Some(server_section) = generator.config().server.as_ref()
-                && !server_section.operations.is_empty()
-            {
-                let out = generator.config().output_dir.clone();
-                println!("✅ Wrote server scaffolding to {}/server/", out.display());
-                print_server_hint(&analysis, server_section);
-            }
-
-            // Surface the complete direct dependency set. write_files already
-            // emitted the same copyable fragment next to the generated module.
-            if !result.required_deps.is_empty() {
-                eprintln!();
-                eprintln!(
-                    "📦 Generated code requires {} direct crate(s). Add to your Cargo.toml:",
-                    result.required_deps.len()
-                );
-                eprintln!();
-                eprintln!("[dependencies]");
-                for dep in &result.required_deps {
-                    eprintln!("{}", dep.to_toml_line());
-                }
-                eprintln!();
-                eprintln!(
-                    "(Same content written to {}/REQUIRED_DEPS.toml)",
-                    generator.config().output_dir.display()
-                );
-            }
-
-            Ok(())
-        }
+            dry_run,
+            check,
+            quiet,
+            json,
+        } => run_generate(GenerateArgs {
+            source,
+            config,
+            output_dir,
+            module_name,
+            types_only,
+            types_conservative,
+            dry_run,
+            check,
+            quiet,
+            json,
+        }),
+        Commands::Init {
+            source,
+            config,
+            output_dir,
+            module_name,
+            types_only,
+            force,
+            dry_run,
+            quiet,
+            json,
+        } => run_init(InitArgs {
+            source,
+            config,
+            output_dir,
+            module_name,
+            types_only,
+            force,
+            dry_run,
+            quiet,
+            json,
+        }),
         Commands::Server { action } => match action {
             ServerCommands::List {
                 spec,
@@ -311,6 +268,397 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+struct GenerateArgs {
+    source: Option<String>,
+    config: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    module_name: Option<String>,
+    types_only: bool,
+    types_conservative: bool,
+    dry_run: bool,
+    check: bool,
+    quiet: bool,
+    json: bool,
+}
+
+struct InitArgs {
+    source: String,
+    config: PathBuf,
+    output_dir: PathBuf,
+    module_name: Option<String>,
+    types_only: bool,
+    force: bool,
+    dry_run: bool,
+    quiet: bool,
+    json: bool,
+}
+
+#[derive(Serialize)]
+struct GenerationSummary {
+    status: &'static str,
+    source: String,
+    output_dir: String,
+    schemas: usize,
+    operations: usize,
+    pruned_schemas: usize,
+    files: Vec<String>,
+    dependencies: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
+}
+
+fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut generator_config, load_source, provenance) = match args.source {
+        Some(source) => {
+            let config = GeneratorConfig {
+                spec_path: PathBuf::from(&source),
+                output_dir: args
+                    .output_dir
+                    .unwrap_or_else(|| PathBuf::from("src/generated")),
+                module_name: args.module_name.unwrap_or_else(|| "api".to_string()),
+                enable_async_client: !args.types_only,
+                enable_sse_client: false,
+                tracing_enabled: false,
+                ..Default::default()
+            };
+            let provenance = sanitize_source_provenance(&source);
+            (config, source, provenance)
+        }
+        None => {
+            let config_path = args
+                .config
+                .unwrap_or_else(|| PathBuf::from("openapi-to-rust.toml"));
+            let raw_source = raw_config_spec_source(&config_path)?;
+            let config = ConfigFile::load(&config_path)?.into_generator_config();
+            let load_source = config.spec_path.to_string_lossy().to_string();
+            (config, load_source, sanitize_source_provenance(&raw_source))
+        }
+    };
+    if args.types_conservative {
+        generator_config.types = openapi_to_rust::TypeMappingConfig::conservative();
+    }
+
+    let spec_content = load_spec(&load_source)?;
+    let spec_value = parse_spec(&spec_content, &load_source)?;
+    let warning = validate_oas_document(&spec_value)?;
+    let mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
+    let mut analyzer = if generator_config.schema_extensions.is_empty() {
+        SchemaAnalyzer::with_type_mapper(spec_value, mapper)?
+    } else {
+        SchemaAnalyzer::new_with_extensions_and_type_mapper(
+            spec_value,
+            &generator_config.schema_extensions,
+            mapper,
+        )?
+    };
+    let mut analysis = analyzer.analyze()?;
+    let generator = CodeGenerator::new(generator_config).with_source_provenance(provenance.clone());
+    let result = generator.generate_all(&mut analysis)?;
+    let artifacts = generator.output_artifacts(&result);
+
+    let status = if args.check {
+        check_artifacts(generator.config().output_dir.as_path(), &artifacts)?;
+        "up-to-date"
+    } else if args.dry_run {
+        "dry-run"
+    } else {
+        write_artifacts(generator.config().output_dir.as_path(), &artifacts)?;
+        "generated"
+    };
+    let summary = GenerationSummary {
+        status,
+        source: provenance,
+        output_dir: generator.config().output_dir.display().to_string(),
+        schemas: analysis.schemas.len(),
+        operations: analysis.operations.len(),
+        pruned_schemas: result.pruned_schemas,
+        files: artifacts
+            .keys()
+            .map(|path| path.display().to_string())
+            .collect(),
+        dependencies: result
+            .required_deps
+            .iter()
+            .map(|dependency| dependency.crate_name)
+            .collect(),
+        warning,
+    };
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else if !args.quiet {
+        if let Some(warning) = &summary.warning {
+            eprintln!("Warning: {warning}");
+        }
+        println!(
+            "{} {} file(s) for {} in {}",
+            match status {
+                "generated" => "Generated",
+                "dry-run" => "Would generate",
+                _ => "Verified",
+            },
+            summary.files.len(),
+            summary.source,
+            summary.output_dir
+        );
+        if status == "generated" && !result.required_deps.is_empty() {
+            eprintln!(
+                "Dependency fragment: {}/REQUIRED_DEPS.toml",
+                summary.output_dir
+            );
+        }
+        if status == "generated"
+            && !generator.config().registry_only
+            && let Some(server) = generator.config().server.as_ref()
+            && !server.operations.is_empty()
+        {
+            print_server_hint(&analysis, server);
+        }
+    }
+    Ok(())
+}
+
+fn raw_config_spec_source(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(path)?;
+    let value: toml::Value = toml::from_str(&content)?;
+    value
+        .get("generator")
+        .and_then(|generator| generator.get("spec_path"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "configuration is missing generator.spec_path".into())
+}
+
+fn validate_oas_document(
+    value: &serde_json::Value,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let version = value
+        .get("openapi")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    match openapi_to_rust::cli::parse_oas_version(version) {
+        Some((3, 0 | 1)) => Ok(None),
+        Some((3, 2)) => Ok(Some(format!(
+            "OpenAPI {version} support is experimental; some 3.2-only features are not generated"
+        ))),
+        Some((major, minor)) => Err(format!(
+            "unsupported OpenAPI version {major}.{minor} ({version:?}); expected 3.0, 3.1, or experimental 3.2"
+        )
+        .into()),
+        None => {
+            let hint = if value.get("swagger").is_some() {
+                " (the document appears to be Swagger 2.0)"
+            } else {
+                ""
+            };
+            Err(format!("missing or unrecognized `openapi` version{hint}").into())
+        }
+    }
+}
+
+fn write_artifacts(
+    output_dir: &std::path::Path,
+    artifacts: &std::collections::BTreeMap<PathBuf, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (relative, content) in artifacts {
+        let path = output_dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, content)?;
+    }
+    Ok(())
+}
+
+fn check_artifacts(
+    output_dir: &std::path::Path,
+    artifacts: &std::collections::BTreeMap<PathBuf, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stale = Vec::new();
+    for (relative, expected) in artifacts {
+        match std::fs::read_to_string(output_dir.join(relative)) {
+            Ok(actual) if actual == *expected => {}
+            Ok(_) => stale.push(format!("changed: {}", relative.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                stale.push(format!("missing: {}", relative.display()));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if stale.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "generated output is stale:\n  {}\nRun generation again to update it.",
+            stale.join("\n  ")
+        )
+        .into())
+    }
+}
+
+#[derive(Serialize)]
+struct StarterConfig {
+    generator: StarterGenerator,
+    features: StarterFeatures,
+    http_client: StarterHttpClient,
+}
+
+#[derive(Serialize)]
+struct StarterGenerator {
+    spec_path: String,
+    output_dir: PathBuf,
+    module_name: String,
+}
+
+#[derive(Serialize)]
+struct StarterFeatures {
+    enable_async_client: bool,
+}
+
+#[derive(Serialize)]
+struct StarterHttpClient {
+    tracing: StarterTracing,
+}
+
+#[derive(Serialize)]
+struct StarterTracing {
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct InitSummary {
+    status: &'static str,
+    config: String,
+    source: String,
+    client: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+fn run_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.config.exists() && !args.force {
+        return Err(format!(
+            "refusing to overwrite {}; pass --force to replace it",
+            args.config.display()
+        )
+        .into());
+    }
+    let content = load_spec(&args.source)?;
+    let value = parse_spec(&content, &args.source)?;
+    let warning = validate_oas_document(&value)?;
+
+    let spec_path = starter_spec_source(&args.source, &args.config)?;
+    let starter = StarterConfig {
+        generator: StarterGenerator {
+            spec_path,
+            output_dir: args.output_dir,
+            module_name: args
+                .module_name
+                .unwrap_or_else(|| starter_module_name(&args.source)),
+        },
+        features: StarterFeatures {
+            enable_async_client: !args.types_only,
+        },
+        http_client: StarterHttpClient {
+            tracing: StarterTracing { enabled: false },
+        },
+    };
+    let rendered = format!(
+        "# Created by openapi-to-rust init.\n{}",
+        toml::to_string_pretty(&starter)?
+    );
+    if !args.dry_run {
+        if let Some(parent) = args
+            .config
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&args.config, &rendered)?;
+    }
+    let status = if args.dry_run { "dry-run" } else { "created" };
+    let summary = InitSummary {
+        status,
+        config: args.config.display().to_string(),
+        source: sanitize_source_provenance(&args.source),
+        client: !args.types_only,
+        content: args.dry_run.then_some(rendered.clone()),
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else if !args.quiet {
+        if let Some(warning) = warning {
+            eprintln!("Warning: {warning}");
+        }
+        if args.dry_run {
+            print!("{rendered}");
+        } else {
+            println!("Created {}", args.config.display());
+        }
+    }
+    Ok(())
+}
+
+fn starter_spec_source(
+    source: &str,
+    config: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if openapi_to_rust::cli::is_remote_spec(source) {
+        return Ok(source.to_string());
+    }
+    let source_path = PathBuf::from(source);
+    let config_parent = config
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if source_path.is_relative()
+        && config_parent.is_none_or(|parent| parent == std::path::Path::new("."))
+    {
+        Ok(source.to_string())
+    } else {
+        Ok(source_path.canonicalize()?.display().to_string())
+    }
+}
+
+fn starter_module_name(source: &str) -> String {
+    let candidate = reqwest::Url::parse(source)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(Iterator::last)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            std::path::Path::new(source)
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "api".to_string());
+    let stem = candidate
+        .strip_suffix(".yaml")
+        .or_else(|| candidate.strip_suffix(".yml"))
+        .or_else(|| candidate.strip_suffix(".json"))
+        .unwrap_or(&candidate);
+    let normalized = stem
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if normalized.is_empty() {
+        "api".to_string()
+    } else {
+        normalized
+    }
+}
+
 fn resolve_spec_path(
     spec: Option<PathBuf>,
     config: &std::path::Path,
@@ -333,15 +681,9 @@ fn resolve_spec_path(
 fn load_analysis(
     spec_path: &std::path::Path,
 ) -> Result<openapi_to_rust::SchemaAnalysis, Box<dyn std::error::Error>> {
-    let spec_content = std::fs::read_to_string(spec_path)?;
-    let spec_value: serde_json::Value = if spec_path.extension()
-        == Some(std::ffi::OsStr::new("yaml"))
-        || spec_path.extension() == Some(std::ffi::OsStr::new("yml"))
-    {
-        yaml_to_json_value(&spec_content)?
-    } else {
-        json_from_str_lossy(&spec_content)?
-    };
+    let source = spec_path.to_string_lossy();
+    let spec_content = load_spec(&source)?;
+    let spec_value = parse_spec(&spec_content, &source)?;
     let mut analyzer = SchemaAnalyzer::new(spec_value)?;
     Ok(analyzer.analyze()?)
 }

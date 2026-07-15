@@ -186,8 +186,8 @@ pub struct ConfigFile {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratorSection {
-    /// OpenAPI input path. Relative paths are resolved from the directory
-    /// containing the configuration file.
+    /// OpenAPI input path or HTTPS URL. Relative filesystem paths are resolved
+    /// from the directory containing the configuration file.
     pub spec_path: PathBuf,
     /// Generated-code destination. Relative paths are resolved from the
     /// directory containing the configuration file; it need not exist yet.
@@ -558,7 +558,7 @@ impl Serialize for ConfigFile {
 }
 
 fn resolve_relative_path(config_dir: &Path, path: &mut PathBuf) {
-    if path.is_relative() {
+    if path.is_relative() && !path.to_string_lossy().contains("://") {
         *path = config_dir.join(&*path);
     }
 }
@@ -647,7 +647,17 @@ impl ConfigFile {
     fn validate(&self) -> Result<(), GeneratorError> {
         let mut errors = Vec::new();
 
-        if !self.generator.spec_path.exists() {
+        let spec_source = self.generator.spec_path.to_string_lossy();
+        if crate::cli::is_remote_spec(&spec_source) {
+            if let Err(error) = crate::cli::validate_remote_spec_url(&spec_source) {
+                errors.push(format!("generator.spec_path: {error}"));
+            }
+        } else if spec_source.contains("://") {
+            let error = crate::cli::validate_remote_spec_url(&spec_source)
+                .err()
+                .unwrap_or_else(|| "unsupported remote OpenAPI URL".to_string());
+            errors.push(format!("generator.spec_path: {error}"));
+        } else if !self.generator.spec_path.exists() {
             errors.push(format!(
                 "generator.spec_path: OpenAPI spec file not found: {}. Ensure spec_path points to a valid OpenAPI JSON or YAML file.",
                 self.generator.spec_path.display()
