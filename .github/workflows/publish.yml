@@ -8,7 +8,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches crate version
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          test "${GITHUB_REF_NAME}" = "v${package_version}"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo test --all-features
+      - run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: scripts/install-smoke.sh
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -21,7 +44,7 @@ jobs:
       - name: Authenticate with crates.io
         id: crates-io-auth
         uses: rust-lang/crates-io-auth-action@v1
-      - run: cargo publish
+      - run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
       - name: Create GitHub Release

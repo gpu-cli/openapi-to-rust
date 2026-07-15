@@ -9,7 +9,7 @@
 # unless status = "intentionally-skipped".
 
 spec_version = "3.2.0"
-honest_claim = "OpenAPI 3.1 mostly; 3.2 typed and parsed; full codegen for 3.2-specific behaviors WIP."
+honest_claim = "OpenAPI 3.0 and 3.1 generation; selected 3.2 fields and methods parse, with 3.2-specific codegen still experimental."
 
 [[entry]]
 catalog_ref = "objects.OpenAPI.fields.webhooks"
@@ -31,8 +31,8 @@ fixtures = ["pathitem/query-method-3.2.yaml"]
 
 [[entry]]
 catalog_ref = "objects.Parameter.style.deepObject"
-status = "partial"
-reason = "F1 typed style/explode/allowReserved on Parameter; codegen at analysis.rs:3767 still ignores them (T14)"
+status = "supported"
+reason = "Typed client serialization and symmetric Axum extraction are covered by exploded_query_params_test and server_query_roundtrip_test"
 fixtures = ["parameter/deepobject-query.yaml"]
 
 [[entry]]
@@ -49,14 +49,14 @@ fixtures = ["schema/type-string-or-null.yaml"]
 
 [[entry]]
 catalog_ref = "objects.Components.pathItems"
-status = "partial"
-reason = "F1: Components.pathItems typed as BTreeMap<String, PathItem>. Path Item $ref resolution still TODO (H11)"
+status = "supported"
+reason = "Components.pathItems is typed and local #/components/pathItems references resolve during analysis"
 fixtures = ["components/path-items-component.yaml"]
 
 [[entry]]
 catalog_ref = "objects.Security Scheme.type[mutualTLS]"
 status = "partial"
-reason = "H2: SecurityScheme::MutualTls typed; runtime auth wiring still defers to bearer/apiKey path (T3)"
+reason = "SecurityScheme::MutualTls is typed; generated clients do not configure certificate identity or trust roots"
 fixtures = ["security/mutual-tls.yaml"]
 
 [[entry]]

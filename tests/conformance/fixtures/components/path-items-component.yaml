@@ -1,6 +1,6 @@
 # coverage: [objects.Components.fields.pathItems]
 # fails_at: L3
-# reason: Components struct has no pathItems field
+# reason: field and local ref resolution are implemented; the harness does not yet execute L3
 openapi: 3.1.0
 info: { title: PathItems Component Demo, version: 1.0.0 }
 paths:

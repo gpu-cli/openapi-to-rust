@@ -1,6 +1,6 @@
 # coverage: [objects.Components.fields.mediaTypes]
 # fails_at: L3
-# reason: 3.2-only Components bucket, not modeled
+# reason: field is typed; the conformance harness does not yet execute its L3 codegen layer
 openapi: 3.2.0
 info: { title: MediaTypes Component Demo, version: 1.0.0 }
 components:

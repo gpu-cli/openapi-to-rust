@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,9 +17,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+      - name: Verify checked-in conformance reports
+        run: |
+          CONFORMANCE_REPORT=1 cargo test --test conformance --test conformance_json_schema
+          git diff --exit-code -- tests/conformance/coverage-report.md tests/conformance/json-schema-2020-12-report.md
 
   clippy:
     runs-on: ubuntu-latest
@@ -55,21 +64,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: scripts/install-smoke.sh
 
-  # Regression guard: generate clients for our two production-target specs
-  # (OpenAI + Anthropic) and `cargo check` the result. Catches breakage
-  # where a generator change still passes unit tests but emits invalid
-  # Rust against the specs we actually ship clients for.
-  #
-  # The full corpus (54 specs) is verified locally via
-  # `scripts/spec-compile.sh` (no args) — but cargo-checking 50+
-  # generated crates exceeded CI's 6-hour job limit on the largest
-  # specs (microsoft-graph, cloudflare). Local + this CI gate is
-  # sufficient: regressions to anthropic/openai will fail PRs, and
-  # contributors can run the full corpus before pushing.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets --all-features
+
+  # Fast tier: every supported corpus document must generate, while the two
+  # production-target specs must also compile from their exact dependency
+  # fragments. The full compile tier runs separately on a schedule/manual run.
   spec-compile:
+    if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: SPEC_COMPILE_PARSE_ONLY=1 scripts/spec-compile.sh
       - run: scripts/spec-compile.sh anthropic openai
+
+  full-spec-compile:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/spec-compile.sh

@@ -1,6 +1,6 @@
 # coverage: [objects.OpenAPI.fields.webhooks, objects.Path Item.fields.post]
 # fails_at: L3
-# reason: webhooks not walked by analysis.rs
+# reason: webhooks are analyzed as operations; a dedicated typed webhook dispatcher is not generated
 openapi: 3.1.0
 info:
   title: Webhook Demo

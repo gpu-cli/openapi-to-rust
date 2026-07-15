@@ -2,11 +2,11 @@
 name = "openapi-to-rust"
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 autobins = false
 authors = ["James Lal"]
 license = "MIT"
-description = "Generate strongly-typed Rust structs, HTTP clients, and SSE streaming clients from OpenAPI 3.1 specifications"
+description = "Generate typed Rust models, HTTP/SSE clients, and Axum servers from OpenAPI 3.0/3.1 (experimental 3.2)"
 repository = "https://github.com/gpu-cli/openapi-to-rust"
 homepage = "https://github.com/gpu-cli/openapi-to-rust"
 keywords = ["openapi", "codegen", "rust", "sse", "api-client"]
@@ -16,6 +16,7 @@ include = [
     "/src/**",
     "/Cargo.toml",
     "/README.md",
+    "/CHANGELOG.md",
     "/LICENSE",
 ]
 
@@ -66,3 +67,7 @@ required-features = ["internal-tools"]
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "warn"
+# Newer Clippy releases flag the repository's established nested-condition
+# style now that let-chains are stable. Keep `-D warnings` focused on the other
+# lints while that mechanical cleanup is handled separately.
+collapsible_if = "allow"
