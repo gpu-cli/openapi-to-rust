@@ -96,6 +96,19 @@
 //! value = "application/json"
 //! ```
 //!
+//! ## Client Selection Section (Optional)
+//!
+//! ```toml
+//! [client]
+//! # Shared selector grammar: operationId | "METHOD /path" | "tag:<name>"
+//! operations = ["createResponse", "GET /models", "tag:Files"]
+//! prune_models = true
+//! ```
+//!
+//! Omitting `[client]`, or leaving `operations` empty, generates every HTTP
+//! client operation. When pruning is enabled, model reachability is the union
+//! of selected client and server operations.
+//!
 //! # Validation
 //!
 //! The configuration is validated on load:
@@ -153,6 +166,8 @@ pub struct ConfigFile {
     /// Server codegen opt-in. Absent or empty operations list ⇒ no
     /// server code emitted. See `docs/planning/server-codegen.md`.
     pub server: Option<ServerSection>,
+    /// Optional HTTP-client operation scope. Absent means all operations.
+    pub client: Option<ClientSection>,
     pub nullable_overrides: BTreeMap<String, bool>,
     /// Force a closed string-enum schema to be rendered as an extensible enum
     /// (with a `Custom(String)` fallback variant). Use when the spec under-
@@ -223,14 +238,44 @@ pub struct ServerSection {
     /// Empty ⇒ section is a no-op.
     #[serde(default)]
     pub operations: Vec<String>,
-    /// Emit only the model types reachable (transitively) from the
-    /// picked operations. Off by default because the bundled
-    /// `types.rs` is shared with the HTTP client generator and
-    /// pruning would silently drop types client code still needs.
-    /// Enable when generating a server-only crate to cut the
-    /// emitted surface dramatically (often 100× for spec-heavy APIs).
+    /// Emit only the model types reachable (transitively) from all selected
+    /// output scopes. When client and server generation coexist, pruning keeps
+    /// the union of both operation sets plus configured streaming event roots.
     #[serde(default)]
     pub prune_models: bool,
+}
+
+/// Optional scope for generated HTTP-client operations.
+///
+/// Selectors use the same grammar as [`ServerSection::operations`]. An absent
+/// section, or an empty `operations` list, preserves the historical behavior
+/// of generating every operation. The section is ignored when the async HTTP
+/// client is disabled and never filters the operation registry. Set
+/// `prune_models = true` to also remove models outside the combined selected
+/// client/server operation closure.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientSection {
+    /// Selectors picking client methods: `operationId`, `METHOD /path`, or
+    /// `tag:<name>`. Empty means all operations.
+    #[serde(default)]
+    pub operations: Vec<String>,
+    /// Restrict `types.rs` to models reachable from the selected client
+    /// operations plus any selected server operations.
+    #[serde(default)]
+    pub prune_models: bool,
+}
+
+impl ClientSection {
+    /// Parse configured selectors using the shared client/server grammar.
+    pub fn parsed_selectors(
+        &self,
+    ) -> Result<Vec<crate::server::Selector>, crate::server::SelectorParseError> {
+        self.operations
+            .iter()
+            .map(|s| crate::server::Selector::parse(s))
+            .collect()
+    }
 }
 
 impl ServerSection {
@@ -363,6 +408,8 @@ struct ConfigFileWire {
     #[serde(default)]
     server: Option<ServerSection>,
     #[serde(default)]
+    client: Option<ClientSection>,
+    #[serde(default)]
     nullable_overrides: BTreeMap<String, bool>,
     #[serde(default)]
     extensible_enums: BTreeMap<String, bool>,
@@ -410,6 +457,7 @@ impl TryFrom<ConfigFileWire> for ConfigFile {
             http_client: wire.http_client,
             streaming: wire.streaming,
             server: wire.server,
+            client: wire.client,
             nullable_overrides: wire.nullable_overrides,
             extensible_enums: wire.extensible_enums,
             type_mappings: wire.type_mappings,
@@ -439,6 +487,8 @@ struct ConfigFileRef<'a> {
     streaming: Option<&'a StreamingSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     server: Option<&'a ServerSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client: Option<&'a ClientSection>,
     nullable_overrides: &'a BTreeMap<String, bool>,
     extensible_enums: &'a BTreeMap<String, bool>,
     type_mappings: &'a BTreeMap<String, String>,
@@ -470,6 +520,7 @@ impl Serialize for ConfigFile {
             http_client: self.http_client.as_ref(),
             streaming: self.streaming.as_ref(),
             server: self.server.as_ref(),
+            client: self.client.as_ref(),
             nullable_overrides: &self.nullable_overrides,
             extensible_enums: &self.extensible_enums,
             type_mappings: &self.type_mappings,
@@ -585,6 +636,21 @@ impl ConfigFile {
                 "server.framework: framework must be \"axum\" (got \"{}\"); other frameworks are not supported yet",
                 server.framework
             ));
+        }
+
+        if let Some(client) = &self.client {
+            for (index, selector) in client.operations.iter().enumerate() {
+                if let Err(error) = crate::server::Selector::parse(selector) {
+                    errors.push(format!("client.operations[{index}]: {error}"));
+                }
+            }
+        }
+        if let Some(server) = &self.server {
+            for (index, selector) in server.operations.iter().enumerate() {
+                if let Err(error) = crate::server::Selector::parse(selector) {
+                    errors.push(format!("server.operations[{index}]: {error}"));
+                }
+            }
         }
 
         if let Some(http) = &self.http_client {
@@ -826,6 +892,7 @@ impl ConfigFile {
             registry_only: self.features.registry_only,
             types,
             server: self.server,
+            client: self.client,
         }
     }
 }

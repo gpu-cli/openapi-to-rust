@@ -395,19 +395,33 @@ impl CodeGenerator {
     ///
     /// Emits per-operation typed error enums (one variant per declared non-2xx
     /// response with a body schema) BEFORE the `impl HttpClient` block so the
-    /// generated method signatures can reference them.
+    /// generated method signatures can reference them. This low-level helper
+    /// intentionally emits every analyzed operation; use
+    /// [`Self::generate_http_client`] or [`Self::generate_all`] to honor the
+    /// configured `[client].operations` scope.
     pub fn generate_operation_methods(&self, analysis: &SchemaAnalysis) -> TokenStream {
-        let param_enums = self.generate_param_enum_types(analysis);
+        let operations: Vec<&OperationInfo> = analysis.operations.values().collect();
+        self.generate_operation_methods_for(&operations)
+    }
 
-        let op_error_enums: Vec<TokenStream> = analysis
-            .operations
-            .values()
+    /// Generate every operation-owned client artifact from one resolved
+    /// operation slice. This keeps methods, parameter enums, and typed error
+    /// enums in lockstep for selective clients.
+    pub(crate) fn generate_operation_methods_for(
+        &self,
+        operations: &[&OperationInfo],
+    ) -> TokenStream {
+        let param_enums = self.generate_param_enum_types(operations);
+
+        let op_error_enums: Vec<TokenStream> = operations
+            .iter()
+            .copied()
             .filter_map(|op| self.generate_op_error_enum(op))
             .collect();
 
-        let methods: Vec<TokenStream> = analysis
-            .operations
-            .values()
+        let methods: Vec<TokenStream> = operations
+            .iter()
+            .copied()
             .map(|op| self.generate_single_operation_method(op))
             .collect();
 
@@ -426,9 +440,9 @@ impl CodeGenerator {
     /// with `enum` or `const`. The generated enum implements `Display` so it
     /// drops into the existing `format!`-based path/query templating without
     /// any special-casing at the call site. See issue #10 follow-up.
-    fn generate_param_enum_types(&self, analysis: &SchemaAnalysis) -> TokenStream {
+    fn generate_param_enum_types(&self, operations: &[&OperationInfo]) -> TokenStream {
         let mut by_name: BTreeMap<String, &ParameterInfo> = BTreeMap::new();
-        for op in analysis.operations.values() {
+        for op in operations {
             for param in &op.parameters {
                 if param.enum_values.is_some() {
                     by_name.entry(param.rust_type.clone()).or_insert(param);

@@ -71,6 +71,10 @@ pub struct SchemaAnalysis {
     pub patterns: DetectedPatterns,
     /// OpenAPI operations and their request/response schemas
     pub operations: BTreeMap<String, OperationInfo>,
+    /// Source operationId to emitted operation IDs. Duplicate or
+    /// Rust-identifier-colliding IDs are renamed during analysis; retaining
+    /// this mapping lets selector resolution report ambiguity or renaming.
+    pub operation_id_aliases: BTreeMap<String, Vec<String>>,
     /// Optional crates the [`TypeMapper`] was asked to reference
     /// during analysis (e.g. chrono when a `format: date-time` field
     /// became `chrono::DateTime<Utc>`). The generator reads this to
@@ -971,6 +975,7 @@ impl SchemaAnalyzer {
                 type_mappings: BTreeMap::new(),
             },
             operations: BTreeMap::new(),
+            operation_id_aliases: BTreeMap::new(),
             used_type_features: crate::type_mapping::UsedFeatures::default(),
             enum_extensions: BTreeMap::new(),
         };
@@ -4200,7 +4205,7 @@ impl SchemaAnalyzer {
                 );
                 candidate
             } else {
-                raw_operation_id
+                raw_operation_id.clone()
             };
 
             let op_info = self.analyze_single_operation(
@@ -4211,6 +4216,11 @@ impl SchemaAnalyzer {
                 path_item.parameters.as_ref(),
                 analysis,
             )?;
+            analysis
+                .operation_id_aliases
+                .entry(raw_operation_id)
+                .or_default()
+                .push(operation_id.clone());
             analysis.operations.insert(operation_id, op_info);
         }
         Ok(())

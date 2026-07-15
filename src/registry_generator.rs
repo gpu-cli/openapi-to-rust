@@ -11,13 +11,15 @@
 use crate::analysis::SchemaAnalysis;
 use crate::generator::CodeGenerator;
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
+use std::collections::BTreeMap;
 
 impl CodeGenerator {
     /// Generate the registry.rs file content
     pub fn generate_registry(&self, analysis: &SchemaAnalysis) -> crate::Result<String> {
-        let registry_types = Self::generate_registry_types();
-        let operation_defs = self.generate_operation_defs(analysis);
+        let custom_methods = registry_custom_methods(analysis);
+        let registry_types = Self::generate_registry_types(&custom_methods);
+        let operation_defs = self.generate_operation_defs(analysis, &custom_methods);
 
         let tokens = quote! {
             //! Auto-generated operation registry. Do not edit.
@@ -33,7 +35,11 @@ impl CodeGenerator {
     }
 
     /// Generate the registry data types
-    fn generate_registry_types() -> TokenStream {
+    fn generate_registry_types(custom_methods: &BTreeMap<String, syn::Ident>) -> TokenStream {
+        let custom_variants = custom_methods.values();
+        let custom_as_str = custom_methods.iter().map(|(method, variant)| {
+            quote! { Self::#variant => #method }
+        });
         quote! {
             /// HTTP method for an operation
             #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -46,6 +52,9 @@ impl CodeGenerator {
                 Head,
                 Options,
                 Trace,
+                Connect,
+                Query,
+                #(#custom_variants),*
             }
 
             impl HttpMethod {
@@ -59,6 +68,9 @@ impl CodeGenerator {
                         Self::Head => "HEAD",
                         Self::Options => "OPTIONS",
                         Self::Trace => "TRACE",
+                        Self::Connect => "CONNECT",
+                        Self::Query => "QUERY",
+                        #(#custom_as_str),*
                     }
                 }
             }
@@ -156,7 +168,11 @@ impl CodeGenerator {
     }
 
     /// Generate the static OPERATIONS slice from analyzed operations
-    fn generate_operation_defs(&self, analysis: &SchemaAnalysis) -> TokenStream {
+    fn generate_operation_defs(
+        &self,
+        analysis: &SchemaAnalysis,
+        custom_methods: &BTreeMap<String, syn::Ident>,
+    ) -> TokenStream {
         let mut param_statics: Vec<TokenStream> = Vec::new();
         let mut op_entries: Vec<TokenStream> = Vec::new();
 
@@ -175,10 +191,12 @@ impl CodeGenerator {
                 "HEAD" => quote! { HttpMethod::Head },
                 "OPTIONS" => quote! { HttpMethod::Options },
                 "TRACE" => quote! { HttpMethod::Trace },
-                other => panic!(
-                    "unsupported HTTP method `{other}` for op `{}`",
-                    op.operation_id
-                ),
+                "CONNECT" => quote! { HttpMethod::Connect },
+                "QUERY" => quote! { HttpMethod::Query },
+                other => {
+                    let variant = &custom_methods[other];
+                    quote! { HttpMethod::#variant }
+                }
             };
             let path = &op.path;
 
@@ -319,4 +337,23 @@ impl CodeGenerator {
             pub static OPERATIONS: [OperationDef; #op_count] = [#(#op_entries),*];
         }
     }
+}
+
+/// Generate deterministic per-spec enum variants for extension methods. The
+/// registry remains static data and keeps `Deserialize` support without
+/// reducing arbitrary methods to a lossy catch-all variant.
+fn registry_custom_methods(analysis: &SchemaAnalysis) -> BTreeMap<String, syn::Ident> {
+    const STANDARD: &[&str] = &[
+        "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY", "TRACE",
+    ];
+    analysis
+        .operations
+        .values()
+        .map(|operation| operation.method.to_ascii_uppercase())
+        .filter(|method| !STANDARD.contains(&method.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, method)| (method, format_ident!("Custom{index}")))
+        .collect()
 }

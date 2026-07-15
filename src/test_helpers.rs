@@ -290,6 +290,7 @@ pub fn run_generation_test(
         registry_only: false,
         types: crate::type_mapping::TypeMappingConfig::default(),
         server: None,
+        client: None,
     };
 
     // Generate code

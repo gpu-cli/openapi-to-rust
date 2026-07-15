@@ -7,7 +7,9 @@
 //!
 //! Router wiring, extractors, and SSE response variants are P5.
 
-use crate::analysis::{OperationInfo, RequestBodyContent, SchemaAnalysis};
+use crate::analysis::{
+    ObjectAdditionalProperties, OperationInfo, RequestBodyContent, SchemaAnalysis, SchemaType,
+};
 use crate::config::ServerSection;
 use crate::generator::{GeneratedFile, GeneratorConfig};
 
@@ -21,8 +23,8 @@ use std::path::PathBuf;
 /// Compute the set of schema names transitively reachable from the
 /// request/response/parameter shapes of the given operations.
 ///
-/// Used by `[server].prune_models = true` to drop unreferenced types
-/// from `types.rs`. Walks every `$ref` in each schema's raw JSON
+/// Used by client/server model pruning to drop unreferenced types from
+/// `types.rs`. Walks every `$ref` in each schema's raw JSON
 /// (`AnalyzedSchema.original`) rather than the analyzer's
 /// `dependencies` field — the latter is incomplete for some
 /// schemas (e.g. struct fields whose target schemas weren't
@@ -35,6 +37,16 @@ use std::path::PathBuf;
 pub fn reachable_schemas(
     analysis: &SchemaAnalysis,
     ops: &[&OperationInfo],
+) -> std::collections::BTreeSet<String> {
+    reachable_schemas_with_roots(analysis, ops, &[])
+}
+
+/// [`reachable_schemas`] plus explicit schema roots used by configured
+/// consumers such as SSE event-union types.
+pub fn reachable_schemas_with_roots(
+    analysis: &SchemaAnalysis,
+    ops: &[&OperationInfo],
+    extra_roots: &[String],
 ) -> std::collections::BTreeSet<String> {
     let mut keep: std::collections::BTreeSet<String> = Default::default();
     let mut queue: Vec<String> = Vec::new();
@@ -61,26 +73,8 @@ pub fn reachable_schemas(
             }
         }
     }
-
-    // Synthetic types: the analyzer registers per-struct inline
-    // enums (e.g. `WebSearchApproximateLocation` + a `type` field
-    // with an inline enum → `WebSearchApproximateLocationType`) as
-    // schemas, but nothing in the spec $refs them. The codegen
-    // emits them as siblings of the parent struct's emission.
-    //
-    // Prefix-matching to a parent is unsafe because real specs use
-    // prefix-named sibling schemas (`Response` vs.
-    // `ResponsesServerEvent`). Instead, seed the BFS with every
-    // name that is never `$ref`-d anywhere in the spec. Those names
-    // and everything they transitively reach get retained. Yes this
-    // over-keeps for very large specs with rich never-referenced
-    // top-level islands; the alternative is missing-type compile
-    // errors, which we can't surface cleanly to the user.
-    let ref_named = collect_all_ref_names(analysis);
-    for name in analysis.schemas.keys() {
-        if !ref_named.contains(name) && keep.insert(name.clone()) {
-            queue.push(name.clone());
-        }
+    for root in extra_roots {
+        seed(root, &mut queue, &mut keep);
     }
 
     while let Some(name) = queue.pop() {
@@ -95,58 +89,56 @@ pub fn reachable_schemas(
             for dep in &schema.dependencies {
                 seed(dep, &mut queue, &mut keep);
             }
+            // The analyzed shape is the authoritative generated type graph.
+            // It includes ownership edges for inline/synthetic schemas that
+            // do not appear as `$ref`s in the source document.
+            collect_schema_type_refs(&schema.schema_type, &mut queue, &mut keep);
         }
     }
 
     keep
 }
 
-/// Collect every `#/components/schemas/<Name>` referenced anywhere
-/// in the spec snapshot (including from operations). Used to
-/// distinguish spec-named schemas from analyzer-synthesised ones
-/// during pruning.
-fn collect_all_ref_names(analysis: &SchemaAnalysis) -> std::collections::HashSet<String> {
-    let mut out: std::collections::HashSet<String> = Default::default();
-    for schema in analysis.schemas.values() {
-        gather_refs(&schema.original, &mut out);
-    }
-    // Operations reference schemas via request body, response
-    // bodies, and parameter schemas. Include those names too —
-    // otherwise normal spec types reached only via operations end
-    // up classified as synthetics.
-    for op in analysis.operations.values() {
-        if let Some(rb) = &op.request_body
-            && let Some(name) = rb.schema_name()
-        {
-            out.insert(name.to_string());
-        }
-        for ty in op.response_schemas.values() {
-            out.insert(ty.clone());
-        }
-        for p in &op.parameters {
-            if let Some(name) = &p.schema_ref {
-                out.insert(name.clone());
+fn collect_schema_type_refs(
+    schema_type: &SchemaType,
+    queue: &mut Vec<String>,
+    keep: &mut std::collections::BTreeSet<String>,
+) {
+    let seed =
+        |name: &str, queue: &mut Vec<String>, keep: &mut std::collections::BTreeSet<String>| {
+            if !name.is_empty() && keep.insert(name.to_string()) {
+                queue.push(name.to_string());
             }
-        }
-    }
-    out
-}
+        };
 
-fn gather_refs(value: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if k == "$ref"
-                    && let Some(s) = v.as_str()
-                    && let Some(name) = s.strip_prefix("#/components/schemas/")
-                {
-                    out.insert(name.to_string());
-                }
-                gather_refs(v, out);
+    match schema_type {
+        SchemaType::Primitive { .. }
+        | SchemaType::StringEnum { .. }
+        | SchemaType::ExtensibleEnum { .. } => {}
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            for property in properties.values() {
+                collect_schema_type_refs(&property.schema_type, queue, keep);
+            }
+            if let ObjectAdditionalProperties::Typed { value_type } = additional_properties {
+                collect_schema_type_refs(value_type, queue, keep);
             }
         }
-        serde_json::Value::Array(items) => items.iter().for_each(|v| gather_refs(v, out)),
-        _ => {}
+        SchemaType::DiscriminatedUnion { variants, .. } => {
+            for variant in variants {
+                seed(&variant.type_name, queue, keep);
+            }
+        }
+        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+            for variant in variants {
+                seed(&variant.target, queue, keep);
+            }
+        }
+        SchemaType::Array { item_type } => collect_schema_type_refs(item_type, queue, keep),
+        SchemaType::Reference { target } => seed(target, queue, keep),
     }
 }
 
@@ -185,6 +177,10 @@ pub enum ServerCodegenError {
     Resolve(#[from] super::SelectorResolveError),
     #[error("internal: {0}")]
     Internal(String),
+    #[error(
+        "cannot generate exact Axum routes for custom HTTP methods on `{path}` across multiple primary tags ({tags}); Axum 0.7 cannot merge multiple fallback dispatchers for one path. Put those operations under the same first tag or select only one custom method for this server"
+    )]
+    CrossTagCustomMethods { path: String, tags: String },
 }
 
 pub struct ServerCodegen<'a> {
@@ -239,6 +235,7 @@ impl<'a> ServerCodegen<'a> {
                     })
             })
             .collect::<Result<_, _>>()?;
+        validate_custom_method_route_groups(&ops)?;
 
         // Group by primary tag (first tag wins; untagged → "Server").
         let groups = group_by_tag(&ops);
@@ -399,15 +396,29 @@ impl<'a> ServerCodegen<'a> {
         let trait_ident = trait_ident_for_tag(tag);
         let fn_ident = format_ident!("{}_router", trait_ident.to_string().to_snake_case());
 
-        let routes: Vec<TokenStream> = ops
-            .iter()
-            .map(|op| {
-                let method = axum_method_call(&op.method);
-                let handler = format_ident!("{}_handler", op.operation_id.to_snake_case());
-                let path = openapi_to_axum_path(&op.path);
-                quote! { .route(#path, ::axum::routing::#method(#handler::<T>)) }
-            })
-            .collect();
+        let mut routes: Vec<TokenStream> = Vec::new();
+        let mut custom_by_path: BTreeMap<String, Vec<(String, syn::Ident)>> = BTreeMap::new();
+        for op in ops {
+            let handler = format_ident!("{}_handler", op.operation_id.to_snake_case());
+            let path = openapi_to_axum_path(&op.path);
+            if let Some(method_call) = axum_method_call(&op.method) {
+                routes.push(quote! { .route(#path, ::axum::routing::#method_call(#handler::<T>)) });
+            } else {
+                custom_by_path
+                    .entry(path)
+                    .or_default()
+                    .push((op.method.to_ascii_uppercase(), handler));
+            }
+        }
+        let mut custom_dispatchers = Vec::new();
+        for (path, methods) in custom_by_path {
+            let first_handler = &methods[0].1;
+            let dispatcher = format_ident!("{}_custom_method_dispatch", first_handler);
+            let (route, dispatcher_fn) =
+                axum_custom_route(&path, &dispatcher, &methods, &trait_ident);
+            routes.push(route);
+            custom_dispatchers.push(dispatcher_fn);
+        }
 
         let handlers: Vec<TokenStream> = ops
             .iter()
@@ -426,6 +437,8 @@ impl<'a> ServerCodegen<'a> {
                     #(#routes)*
                     .with_state(api)
             }
+
+            #(#custom_dispatchers)*
 
             #(#handlers)*
         }
@@ -952,19 +965,58 @@ fn emit_param_enum(name: &str, values: &[String]) -> TokenStream {
     }
 }
 
-fn axum_method_call(method: &str) -> TokenStream {
+fn axum_method_call(method: &str) -> Option<TokenStream> {
     match method.to_ascii_uppercase().as_str() {
-        "GET" => quote! { get },
-        "POST" => quote! { post },
-        "PUT" => quote! { put },
-        "PATCH" => quote! { patch },
-        "DELETE" => quote! { delete },
-        "HEAD" => quote! { head },
-        "OPTIONS" => quote! { options },
-        // Any other verb (TRACE, CONNECT, custom) → fall back to the
-        // generic routing builder.
-        _ => quote! { any },
+        "CONNECT" => Some(quote! { connect }),
+        "DELETE" => Some(quote! { delete }),
+        "GET" => Some(quote! { get }),
+        "HEAD" => Some(quote! { head }),
+        "OPTIONS" => Some(quote! { options }),
+        "PATCH" => Some(quote! { patch }),
+        "POST" => Some(quote! { post }),
+        "PUT" => Some(quote! { put }),
+        "TRACE" => Some(quote! { trace }),
+        _ => None,
     }
+}
+
+/// Build one exact-method dispatcher for every nonstandard operation sharing a
+/// path within one generated trait. Axum has convenience functions for the
+/// standard RFC methods, but OpenAPI 3.2 also defines QUERY and permits custom
+/// `additionalOperations`. Axum allows only one `any` fallback per path, so all
+/// custom methods on that path and trait must share this dispatcher. Generation
+/// rejects the cross-trait form before reaching this helper.
+fn axum_custom_route(
+    path: &str,
+    dispatcher: &syn::Ident,
+    methods: &[(String, syn::Ident)],
+    trait_ident: &syn::Ident,
+) -> (TokenStream, TokenStream) {
+    let arms = methods.iter().map(|(method, handler)| {
+        quote! {
+            #method => ::axum::handler::Handler::call(#handler::<T>, request, api).await
+        }
+    });
+    let route = quote! {
+        .route(#path, ::axum::routing::any(#dispatcher::<T>))
+    };
+    let dispatcher_fn = quote! {
+        async fn #dispatcher<T>(
+            ::axum::extract::State(api): ::axum::extract::State<T>,
+            request: ::axum::extract::Request,
+        ) -> ::axum::response::Response
+        where
+            T: #trait_ident + Clone + Send + Sync + 'static,
+        {
+            match request.method().as_str() {
+                #(#arms,)*
+                _ => ::axum::response::IntoResponse::into_response(
+                    ::axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                ),
+            }
+        }
+    };
+    (route, dispatcher_fn)
 }
 
 /// OpenAPI uses `{param}` placeholders; axum 0.7 accepts the same
@@ -986,10 +1038,33 @@ fn body_type(op: &OperationInfo) -> Option<String> {
 fn group_by_tag<'a>(ops: &[&'a OperationInfo]) -> BTreeMap<String, Vec<&'a OperationInfo>> {
     let mut groups: BTreeMap<String, Vec<&OperationInfo>> = BTreeMap::new();
     for op in ops {
-        let tag = op.tags.first().cloned().unwrap_or_else(|| "Server".into());
+        let tag = primary_tag(op);
         groups.entry(tag).or_default().push(op);
     }
     groups
+}
+
+fn primary_tag(op: &OperationInfo) -> String {
+    op.tags.first().cloned().unwrap_or_else(|| "Server".into())
+}
+
+fn validate_custom_method_route_groups(ops: &[&OperationInfo]) -> Result<(), ServerCodegenError> {
+    let mut tags_by_path: BTreeMap<&str, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for op in ops {
+        if axum_method_call(&op.method).is_none() {
+            tags_by_path
+                .entry(&op.path)
+                .or_default()
+                .insert(primary_tag(op));
+        }
+    }
+    if let Some((path, tags)) = tags_by_path.into_iter().find(|(_, tags)| tags.len() > 1) {
+        return Err(ServerCodegenError::CrossTagCustomMethods {
+            path: path.to_string(),
+            tags: tags.into_iter().collect::<Vec<_>>().join(", "),
+        });
+    }
+    Ok(())
 }
 
 fn trait_ident_for_tag(tag: &str) -> syn::Ident {
@@ -1116,5 +1191,31 @@ mod tests {
     fn untagged_falls_back_to_server_api() {
         let id = trait_ident_for_tag("");
         assert_eq!(id.to_string(), "ServerApi");
+    }
+
+    #[test]
+    fn custom_methods_on_one_path_share_an_exact_dispatcher() {
+        let dispatcher = format_ident!("cache_custom_method_dispatch");
+        let methods = vec![
+            ("PURGE".to_string(), format_ident!("purge_cache_handler")),
+            ("QUERY".to_string(), format_ident!("query_cache_handler")),
+        ];
+        let trait_ident = format_ident!("CacheApi");
+        let (route, dispatcher) = axum_custom_route("/cache", &dispatcher, &methods, &trait_ident);
+        let route = route.to_string();
+        let dispatcher = dispatcher.to_string();
+        assert!(route.contains("routing :: any"));
+        assert_eq!(route.matches("routing :: any").count(), 1);
+        assert!(dispatcher.contains("\"PURGE\""));
+        assert!(dispatcher.contains("\"QUERY\""));
+        assert!(dispatcher.contains("purge_cache_handler"));
+        assert!(dispatcher.contains("query_cache_handler"));
+        assert!(dispatcher.contains("METHOD_NOT_ALLOWED"));
+    }
+
+    #[test]
+    fn standard_methods_use_axum_method_routes_without_guards() {
+        assert!(axum_method_call("TRACE").is_some());
+        assert!(axum_method_call("QUERY").is_none());
     }
 }

@@ -15,11 +15,57 @@ pub mod selector;
 
 pub use selector::{Resolution, Selector, SelectorParseError, SelectorResolveError, resolve};
 
+/// Parse and resolve raw operation selectors with enough context for config
+/// errors. Shared by client and server generation.
+pub fn resolve_operation_selectors(
+    selectors: &[String],
+    analysis: &SchemaAnalysis,
+) -> Result<Resolution, OperationSelectionError> {
+    let parsed = selectors
+        .iter()
+        .map(|selector| {
+            Selector::parse(selector).map_err(|source| OperationSelectionError::Parse {
+                selector: selector.clone(),
+                source,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let index = OperationIndex::from_analysis(analysis);
+    resolve(&parsed, &index).map_err(OperationSelectionError::Resolve)
+}
+
+/// Resolve a field whose contract is specifically one operation ID.
+///
+/// Unlike [`resolve_operation_selectors`], this does not interpret
+/// `METHOD /path` or `tag:<name>` syntax. It still uses analyzer alias metadata
+/// so renamed and ambiguous source IDs receive the same actionable errors.
+pub fn resolve_operation_id(
+    operation_id: &str,
+    analysis: &SchemaAnalysis,
+) -> Result<Resolution, OperationSelectionError> {
+    let index = OperationIndex::from_analysis(analysis);
+    resolve(&[Selector::OperationId(operation_id.to_string())], &index)
+        .map_err(OperationSelectionError::Resolve)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OperationSelectionError {
+    #[error("invalid operation selector `{selector}`: {source}")]
+    Parse {
+        selector: String,
+        #[source]
+        source: SelectorParseError,
+    },
+    #[error("operation selector did not resolve: {0}")]
+    Resolve(#[source] SelectorResolveError),
+}
+
 /// Read-only snapshot of every operation in a spec, in the order the
 /// analyzer surfaced them. Built once per command invocation.
 #[derive(Debug, Clone)]
 pub struct OperationIndex {
     operations: Vec<OperationSummary>,
+    operation_id_aliases: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Display-friendly subset of [`OperationInfo`] used by `server list`
@@ -43,18 +89,37 @@ impl OperationIndex {
             .values()
             .map(OperationSummary::from)
             .collect();
-        Self { operations }
+        Self {
+            operations,
+            operation_id_aliases: analysis.operation_id_aliases.clone(),
+        }
     }
 
     /// Build directly from pre-built summaries. Used by tests and by
     /// callers that have already projected `OperationInfo` to the
     /// display shape.
     pub fn from_summaries(operations: Vec<OperationSummary>) -> Self {
-        Self { operations }
+        Self {
+            operations,
+            operation_id_aliases: Default::default(),
+        }
     }
 
     pub fn operations(&self) -> &[OperationSummary] {
         &self.operations
+    }
+
+    pub(crate) fn operation_id_aliases(&self, raw_id: &str) -> Option<&[String]> {
+        self.operation_id_aliases.get(raw_id).map(Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_aliases(
+        mut self,
+        aliases: std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        self.operation_id_aliases = aliases;
+        self
     }
 
     /// Count of distinct tags across all operations. Untagged ops are

@@ -29,7 +29,7 @@ See the [full release notes](#release-notes) at the bottom of this README for th
 ## Highlights
 
 - **OpenAPI 3.1 first, 3.2 experimental** — handles `type: ["X", "null"]`, `anyOf`/`oneOf`/`allOf`, discriminated unions, `const`, inline objects, and accepts paths-less specs (components-only or webhooks-only).
-- **Generates clients *and* servers** — pick what you want via `[features]` and `[server]`. Both share the same `types.rs`.
+- **Generates clients *and* servers** — pick client calls with `[client]`, hosted operations with `[server]`, or keep the default all-operation client. Both share the same `types.rs`.
 - **Typed scalars** — `format: date-time` → `chrono::DateTime<chrono::Utc>`, `uri` → `url::Url`, `binary` → `bytes::Bytes`, `uuid` → `uuid::Uuid`, `byte` → `Vec<u8>` + base64 codec, unsigned-int formats → `u32`/`u64`. All opt-out per-format in TOML.
 - **Async HTTP client** — typed methods per operation, retry/backoff via `reqwest-retry`, distributed tracing via `reqwest-tracing`, Bearer / API-key / custom auth (honored at runtime), default headers, path-template percent-encoding.
 - **Axum server scaffolding** — trait per tag, status-code-typed response enum, SSE-ready `OkStream` variant, required-param HTTP 400 short-circuit at the handler boundary, combined `build_router(...)` factory for multi-tag selections.
@@ -86,6 +86,22 @@ Then:
 ```bash
 openapi-to-rust generate --config openapi-to-rust.toml
 ```
+
+### Select only the client operations you use
+
+`[client]` is optional. Without it—or with an empty `operations` list—the HTTP client keeps every operation for backward compatibility. Selectors share the server grammar: exact `operationId`, exact `METHOD /path`, or `tag:<name>`.
+
+```toml
+[client]
+operations = [
+  "createResponse",
+  "GET /v1/models",
+  "tag:Files",
+]
+prune_models = true
+```
+
+`prune_models = true` also trims `types.rs`. When client and server selections coexist, the generator retains the union of schemas reachable from both scopes, including inline generated request, response, and parameter types. `[client]` is ignored when `enable_async_client = false`, and it never filters an enabled operation registry.
 
 ## Quick start — Axum server
 
@@ -506,8 +522,16 @@ operations = [                          # selectors: operationId | "METHOD /path
   "POST /v1/messages",
   "tag:Responses",
 ]
-prune_models = false                    # drop schemas unreachable from picked ops
-                                        # (safe only when not also generating the HTTP client)
+prune_models = false                    # drop schemas outside the combined selected
+                                        # client/server operation closure
+
+[client]
+operations = [                          # absent or empty means every client operation
+  "createResponse",
+  "GET /v1/models",
+  "tag:Files",
+]
+prune_models = false                    # opt in to the same union model pruning
 
 [nullable_overrides]
 "Response.error" = true                 # see "Spec-quirk overrides" above
@@ -599,6 +623,7 @@ extraction (tracked separately).
 - Object and array query parameters are generated per their OAS `style`/`explode` instead of an opaque `Option<impl AsRef<str>>` passthrough: form-exploded objects (`?color=red&size=5`), explode=false objects (`?filter=color,red,size,5`), deepObject objects (`?filter[color]=red`), and `Vec<T>` form arrays (repeated or comma-joined pairs, scalar or string-enum items).
 - **Breaking for regenerated clients** — see [Breaking changes (pre-1.0)](#breaking-changes-pre-10) for the full signature table.
 - `scripts/spec-compile.sh` checks all scratch crates as one cargo workspace against a shared persistent target dir — full-sweep verification dropped from hours to minutes.
+- `[client].operations` selects client methods by operationId, `METHOD /path`, or tag; optional client/server pruning retains the union of reachable models, including inline generated schemas and streaming event roots.
 
 ### 0.5
 
@@ -609,7 +634,6 @@ extraction (tracked separately).
 - Query + header parameters wired through the trait. Required query/header params arrive unwrapped; missing-required short-circuits to HTTP 400 + `{"error": "missing required …"}` JSON.
 - Generated `sse_response(stream)` helper — wraps any `Stream<Item = Result<Event, Infallible>>` so the SSE branch stays two lines.
 - End-of-generate hint prints a paste-ready impl skeleton.
-- `[server].prune_models = true` (opt-in) trims `types.rs` to schemas reachable from picked ops (OpenAI example: drops 280 of 2154 schemas, ~3300 fewer lines).
 - Two end-to-end examples: `server-openai-responses` (multi-tag, body + SSE, four query params, required-param 400) and `server-anthropic-messages` (SSE overlay).
 
 **OpenAPI 3.1 + 3.2 conformance (38 of 51 beads from #14)**

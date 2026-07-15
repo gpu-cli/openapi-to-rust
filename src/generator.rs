@@ -150,6 +150,9 @@ pub struct GeneratorConfig {
     /// Opt-in server codegen scope. `None` ⇒ emit no server code.
     /// Set by the `[server]` section in the TOML config.
     pub server: Option<crate::config::ServerSection>,
+    /// Optional HTTP-client operation scope. `None` or an empty selector list
+    /// preserves generation of every operation.
+    pub client: Option<crate::config::ClientSection>,
 }
 
 impl Default for GeneratorConfig {
@@ -174,6 +177,7 @@ impl Default for GeneratorConfig {
             registry_only: false,
             types: crate::type_mapping::TypeMappingConfig::default(),
             server: None,
+            client: None,
         }
     }
 }
@@ -211,6 +215,18 @@ pub struct GenerationResult {
     /// their `Cargo.toml`. Empty when no typed-scalar crates were
     /// referenced.
     pub required_deps: Vec<crate::type_mapping::DepRequirement>,
+    /// Number of schemas removed by opt-in client/server model pruning.
+    pub pruned_schemas: usize,
+}
+
+#[derive(Debug)]
+struct OperationScopes {
+    /// `None` means the enabled HTTP client keeps every operation.
+    client_ids: Option<std::collections::BTreeSet<String>>,
+    server_ids: std::collections::BTreeSet<String>,
+    streaming_ids: std::collections::BTreeSet<String>,
+    prune_models: bool,
+    extra_schema_roots: Vec<String>,
 }
 
 pub struct CodeGenerator {
@@ -229,6 +245,10 @@ impl CodeGenerator {
 
     /// Generate all files for the API
     pub fn generate_all(&self, analysis: &mut SchemaAnalysis) -> Result<GenerationResult> {
+        // Resolve client/server selectors exactly once for this generation.
+        // The same scopes drive client artifacts and the union model closure.
+        let scopes = self.resolve_operation_scopes(analysis)?;
+        let pruned_schemas = self.prune_models_to_scopes(analysis, &scopes);
         let mut files = Vec::new();
 
         if !self.config.registry_only {
@@ -251,7 +271,8 @@ impl CodeGenerator {
 
             // Generate HTTP client if enabled
             if self.config.enable_async_client {
-                let http_content = self.generate_http_client(analysis)?;
+                let operations = self.client_operations(analysis, scopes.client_ids.as_ref());
+                let http_content = self.generate_http_client_for_operations(&operations)?;
                 files.push(GeneratedFile {
                     path: "client.rs".into(),
                     content: http_content,
@@ -285,6 +306,7 @@ impl CodeGenerator {
             files,
             mod_file,
             required_deps,
+            pruned_schemas,
         })
     }
 
@@ -599,11 +621,24 @@ impl CodeGenerator {
         Ok(prettyplease::unparse(&syntax_tree))
     }
 
-    /// Generate HTTP client code for regular (non-streaming) requests
+    /// Generate HTTP client code for regular (non-streaming) requests.
+    ///
+    /// This standalone entry point honors `[client].operations` but does not
+    /// validate unrelated server or streaming scopes. Use [`Self::generate_all`]
+    /// when generating the complete configured output set.
     pub fn generate_http_client(&self, analysis: &SchemaAnalysis) -> Result<String> {
+        let client_ids = self.resolve_client_operation_ids(analysis)?;
+        let operations = self.client_operations(analysis, client_ids.as_ref());
+        self.generate_http_client_for_operations(&operations)
+    }
+
+    fn generate_http_client_for_operations(
+        &self,
+        operations: &[&crate::analysis::OperationInfo],
+    ) -> Result<String> {
         let error_types = self.generate_http_error_types();
         let client_struct = self.generate_http_client_struct();
-        let operation_methods = self.generate_operation_methods(analysis);
+        let operation_methods = self.generate_operation_methods_for(operations);
 
         let generated = quote! {
             //! Generated HTTP client for regular API requests
@@ -627,6 +662,161 @@ impl CodeGenerator {
         })?;
 
         Ok(prettyplease::unparse(&syntax_tree))
+    }
+
+    fn resolve_operation_scopes(&self, analysis: &SchemaAnalysis) -> Result<OperationScopes> {
+        let client_ids = if self.config.enable_async_client && !self.config.registry_only {
+            self.resolve_client_operation_ids(analysis)?
+        } else {
+            None
+        };
+
+        let server_ids = match &self.config.server {
+            Some(server) if !server.operations.is_empty() => {
+                crate::server::resolve_operation_selectors(&server.operations, analysis)
+                    .map_err(|error| {
+                        GeneratorError::ValidationError(format!(
+                            "Invalid [server].operations: {error}"
+                        ))
+                    })?
+                    .operations
+                    .into_iter()
+                    .map(|operation| operation.operation_id)
+                    .collect()
+            }
+            _ => Default::default(),
+        };
+
+        let streaming_ids = if self.config.registry_only {
+            Default::default()
+        } else if let Some(streaming) = &self.config.streaming_config {
+            let mut ids = std::collections::BTreeSet::new();
+            for (index, endpoint) in streaming.endpoints.iter().enumerate() {
+                let resolution =
+                    crate::server::resolve_operation_id(&endpoint.operation_id, analysis).map_err(
+                        |error| {
+                            GeneratorError::ValidationError(format!(
+                                "Invalid [streaming].endpoints[{index}].operation_id: {error}"
+                            ))
+                        },
+                    )?;
+                ids.extend(
+                    resolution
+                        .operations
+                        .into_iter()
+                        .map(|operation| operation.operation_id),
+                );
+            }
+            ids
+        } else {
+            Default::default()
+        };
+
+        let client_prunes = self.config.enable_async_client
+            && !self.config.registry_only
+            && self
+                .config
+                .client
+                .as_ref()
+                .is_some_and(|client| client.prune_models);
+        let server_prunes = self
+            .config
+            .server
+            .as_ref()
+            .is_some_and(|server| server.prune_models && !server.operations.is_empty());
+        let extra_schema_roots = if self.config.registry_only {
+            Vec::new()
+        } else {
+            self.config
+                .streaming_config
+                .as_ref()
+                .map(|streaming| {
+                    streaming
+                        .endpoints
+                        .iter()
+                        .map(|endpoint| endpoint.event_union_type.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        Ok(OperationScopes {
+            client_ids,
+            server_ids,
+            streaming_ids,
+            prune_models: client_prunes || server_prunes,
+            extra_schema_roots,
+        })
+    }
+
+    fn resolve_client_operation_ids(
+        &self,
+        analysis: &SchemaAnalysis,
+    ) -> Result<Option<std::collections::BTreeSet<String>>> {
+        match &self.config.client {
+            Some(client) if !client.operations.is_empty() => {
+                let resolution =
+                    crate::server::resolve_operation_selectors(&client.operations, analysis)
+                        .map_err(|error| {
+                            GeneratorError::ValidationError(format!(
+                                "Invalid [client].operations: {error}"
+                            ))
+                        })?;
+                Ok(Some(
+                    resolution
+                        .operations
+                        .into_iter()
+                        .map(|operation| operation.operation_id)
+                        .collect(),
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn client_operations<'a>(
+        &self,
+        analysis: &'a SchemaAnalysis,
+        selected: Option<&std::collections::BTreeSet<String>>,
+    ) -> Vec<&'a crate::analysis::OperationInfo> {
+        analysis
+            .operations
+            .iter()
+            .filter(|(operation_id, _)| selected.is_none_or(|ids| ids.contains(*operation_id)))
+            .map(|(_, operation)| operation)
+            .collect()
+    }
+
+    fn prune_models_to_scopes(
+        &self,
+        analysis: &mut SchemaAnalysis,
+        scopes: &OperationScopes,
+    ) -> usize {
+        if !scopes.prune_models {
+            return 0;
+        }
+
+        let mut consumer_ids = scopes.server_ids.clone();
+        if self.config.enable_async_client && !self.config.registry_only {
+            match &scopes.client_ids {
+                Some(ids) => consumer_ids.extend(ids.iter().cloned()),
+                None => consumer_ids.extend(analysis.operations.keys().cloned()),
+            }
+        }
+        consumer_ids.extend(scopes.streaming_ids.iter().cloned());
+
+        let operations: Vec<&crate::analysis::OperationInfo> = consumer_ids
+            .iter()
+            .filter_map(|operation_id| analysis.operations.get(operation_id))
+            .collect();
+        let keep = crate::server::codegen::reachable_schemas_with_roots(
+            analysis,
+            &operations,
+            &scopes.extra_schema_roots,
+        );
+        let before = analysis.schemas.len();
+        analysis.schemas.retain(|name, _| keep.contains(name));
+        before - analysis.schemas.len()
     }
 
     /// Generate HTTP error type and result alias
