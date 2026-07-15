@@ -106,6 +106,19 @@ pub(crate) struct EmittedObjectProperty<'a> {
     pub(crate) field_type: TokenStream,
 }
 
+/// Shared lookups for one types.rs generation pass. Large schemas can contain
+/// thousands of operations and types, so request-root and type-name queries
+/// must not rescan the full analysis for each emitted object.
+struct TypeGenerationIndex {
+    request_body_roots: std::collections::HashSet<String>,
+    reserved_type_names: std::collections::HashSet<String>,
+}
+
+struct TypeGenerationContext<'a> {
+    discriminated_variants: &'a BTreeMap<String, DiscriminatedVariantInfo>,
+    index: &'a TypeGenerationIndex,
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratorConfig {
     /// Path to OpenAPI specification file
@@ -376,6 +389,12 @@ impl CodeGenerator {
             }
         }
 
+        let type_index = self.type_generation_index(analysis);
+        let type_context = TypeGenerationContext {
+            discriminated_variants: &discriminated_variant_info,
+            index: &type_index,
+        };
+
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
 
@@ -398,8 +417,7 @@ impl CodeGenerator {
                     processed.insert(schema_name);
                     continue;
                 }
-                let type_def =
-                    self.generate_type_definition(schema, analysis, &discriminated_variant_info)?;
+                let type_def = self.generate_type_definition(schema, analysis, &type_context)?;
                 if !type_def.is_empty() {
                     type_definitions.extend(type_def);
                 }
@@ -420,8 +438,7 @@ impl CodeGenerator {
             if !emitted_rust_names.insert(rust_name) {
                 continue;
             }
-            let type_def =
-                self.generate_type_definition(schema, analysis, &discriminated_variant_info)?;
+            let type_def = self.generate_type_definition(schema, analysis, &type_context)?;
             if !type_def.is_empty() {
                 type_definitions.extend(type_def);
             }
@@ -1066,7 +1083,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         analysis: &crate::analysis::SchemaAnalysis,
-        discriminated_variant_info: &BTreeMap<String, DiscriminatedVariantInfo>,
+        type_context: &TypeGenerationContext<'_>,
     ) -> Result<TokenStream> {
         use crate::analysis::SchemaType;
 
@@ -1111,7 +1128,7 @@ impl CodeGenerator {
                 required,
                 additional_properties,
                 analysis,
-                discriminated_variant_info.get(&schema.name),
+                type_context,
             ),
             SchemaType::DiscriminatedUnion {
                 discriminator_field,
@@ -1173,7 +1190,7 @@ impl CodeGenerator {
 
                 // Check if the item type is a Reference to a discriminator-stripped struct
                 if let SchemaType::Reference { target } = item_type.as_ref() {
-                    if let Some(info) = discriminated_variant_info.get(target) {
+                    if let Some(info) = type_context.discriminated_variants.get(target) {
                         if !info.is_parent_untagged {
                             // Generate a wrapper enum that re-adds the discriminator tag
                             let wrapper_name =
@@ -1525,7 +1542,7 @@ impl CodeGenerator {
         required: &std::collections::HashSet<String>,
         additional_properties: &crate::analysis::ObjectAdditionalProperties,
         analysis: &crate::analysis::SchemaAnalysis,
-        discriminator_info: Option<&DiscriminatedVariantInfo>,
+        type_context: &TypeGenerationContext<'_>,
     ) -> Result<TokenStream> {
         let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
         let emitted_properties = self.emitted_object_properties(
@@ -1534,7 +1551,7 @@ impl CodeGenerator {
             required,
             additional_properties,
             analysis,
-            discriminator_info,
+            type_context.discriminated_variants.get(&schema.name),
         );
 
         let mut fields: Vec<TokenStream> = emitted_properties
@@ -1634,7 +1651,7 @@ impl CodeGenerator {
             },
         };
 
-        let builder = if self.is_request_body_root(&schema.name, analysis)
+        let builder = if type_context.index.request_body_roots.contains(&schema.name)
             && emitted_properties
                 .iter()
                 .any(|property| property.is_required)
@@ -1650,6 +1667,7 @@ impl CodeGenerator {
                 &emitted_properties,
                 additional_properties,
                 analysis,
+                type_context.index,
             )
         } else {
             TokenStream::new()
@@ -1723,39 +1741,39 @@ impl CodeGenerator {
         emitted
     }
 
-    fn is_request_body_root(
+    fn type_generation_index(
         &self,
-        schema_name: &str,
         analysis: &crate::analysis::SchemaAnalysis,
-    ) -> bool {
-        analysis.operations.values().any(|operation| {
-            let Some(request_schema) = operation
+    ) -> TypeGenerationIndex {
+        let reserved_type_names = analysis
+            .schemas
+            .keys()
+            .map(|name| self.to_rust_type_name(name))
+            .collect();
+        let mut request_body_roots = std::collections::HashSet::new();
+        for operation in analysis.operations.values() {
+            let Some(mut current) = operation
                 .request_body
                 .as_ref()
                 .and_then(crate::analysis::RequestBodyContent::schema_name)
             else {
-                return false;
+                continue;
             };
-
-            let mut current = request_schema;
-            let mut visited = std::collections::HashSet::new();
-            loop {
-                if current == schema_name {
-                    return true;
-                }
-                if !visited.insert(current) {
-                    return false;
-                }
+            while request_body_roots.insert(current.to_string()) {
                 let Some(crate::analysis::AnalyzedSchema {
                     schema_type: crate::analysis::SchemaType::Reference { target },
                     ..
                 }) = analysis.schemas.get(current)
                 else {
-                    return false;
+                    break;
                 };
                 current = target;
             }
-        })
+        }
+        TypeGenerationIndex {
+            request_body_roots,
+            reserved_type_names,
+        }
     }
 
     fn generate_request_model_builder(
@@ -1764,17 +1782,13 @@ impl CodeGenerator {
         properties: &[EmittedObjectProperty<'_>],
         additional_properties: &crate::analysis::ObjectAdditionalProperties,
         analysis: &crate::analysis::SchemaAnalysis,
+        type_index: &TypeGenerationIndex,
     ) -> TokenStream {
         let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
         let builder_base = format!("{}Builder", struct_name);
-        let reserved_type_names: std::collections::HashSet<String> = analysis
-            .schemas
-            .keys()
-            .map(|name| self.to_rust_type_name(name))
-            .collect();
         let mut builder_name = builder_base.clone();
         let mut suffix = 2;
-        while reserved_type_names.contains(&builder_name) {
+        while type_index.reserved_type_names.contains(&builder_name) {
             builder_name = format!("{builder_base}{suffix}");
             suffix += 1;
         }

@@ -4104,13 +4104,18 @@ impl SchemaAnalyzer {
     fn analyze_operations(&mut self, analysis: &mut SchemaAnalysis) -> Result<()> {
         let spec: crate::openapi::OpenApiSpec = serde_json::from_value(self.openapi_spec.clone())
             .map_err(GeneratorError::ParseError)?;
+        // Operation IDs are emitted into one Rust module, so collision
+        // detection spans paths and webhooks. Index their canonical Rust type
+        // names once instead of re-canonicalizing every previously analyzed
+        // operation for every new endpoint.
+        let mut canonical_operation_ids = HashSet::new();
 
         if let Some(paths) = &spec.paths {
             for (path, path_item) in paths {
                 // H11: Path Item may be a $ref to components/pathItems. Resolve here.
                 let resolved = self.resolve_path_item(path_item, &spec)?;
                 let pi: &crate::openapi::PathItem = resolved.as_ref().unwrap_or(path_item);
-                self.ingest_path_item_operations(path, pi, analysis)?;
+                self.ingest_path_item_operations(path, pi, analysis, &mut canonical_operation_ids)?;
             }
         }
         // T4: walk webhooks the same way as paths. Per OAS 3.1+, webhooks are
@@ -4122,7 +4127,12 @@ impl SchemaAnalyzer {
         if let Some(webhooks) = &spec.webhooks {
             for (name, path_item) in webhooks {
                 let synthetic_path = format!("__webhook__/{name}");
-                self.ingest_path_item_operations(&synthetic_path, path_item, analysis)?;
+                self.ingest_path_item_operations(
+                    &synthetic_path,
+                    path_item,
+                    analysis,
+                    &mut canonical_operation_ids,
+                )?;
             }
         }
         Ok(())
@@ -4164,6 +4174,7 @@ impl SchemaAnalyzer {
         path: &str,
         path_item: &crate::openapi::PathItem,
         analysis: &mut SchemaAnalysis,
+        canonical_operation_ids: &mut HashSet<String>,
     ) -> Result<()> {
         for (method, operation) in path_item.operations() {
             // Generate operation ID if missing.
@@ -4182,20 +4193,13 @@ impl SchemaAnalyzer {
             // `GetMdrUsageReports`) collide too — otherwise codegen would
             // produce two `GetMdrUsageReportsApiError` enums in the same
             // module.
-            use heck::ToPascalCase;
-            let canon = |s: &str| s.replace('.', "_").to_pascal_case();
-            let key_collides = |id: &str| -> bool {
-                let target = canon(id);
-                analysis
-                    .operations
-                    .keys()
-                    .any(|existing| canon(existing) == target)
-            };
-            let operation_id = if key_collides(&raw_operation_id) {
+            let operation_id = if canonical_operation_ids
+                .contains(&Self::canonical_operation_id(&raw_operation_id))
+            {
                 let method_lower = method.to_lowercase();
                 let mut candidate = format!("{}_{}", raw_operation_id, method_lower);
                 let mut suffix = 2;
-                while key_collides(&candidate) {
+                while canonical_operation_ids.contains(&Self::canonical_operation_id(&candidate)) {
                     candidate = format!("{}_{}_{}", raw_operation_id, method_lower, suffix);
                     suffix += 1;
                 }
@@ -4221,9 +4225,15 @@ impl SchemaAnalyzer {
                 .entry(raw_operation_id)
                 .or_default()
                 .push(operation_id.clone());
+            canonical_operation_ids.insert(Self::canonical_operation_id(&operation_id));
             analysis.operations.insert(operation_id, op_info);
         }
         Ok(())
+    }
+
+    fn canonical_operation_id(operation_id: &str) -> String {
+        use heck::ToPascalCase;
+        operation_id.replace('.', "_").to_pascal_case()
     }
 
     /// Generate an operation ID from method and path when not provided
