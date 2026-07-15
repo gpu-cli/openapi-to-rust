@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Test that structs used in both tagged enums and standalone arrays
 //! serialize correctly in both contexts.
 //!

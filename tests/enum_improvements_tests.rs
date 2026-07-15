@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Tests for enum improvements including:
 //! - Inline enum extraction from properties
 //! - Const + enum support

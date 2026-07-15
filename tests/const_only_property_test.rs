@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Regression test for https://github.com/gpu-cli/openapi-to-rust/issues/10
 //!
 //! A property with a string `const` and no `enum` array should generate a

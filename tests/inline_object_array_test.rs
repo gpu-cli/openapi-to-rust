@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Tests for inline objects in arrays
 //!
 //! These tests ensure that inline objects in arrays are properly typed

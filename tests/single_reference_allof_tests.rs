@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Tests for single-reference allOf patterns
 //!
 //! These tests ensure that allOf patterns with a single reference

@@ -47,6 +47,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/install-smoke.sh
+
   # Regression guard: generate clients for our two production-target specs
   # (OpenAI + Anthropic) and `cargo check` the result. Catches breakage
   # where a generator change still passes unit tests but emits invalid

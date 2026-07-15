@@ -12,6 +12,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "openapi-to-rust")]
 #[command(about = "Generate Rust types and clients from OpenAPI specs")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -104,10 +105,9 @@ enum ServerCommands {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
-    if let Err(e) = run(cli).await {
+    if let Err(e) = run(cli) {
         // Use Display, not Debug, so thiserror messages render with
         // their fuzzy-match suggestions (`Did you mean ...?`) instead
         // of as raw enum debug output.
@@ -116,7 +116,7 @@ async fn main() {
     }
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Validate { config } => {
             println!("📖 Validating configuration from: {}", config.display());

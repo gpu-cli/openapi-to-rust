@@ -14,6 +14,12 @@ pub mod server;
 pub mod streaming;
 pub mod type_mapping;
 
+/// Helpers for generator snapshot and scratch-crate tests.
+///
+/// This module is excluded from default builds so its test-only dependencies
+/// do not become part of the installed CLI. Enable the `test-helpers` feature
+/// when using these helpers outside this repository's test suite.
+#[cfg(feature = "test-helpers")]
 pub mod test_helpers;
 
 pub use analysis::{SchemaAnalysis, SchemaAnalyzer, merge_schema_extensions};
