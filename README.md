@@ -46,7 +46,7 @@ See the [full release notes](#release-notes) at the bottom of this README for th
 
 ```toml
 [dependencies]
-openapi-to-rust = "0.5"
+openapi-to-rust = "0.6"
 ```
 
 Or as a CLI:
@@ -64,6 +64,7 @@ cargo install openapi-to-rust
 spec_path = "openapi.json"
 output_dir = "src/generated"
 module_name = "api"
+# All paths above are relative to this TOML file, not the shell's working directory.
 
 [features]
 enable_async_client = true
@@ -348,6 +349,7 @@ A list of files whose top-level objects are deep-merged into the main spec befor
 
 ```toml
 [generator]
+# Relative paths are resolved from the directory containing this TOML file.
 schema_extensions = ["sse-overlay.json"]
 ```
 
@@ -385,10 +387,10 @@ When the spec declares a fixed enum but the API actually returns values outside 
 Opt out of any individual typed scalar (e.g. fall back to `String` for date-times if you don't want `chrono`):
 
 ```toml
-[generator.types.strategies]
-"date-time" = "string"     # default: "chrono"
-"uri"       = "string"     # default: "url"
-"binary"    = "string"     # default: "bytes"
+[generator.types]
+date_time = "string"        # default: "chrono"
+uri       = "string"        # default: "url"
+binary    = "string"        # default: "bytes"
 ```
 
 The CLI also supports `--types-conservative`, which collapses every typed scalar to `String`/`i64`/etc. Use it when you want zero optional-crate dependencies.
@@ -516,12 +518,16 @@ prune_models = false                    # drop schemas unreachable from picked o
 [type_mappings]
 "DateTime" = "chrono::DateTime<chrono::Utc>"
 
-[generator.types.strategies]
-"date-time" = "chrono"                  # chrono (default) | string
-"uri"       = "url"                     # url     (default) | string
-"binary"    = "bytes"                   # bytes   (default) | string
-"uuid"      = "uuid"                    # uuid    (default) | string
-"byte"      = "vec_u8_base64"           # default; encodes/decodes via base64
+[generator.types]
+date_time = "chrono"                     # chrono (default) | time | string
+uri       = "url"                        # url     (default) | string
+binary    = "bytes"                      # bytes   (default) | vec_u8 | string
+uuid      = "uuid"                       # uuid    (default) | string
+byte      = "base64"                     # base64  (default) | vec_u8 | string
+unsigned  = true                         # uint32/uint64 -> u32/u64
+
+[generator.types.shape]
+additional_properties_typed = true
 ```
 
 ## Testing
@@ -655,7 +661,7 @@ extraction (tracked separately).
 - Typed `additionalProperties` → `BTreeMap<String, T>`.
 - `x-enum-varnames` honored.
 - Constraint doc comments (`minLength`/`maxLength`/`minimum`/`pattern`).
-- Per-format strategy opt-out via `[generator.types.strategies]`; `--types-conservative` flag.
+- Per-format strategy opt-out via direct fields in `[generator.types]`; `--types-conservative` flag.
 - `REQUIRED_DEPS.toml` emitted listing optional crates the generated code references (+ stderr advisory).
 - Clean primitive variants for `anyOf` unions.
 

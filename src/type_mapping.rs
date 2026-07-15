@@ -365,7 +365,7 @@ pub enum EmailStrategy {
 /// TOML section. Defaults flip on every common typed scalar; opt out
 /// per format by setting the strategy to `string` in TOML.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeMappingConfig {
     pub date_time: DateStrategy,
     pub date: DateStrategy,
@@ -504,7 +504,7 @@ impl TypeMappingConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeShapeConfig {
     pub additional_properties_typed: Option<bool>,
     pub unique_items_to_set: Option<bool>,
@@ -512,7 +512,7 @@ pub struct TypeShapeConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeConstraintsConfig {
     /// Q2.4 constraint annotation mode. Defaults to `Doc` when the
     /// `[generator.types.constraints]` block is absent (see
@@ -540,7 +540,7 @@ pub enum ConstraintMode {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeEnumsConfig {
     pub x_enum_varnames: Option<bool>,
     pub x_enum_descriptions: Option<bool>,

@@ -8,6 +8,7 @@ use std::io::Write;
 use tempfile::NamedTempFile;
 
 fn write_config(spec_path: &std::path::Path, server_block: &str) -> NamedTempFile {
+    let spec_path = spec_path.canonicalize().expect("spec path canonicalizes");
     let content = format!(
         r#"[generator]
 spec_path = "{}"
