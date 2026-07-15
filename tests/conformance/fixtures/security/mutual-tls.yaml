@@ -1,6 +1,6 @@
 # coverage: [objects.Security Scheme.type[mutualTLS]]
 # fails_at: L3
-# reason: SecurityScheme not modeled at all; mutualTLS swallowed by Components.extra
+# reason: mutualTLS is typed, but generated clients do not configure certificate identities
 openapi: 3.1.0
 info: { title: mTLS Demo, version: 1.0.0 }
 components:

@@ -7,9 +7,12 @@
 //!
 //! Router wiring, extractors, and SSE response variants are P5.
 
-use crate::analysis::{OperationInfo, RequestBodyContent, SchemaAnalysis};
+use crate::analysis::{
+    ObjectAdditionalProperties, OperationInfo, ParameterInfo, QuerySerialization,
+    RequestBodyContent, SchemaAnalysis, SchemaType,
+};
 use crate::config::ServerSection;
-use crate::generator::{GeneratedFile, GeneratorConfig};
+use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig};
 
 use super::{OperationIndex, Selector};
 use heck::{ToPascalCase, ToSnakeCase};
@@ -21,8 +24,8 @@ use std::path::PathBuf;
 /// Compute the set of schema names transitively reachable from the
 /// request/response/parameter shapes of the given operations.
 ///
-/// Used by `[server].prune_models = true` to drop unreferenced types
-/// from `types.rs`. Walks every `$ref` in each schema's raw JSON
+/// Used by client/server model pruning to drop unreferenced types from
+/// `types.rs`. Walks every `$ref` in each schema's raw JSON
 /// (`AnalyzedSchema.original`) rather than the analyzer's
 /// `dependencies` field — the latter is incomplete for some
 /// schemas (e.g. struct fields whose target schemas weren't
@@ -35,6 +38,16 @@ use std::path::PathBuf;
 pub fn reachable_schemas(
     analysis: &SchemaAnalysis,
     ops: &[&OperationInfo],
+) -> std::collections::BTreeSet<String> {
+    reachable_schemas_with_roots(analysis, ops, &[])
+}
+
+/// [`reachable_schemas`] plus explicit schema roots used by configured
+/// consumers such as SSE event-union types.
+pub fn reachable_schemas_with_roots(
+    analysis: &SchemaAnalysis,
+    ops: &[&OperationInfo],
+    extra_roots: &[String],
 ) -> std::collections::BTreeSet<String> {
     let mut keep: std::collections::BTreeSet<String> = Default::default();
     let mut queue: Vec<String> = Vec::new();
@@ -59,28 +72,21 @@ pub fn reachable_schemas(
             if let Some(name) = &p.schema_ref {
                 seed(name, &mut queue, &mut keep);
             }
+            if let Some(
+                QuerySerialization::FormExplodedArray {
+                    item_type: crate::analysis::ArrayItemType::EnumRef(name),
+                }
+                | QuerySerialization::FormArray {
+                    item_type: crate::analysis::ArrayItemType::EnumRef(name),
+                },
+            ) = &p.query_serialization
+            {
+                seed(name, &mut queue, &mut keep);
+            }
         }
     }
-
-    // Synthetic types: the analyzer registers per-struct inline
-    // enums (e.g. `WebSearchApproximateLocation` + a `type` field
-    // with an inline enum → `WebSearchApproximateLocationType`) as
-    // schemas, but nothing in the spec $refs them. The codegen
-    // emits them as siblings of the parent struct's emission.
-    //
-    // Prefix-matching to a parent is unsafe because real specs use
-    // prefix-named sibling schemas (`Response` vs.
-    // `ResponsesServerEvent`). Instead, seed the BFS with every
-    // name that is never `$ref`-d anywhere in the spec. Those names
-    // and everything they transitively reach get retained. Yes this
-    // over-keeps for very large specs with rich never-referenced
-    // top-level islands; the alternative is missing-type compile
-    // errors, which we can't surface cleanly to the user.
-    let ref_named = collect_all_ref_names(analysis);
-    for name in analysis.schemas.keys() {
-        if !ref_named.contains(name) && keep.insert(name.clone()) {
-            queue.push(name.clone());
-        }
+    for root in extra_roots {
+        seed(root, &mut queue, &mut keep);
     }
 
     while let Some(name) = queue.pop() {
@@ -95,58 +101,56 @@ pub fn reachable_schemas(
             for dep in &schema.dependencies {
                 seed(dep, &mut queue, &mut keep);
             }
+            // The analyzed shape is the authoritative generated type graph.
+            // It includes ownership edges for inline/synthetic schemas that
+            // do not appear as `$ref`s in the source document.
+            collect_schema_type_refs(&schema.schema_type, &mut queue, &mut keep);
         }
     }
 
     keep
 }
 
-/// Collect every `#/components/schemas/<Name>` referenced anywhere
-/// in the spec snapshot (including from operations). Used to
-/// distinguish spec-named schemas from analyzer-synthesised ones
-/// during pruning.
-fn collect_all_ref_names(analysis: &SchemaAnalysis) -> std::collections::HashSet<String> {
-    let mut out: std::collections::HashSet<String> = Default::default();
-    for schema in analysis.schemas.values() {
-        gather_refs(&schema.original, &mut out);
-    }
-    // Operations reference schemas via request body, response
-    // bodies, and parameter schemas. Include those names too —
-    // otherwise normal spec types reached only via operations end
-    // up classified as synthetics.
-    for op in analysis.operations.values() {
-        if let Some(rb) = &op.request_body
-            && let Some(name) = rb.schema_name()
-        {
-            out.insert(name.to_string());
-        }
-        for ty in op.response_schemas.values() {
-            out.insert(ty.clone());
-        }
-        for p in &op.parameters {
-            if let Some(name) = &p.schema_ref {
-                out.insert(name.clone());
+fn collect_schema_type_refs(
+    schema_type: &SchemaType,
+    queue: &mut Vec<String>,
+    keep: &mut std::collections::BTreeSet<String>,
+) {
+    let seed =
+        |name: &str, queue: &mut Vec<String>, keep: &mut std::collections::BTreeSet<String>| {
+            if !name.is_empty() && keep.insert(name.to_string()) {
+                queue.push(name.to_string());
             }
-        }
-    }
-    out
-}
+        };
 
-fn gather_refs(value: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map {
-                if k == "$ref"
-                    && let Some(s) = v.as_str()
-                    && let Some(name) = s.strip_prefix("#/components/schemas/")
-                {
-                    out.insert(name.to_string());
-                }
-                gather_refs(v, out);
+    match schema_type {
+        SchemaType::Primitive { .. }
+        | SchemaType::StringEnum { .. }
+        | SchemaType::ExtensibleEnum { .. } => {}
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            for property in properties.values() {
+                collect_schema_type_refs(&property.schema_type, queue, keep);
+            }
+            if let ObjectAdditionalProperties::Typed { value_type } = additional_properties {
+                collect_schema_type_refs(value_type, queue, keep);
             }
         }
-        serde_json::Value::Array(items) => items.iter().for_each(|v| gather_refs(v, out)),
-        _ => {}
+        SchemaType::DiscriminatedUnion { variants, .. } => {
+            for variant in variants {
+                seed(&variant.type_name, queue, keep);
+            }
+        }
+        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+            for variant in variants {
+                seed(&variant.target, queue, keep);
+            }
+        }
+        SchemaType::Array { item_type } => collect_schema_type_refs(item_type, queue, keep),
+        SchemaType::Reference { target } => seed(target, queue, keep),
     }
 }
 
@@ -185,12 +189,34 @@ pub enum ServerCodegenError {
     Resolve(#[from] super::SelectorResolveError),
     #[error("internal: {0}")]
     Internal(String),
+    #[error(
+        "cannot generate exact Axum routes for custom HTTP methods on `{path}` across multiple primary tags ({tags}); Axum 0.7 cannot merge multiple fallback dispatchers for one path. Put those operations under the same first tag or select only one custom method for this server"
+    )]
+    CrossTagCustomMethods { path: String, tags: String },
+    #[error(
+        "cannot generate Axum query extraction for `{operation_id}` parameter `{parameter}`: {reason}"
+    )]
+    UnsupportedQueryParameter {
+        operation_id: String,
+        parameter: String,
+        reason: String,
+    },
+    #[error(
+        "cannot generate unambiguous Axum query extraction for `{operation_id}`: wire key `{wire_key}` is claimed by both `{first_parameter}` and `{second_parameter}`"
+    )]
+    AmbiguousQueryParameter {
+        operation_id: String,
+        wire_key: String,
+        first_parameter: String,
+        second_parameter: String,
+    },
 }
 
 pub struct ServerCodegen<'a> {
     config: &'a GeneratorConfig,
     analysis: &'a SchemaAnalysis,
     server: &'a ServerSection,
+    source_provenance: Option<String>,
 }
 
 impl<'a> ServerCodegen<'a> {
@@ -203,7 +229,27 @@ impl<'a> ServerCodegen<'a> {
             config,
             analysis,
             server,
+            source_provenance: None,
         }
+    }
+
+    /// Attach a sanitized source label to generated server module headers.
+    pub fn with_source_provenance(mut self, source: Option<&str>) -> Self {
+        self.source_provenance = source.map(str::to_string);
+        self
+    }
+
+    fn provenance_attribute(&self) -> TokenStream {
+        self.source_provenance
+            .as_ref()
+            .map(|source| {
+                let provenance = format!(
+                    " Generated by openapi-to-rust v{}. Source OpenAPI document: {source}",
+                    env!("CARGO_PKG_VERSION")
+                );
+                quote! { #![doc = #provenance] }
+            })
+            .unwrap_or_default()
     }
 
     /// Resolve selectors and emit `server/{mod,api,errors}.rs`.
@@ -239,6 +285,8 @@ impl<'a> ServerCodegen<'a> {
                     })
             })
             .collect::<Result<_, _>>()?;
+        validate_custom_method_route_groups(&ops)?;
+        self.validate_query_parameters(&ops)?;
 
         // Group by primary tag (first tag wins; untagged → "Server").
         let groups = group_by_tag(&ops);
@@ -268,13 +316,195 @@ impl<'a> ServerCodegen<'a> {
         ])
     }
 
+    fn query_parameter_type(&self, parameter: &ParameterInfo) -> TokenStream {
+        CodeGenerator::new(self.config.clone()).get_param_owned_rust_type(parameter)
+    }
+
+    fn parameter_ident(&self, parameter: &ParameterInfo) -> syn::Ident {
+        let generator = CodeGenerator::new(self.config.clone());
+        CodeGenerator::to_field_ident(&generator.param_ident_str(parameter))
+    }
+
+    fn resolve_query_schema(&self, schema_name: &str) -> Option<&crate::analysis::AnalyzedSchema> {
+        let mut current = schema_name;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return None;
+            }
+            let schema = self.analysis.schemas.get(current)?;
+            if let SchemaType::Reference { target } = &schema.schema_type {
+                current = target;
+            } else {
+                return Some(schema);
+            }
+        }
+    }
+
+    fn query_object_properties(
+        &self,
+        parameter: &ParameterInfo,
+    ) -> Option<&BTreeMap<String, crate::analysis::PropertyInfo>> {
+        let schema = self.resolve_query_schema(parameter.schema_ref.as_deref()?)?;
+        match &schema.schema_type {
+            SchemaType::Object { properties, .. } => Some(properties),
+            _ => None,
+        }
+    }
+
+    fn query_property_is_scalar(
+        &self,
+        schema_type: &SchemaType,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        match schema_type {
+            SchemaType::Primitive { .. }
+            | SchemaType::StringEnum { .. }
+            | SchemaType::ExtensibleEnum { .. } => true,
+            SchemaType::Reference { target } if visited.insert(target.clone()) => {
+                self.analysis.schemas.get(target).is_some_and(|schema| {
+                    self.query_property_is_scalar(&schema.schema_type, visited)
+                })
+            }
+            _ => false,
+        }
+    }
+
+    fn validate_query_object(
+        &self,
+        operation: &OperationInfo,
+        parameter: &ParameterInfo,
+    ) -> Result<Vec<String>, ServerCodegenError> {
+        let error = |reason: String| ServerCodegenError::UnsupportedQueryParameter {
+            operation_id: operation.operation_id.clone(),
+            parameter: parameter.name.clone(),
+            reason,
+        };
+        let schema_name = parameter.schema_ref.as_deref().ok_or_else(|| {
+            error("styled object parameter has no analyzed schema type".to_string())
+        })?;
+        let schema = self.resolve_query_schema(schema_name).ok_or_else(|| {
+            error(format!(
+                "query object schema `{schema_name}` could not be resolved"
+            ))
+        })?;
+        let (properties, additional_properties) = match &schema.schema_type {
+            SchemaType::Object {
+                properties,
+                additional_properties,
+                ..
+            } => (properties, additional_properties),
+            _ => {
+                return Err(error(format!(
+                    "query schema `{schema_name}` does not resolve to a flat object"
+                )));
+            }
+        };
+        if !matches!(additional_properties, ObjectAdditionalProperties::Forbidden) {
+            return Err(error(
+                "styled object parameters with additionalProperties have an ambiguous wire namespace"
+                    .to_string(),
+            ));
+        }
+        for (property_name, property) in properties {
+            if !self.query_property_is_scalar(
+                &property.schema_type,
+                &mut std::collections::HashSet::new(),
+            ) {
+                return Err(error(format!(
+                    "property `{property_name}` is not scalar; nested arrays/objects are undefined for the generated query wire format"
+                )));
+            }
+        }
+        Ok(properties.keys().cloned().collect())
+    }
+
+    fn validate_query_parameters(
+        &self,
+        operations: &[&OperationInfo],
+    ) -> Result<(), ServerCodegenError> {
+        for operation in operations {
+            let mut claimed_keys: BTreeMap<String, String> = BTreeMap::new();
+            for parameter in operation
+                .parameters
+                .iter()
+                .filter(|parameter| parameter.location == "query")
+            {
+                let mut keys = match &parameter.query_serialization {
+                    Some(QuerySerialization::Unsupported { reason }) => {
+                        return Err(ServerCodegenError::UnsupportedQueryParameter {
+                            operation_id: operation.operation_id.clone(),
+                            parameter: parameter.name.clone(),
+                            reason: reason.clone(),
+                        });
+                    }
+                    Some(
+                        QuerySerialization::FormExplodedObject
+                        | QuerySerialization::FormObject
+                        | QuerySerialization::DeepObject,
+                    ) => {
+                        let property_keys = self.validate_query_object(operation, parameter)?;
+                        if matches!(
+                            parameter.query_serialization,
+                            Some(QuerySerialization::FormExplodedObject)
+                        ) {
+                            property_keys
+                        } else if matches!(
+                            parameter.query_serialization,
+                            Some(QuerySerialization::DeepObject)
+                        ) {
+                            property_keys
+                                .into_iter()
+                                .map(|property| format!("{}[{property}]", parameter.name))
+                                .collect()
+                        } else {
+                            vec![parameter.name.clone()]
+                        }
+                    }
+                    Some(
+                        QuerySerialization::FormExplodedArray { .. }
+                        | QuerySerialization::FormArray { .. },
+                    )
+                    | None => vec![parameter.name.clone()],
+                };
+                if matches!(
+                    &parameter.query_serialization,
+                    Some(
+                        QuerySerialization::FormExplodedObject
+                            | QuerySerialization::FormObject
+                            | QuerySerialization::DeepObject
+                            | QuerySerialization::FormExplodedArray { .. }
+                            | QuerySerialization::FormArray { .. }
+                    )
+                ) {
+                    keys.push(format!("{}[]", parameter.name));
+                }
+                for key in keys {
+                    if let Some(first_parameter) =
+                        claimed_keys.insert(key.clone(), parameter.name.clone())
+                    {
+                        return Err(ServerCodegenError::AmbiguousQueryParameter {
+                            operation_id: operation.operation_id.clone(),
+                            wire_key: key,
+                            first_parameter,
+                            second_parameter: parameter.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn emit_mod(&self) -> TokenStream {
-        let _ = &self.config; // keep field access future-proof
+        let provenance_attribute = self.provenance_attribute();
         quote! {
             //! Server scaffolding emitted by openapi-to-rust.
             //!
             //! Implement the per-tag trait(s) in `api` on your own struct,
             //! then build an `axum::Router` via `router::router(impl)`.
+
+            #provenance_attribute
 
             pub mod api;
             pub mod errors;
@@ -287,6 +517,7 @@ impl<'a> ServerCodegen<'a> {
     }
 
     fn emit_router(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
+        let provenance_attribute = self.provenance_attribute();
         let factories: Vec<TokenStream> = groups
             .iter()
             .map(|(tag, ops)| self.emit_router_for_trait(tag, ops))
@@ -298,6 +529,81 @@ impl<'a> ServerCodegen<'a> {
             .flatten()
             .filter_map(|op| self.emit_query_struct(op))
             .collect();
+        let has_query_parameters = groups.values().flatten().any(|operation| {
+            operation
+                .parameters
+                .iter()
+                .any(|parameter| parameter.location == "query")
+        });
+        let query_helpers = has_query_parameters.then(|| {
+            quote! {
+                fn __query_pairs(raw: ::std::option::Option<&str>) -> ::std::vec::Vec<(String, String)> {
+                    raw.map(|query| {
+                        ::url::form_urlencoded::parse(query.as_bytes())
+                            .into_owned()
+                            .collect()
+                    })
+                    .unwrap_or_default()
+                }
+
+                fn __query_one(
+                    pairs: &[(String, String)],
+                    key: &str,
+                ) -> ::std::result::Result<::std::option::Option<String>, String> {
+                    let mut values = pairs
+                        .iter()
+                        .filter(|(candidate, _)| candidate == key)
+                        .map(|(_, value)| value.clone());
+                    let value = values.next();
+                    if values.next().is_some() {
+                        return Err(format!("query parameter `{key}` appeared more than once"));
+                    }
+                    Ok(value)
+                }
+
+                fn __decode_query_scalar<T>(
+                    value: &str,
+                    label: &str,
+                ) -> ::std::result::Result<T, String>
+                where
+                    T: ::serde::de::DeserializeOwned,
+                {
+                    ::serde_json::from_value(::serde_json::Value::String(value.to_string()))
+                        .or_else(|_| ::serde_json::from_str(value))
+                        .map_err(|error| format!("invalid query value for `{label}`: {error}"))
+                }
+
+                fn __decode_query_object<T>(
+                    fields: &[(String, String)],
+                    label: &str,
+                ) -> ::std::result::Result<T, String>
+                where
+                    T: ::serde::de::DeserializeOwned,
+                {
+                    let mut serializer =
+                        ::url::form_urlencoded::Serializer::new(String::new());
+                    for (key, value) in fields {
+                        serializer.append_pair(key, value);
+                    }
+                    ::serde_urlencoded::from_str(&serializer.finish())
+                        .map_err(|error| format!("invalid query object `{label}`: {error}"))
+                }
+
+                fn __query_empty_marker(
+                    pairs: &[(String, String)],
+                    key: &str,
+                ) -> ::std::result::Result<bool, String> {
+                    let marker = format!("{key}[]");
+                    match __query_one(pairs, &marker)? {
+                        Some(value) if value.is_empty() => Ok(true),
+                        Some(_) => Err(format!(
+                            "zero-cardinality marker `{marker}` must have an empty value"
+                        )),
+                        None => Ok(false),
+                    }
+                }
+            }
+        });
 
         // When the picked operations span multiple tags, emit a
         // top-level `build_router(impl1, impl2, ...)` that takes one
@@ -315,6 +621,8 @@ impl<'a> ServerCodegen<'a> {
             //! `T: <TraitName> + Clone + Send + Sync + 'static` and
             //! returns an `axum::Router` with state pre-attached.
 
+            #provenance_attribute
+
             use super::api::*;
             use super::errors::*;
             // Pull schemas directly from the types module (always a
@@ -323,6 +631,8 @@ impl<'a> ServerCodegen<'a> {
             // tree at any path without rewriting these imports.
             #[allow(unused_imports)]
             use super::super::types::*;
+
+            #query_helpers
 
             #(#query_structs)*
 
@@ -399,15 +709,29 @@ impl<'a> ServerCodegen<'a> {
         let trait_ident = trait_ident_for_tag(tag);
         let fn_ident = format_ident!("{}_router", trait_ident.to_string().to_snake_case());
 
-        let routes: Vec<TokenStream> = ops
-            .iter()
-            .map(|op| {
-                let method = axum_method_call(&op.method);
-                let handler = format_ident!("{}_handler", op.operation_id.to_snake_case());
-                let path = openapi_to_axum_path(&op.path);
-                quote! { .route(#path, ::axum::routing::#method(#handler::<T>)) }
-            })
-            .collect();
+        let mut routes: Vec<TokenStream> = Vec::new();
+        let mut custom_by_path: BTreeMap<String, Vec<(String, syn::Ident)>> = BTreeMap::new();
+        for op in ops {
+            let handler = format_ident!("{}_handler", op.operation_id.to_snake_case());
+            let path = openapi_to_axum_path(&op.path);
+            if let Some(method_call) = axum_method_call(&op.method) {
+                routes.push(quote! { .route(#path, ::axum::routing::#method_call(#handler::<T>)) });
+            } else {
+                custom_by_path
+                    .entry(path)
+                    .or_default()
+                    .push((op.method.to_ascii_uppercase(), handler));
+            }
+        }
+        let mut custom_dispatchers = Vec::new();
+        for (path, methods) in custom_by_path {
+            let first_handler = &methods[0].1;
+            let dispatcher = format_ident!("{}_custom_method_dispatch", first_handler);
+            let (route, dispatcher_fn) =
+                axum_custom_route(&path, &dispatcher, &methods, &trait_ident);
+            routes.push(route);
+            custom_dispatchers.push(dispatcher_fn);
+        }
 
         let handlers: Vec<TokenStream> = ops
             .iter()
@@ -426,6 +750,8 @@ impl<'a> ServerCodegen<'a> {
                     #(#routes)*
                     .with_state(api)
             }
+
+            #(#custom_dispatchers)*
 
             #(#handlers)*
         }
@@ -449,11 +775,11 @@ impl<'a> ServerCodegen<'a> {
         if !path_params.is_empty() {
             let idents: Vec<syn::Ident> = path_params
                 .iter()
-                .map(|p| format_ident!("{}", p.name.to_snake_case()))
+                .map(|p| self.parameter_ident(p))
                 .collect();
             let types: Vec<TokenStream> = path_params
                 .iter()
-                .map(|p| parse_type(&p.rust_type))
+                .map(|p| self.query_parameter_type(p))
                 .collect();
             if path_params.len() == 1 {
                 let i = &idents[0];
@@ -477,13 +803,26 @@ impl<'a> ServerCodegen<'a> {
             .filter(|p| p.location == "query")
             .collect();
         let mut required_query_checks: Vec<TokenStream> = Vec::new();
+        let mut query_decode = TokenStream::new();
         if !query_params.is_empty() {
             let query_ident = format_ident!("{}Query", op.operation_id.to_pascal_case());
+            let decode_ident = format_ident!("__decode_{}_query", op.operation_id.to_snake_case());
             extractors.push(quote! {
-                ::axum::extract::Query(__q): ::axum::extract::Query<#query_ident>
+                ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery
             });
+            query_decode = quote! {
+                let __q: #query_ident = match #decode_ident(__raw_query.as_deref()) {
+                    Ok(query) => query,
+                    Err(message) => return ::axum::response::IntoResponse::into_response(
+                        (
+                            ::axum::http::StatusCode::BAD_REQUEST,
+                            ::axum::Json(::serde_json::json!({ "error": message })),
+                        )
+                    ),
+                };
+            };
             for p in &query_params {
-                let f = format_ident!("{}", p.name.to_snake_case());
+                let f = self.parameter_ident(p);
                 let wire = p.name.as_str();
                 if p.required {
                     let missing_msg = format!("missing required query parameter `{wire}`");
@@ -586,6 +925,7 @@ impl<'a> ServerCodegen<'a> {
             where
                 T: super::api::#trait_ident + Clone + Send + Sync + 'static,
             {
+                #query_decode
                 #(#required_query_checks)*
                 #(#required_header_checks)*
                 ::axum::response::IntoResponse::into_response(
@@ -596,7 +936,7 @@ impl<'a> ServerCodegen<'a> {
     }
 
     fn emit_api(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
-        let _ = &self.config; // reserved for future module-aware emission
+        let provenance_attribute = self.provenance_attribute();
         let traits: Vec<TokenStream> = groups
             .iter()
             .map(|(tag, ops)| self.emit_trait(tag, ops))
@@ -622,6 +962,8 @@ impl<'a> ServerCodegen<'a> {
         quote! {
             //! Per-tag traits. Implement one of these on your own
             //! struct; the router (P5) wires it into axum.
+
+            #provenance_attribute
 
             #![allow(clippy::too_many_arguments)]
 
@@ -663,15 +1005,15 @@ impl<'a> ServerCodegen<'a> {
         let mut params: Vec<TokenStream> = Vec::new();
         for p in &op.parameters {
             if p.location == "path" {
-                let ident = format_ident!("{}", p.name.to_snake_case());
-                let ty = parse_type(&p.rust_type);
+                let ident = self.parameter_ident(p);
+                let ty = self.query_parameter_type(p);
                 params.push(quote! { #ident: #ty });
             }
         }
         for p in &op.parameters {
             if p.location == "query" {
-                let ident = format_ident!("{}", p.name.to_snake_case());
-                let ty = parse_type(&p.rust_type);
+                let ident = self.parameter_ident(p);
+                let ty = self.query_parameter_type(p);
                 // Required query params land as `T`; the handler
                 // validates presence and returns 400 if absent, so
                 // by the time the trait method sees the value it
@@ -718,7 +1060,8 @@ impl<'a> ServerCodegen<'a> {
     }
 
     /// Per-op `<Op>Query` struct emitted into router.rs when the op
-    /// has any query parameters. Drives axum's `Query<T>` extractor.
+    /// has any query parameters. An operation-specific decoder fills it from
+    /// Axum's raw query so repeated and structured keys remain observable.
     fn emit_query_struct(&self, op: &OperationInfo) -> Option<TokenStream> {
         let query_params: Vec<&_> = op
             .parameters
@@ -729,39 +1072,198 @@ impl<'a> ServerCodegen<'a> {
             return None;
         }
         let ident = format_ident!("{}Query", op.operation_id.to_pascal_case());
-        let fields: Vec<TokenStream> = query_params
-            .iter()
-            .map(|p| {
-                let f_ident = format_ident!("{}", p.name.to_snake_case());
-                let ty = parse_type(&p.rust_type);
-                let serde_rename = if p.name.to_snake_case() == p.name {
-                    quote! {}
-                } else {
-                    let wire = p.name.as_str();
-                    quote! { #[serde(rename = #wire)] }
-                };
-                quote! {
-                    #serde_rename
-                    #[serde(default)]
-                    pub #f_ident: ::std::option::Option<#ty>
+        let decode_ident = format_ident!("__decode_{}_query", op.operation_id.to_snake_case());
+        let mut fields = Vec::new();
+        let mut decoders = Vec::new();
+        let mut field_idents = Vec::new();
+        for parameter in query_params {
+            let field_ident = self.parameter_ident(parameter);
+            let field_type = self.query_parameter_type(parameter);
+            let wire_name = parameter.name.as_str();
+            fields.push(quote! {
+                pub #field_ident: ::std::option::Option<#field_type>
+            });
+            field_idents.push(field_ident.clone());
+
+            let decoder = match &parameter.query_serialization {
+                Some(QuerySerialization::FormExplodedArray { .. }) => quote! {
+                    let #field_ident = {
+                        let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                        let raw_values: Vec<&str> = __pairs
+                            .iter()
+                            .filter(|(key, _)| key == #wire_name)
+                            .map(|(_, value)| value.as_str())
+                            .collect();
+                        if empty_marker && !raw_values.is_empty() {
+                            return Err(format!(
+                                "query array `{}` cannot combine values with its empty marker",
+                                #wire_name,
+                            ));
+                        }
+                        if empty_marker {
+                            Some(Vec::new())
+                        } else if raw_values.is_empty() {
+                            None
+                        } else {
+                            let mut values = Vec::with_capacity(raw_values.len());
+                            for raw in raw_values {
+                                values.push(__decode_query_scalar(raw, #wire_name)?);
+                            }
+                            Some(values)
+                        }
+                    };
+                },
+                Some(QuerySerialization::FormArray { .. }) => quote! {
+                    let #field_ident = match (
+                        __query_one(&__pairs, #wire_name)?,
+                        __query_empty_marker(&__pairs, #wire_name)?,
+                    ) {
+                        (Some(_), true) => return Err(format!(
+                            "query array `{}` cannot combine a value with its empty marker",
+                            #wire_name,
+                        )),
+                        (Some(raw), false) => {
+                            let mut values = Vec::new();
+                            for item in raw.split(',') {
+                                values.push(__decode_query_scalar(item, #wire_name)?);
+                            }
+                            Some(values)
+                        }
+                        (None, true) => Some(Vec::new()),
+                        (None, false) => None,
+                    };
+                },
+                Some(QuerySerialization::FormExplodedObject) => {
+                    let property_names = self
+                        .query_object_properties(parameter)
+                        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    quote! {
+                        let #field_ident = {
+                            let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                            let allowed = [#(#property_names),*];
+                            let object_fields: Vec<(String, String)> = __pairs
+                                .iter()
+                                .filter(|(key, _)| allowed.contains(&key.as_str()))
+                                .cloned()
+                                .collect();
+                            if empty_marker && !object_fields.is_empty() {
+                                return Err(format!(
+                                    "query object `{}` cannot combine properties with its empty marker",
+                                    #wire_name,
+                                ));
+                            }
+                            if object_fields.is_empty() && !empty_marker {
+                                None
+                            } else {
+                                Some(__decode_query_object(&object_fields, #wire_name)?)
+                            }
+                        };
+                    }
                 }
-            })
-            .collect();
+                Some(QuerySerialization::FormObject) => quote! {
+                    let #field_ident = match (
+                        __query_one(&__pairs, #wire_name)?,
+                        __query_empty_marker(&__pairs, #wire_name)?,
+                    ) {
+                        (Some(_), true) => return Err(format!(
+                            "query object `{}` cannot combine a value with its empty marker",
+                            #wire_name,
+                        )),
+                        (Some(raw), false) => {
+                            let parts: Vec<&str> = raw.split(',').collect();
+                            if parts.len() % 2 != 0 {
+                                return Err(format!(
+                                    "query object `{}` must contain alternating key,value entries",
+                                    #wire_name,
+                                ));
+                            }
+                            let object_fields: Vec<(String, String)> = parts
+                                .chunks_exact(2)
+                                .map(|pair| (pair[0].to_string(), pair[1].to_string()))
+                                .collect();
+                            Some(__decode_query_object(&object_fields, #wire_name)?)
+                        }
+                        (None, true) => Some(__decode_query_object(&[], #wire_name)?),
+                        (None, false) => None,
+                    };
+                },
+                Some(QuerySerialization::DeepObject) => {
+                    let property_names = self
+                        .query_object_properties(parameter)
+                        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    quote! {
+                        let #field_ident = {
+                            let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                            let prefix = format!("{}[", #wire_name);
+                            let allowed = [#(#property_names),*];
+                            let mut object_fields = Vec::new();
+                            for (key, value) in &__pairs {
+                                if let Some(property) = key
+                                    .strip_prefix(&prefix)
+                                    .and_then(|rest| rest.strip_suffix(']'))
+                                {
+                                    if property.is_empty() {
+                                        continue;
+                                    }
+                                    if !allowed.contains(&property) {
+                                        return Err(format!(
+                                            "unknown deepObject property `{}[{}]`",
+                                            #wire_name,
+                                            property,
+                                        ));
+                                    }
+                                    object_fields.push((property.to_string(), value.clone()));
+                                }
+                            }
+                            if empty_marker && !object_fields.is_empty() {
+                                return Err(format!(
+                                    "query object `{}` cannot combine properties with its empty marker",
+                                    #wire_name,
+                                ));
+                            }
+                            if object_fields.is_empty() && !empty_marker {
+                                None
+                            } else {
+                                Some(__decode_query_object(&object_fields, #wire_name)?)
+                            }
+                        };
+                    }
+                }
+                Some(QuerySerialization::Unsupported { .. }) | None => quote! {
+                    let #field_ident = __query_one(&__pairs, #wire_name)?
+                        .map(|raw| __decode_query_scalar(&raw, #wire_name))
+                        .transpose()?;
+                },
+            };
+            decoders.push(decoder);
+        }
         let doc = format!(
             " Query parameters for `{} {}` (operationId `{}`).",
             op.method, op.path, op.operation_id
         );
         Some(quote! {
             #[doc = #doc]
-            #[derive(Debug, Default, ::serde::Deserialize)]
+            #[derive(Debug, Default)]
             pub struct #ident {
                 #(#fields),*
+            }
+
+            fn #decode_ident(
+                raw: ::std::option::Option<&str>,
+            ) -> ::std::result::Result<#ident, String> {
+                let __pairs = __query_pairs(raw);
+                #(#decoders)*
+                Ok(#ident {
+                    #(#field_idents),*
+                })
             }
         })
     }
 
     fn emit_errors(&self, ops: &[&OperationInfo]) -> TokenStream {
-        let _ = &self.config; // reserved for future module-aware emission
+        let provenance_attribute = self.provenance_attribute();
         let any_streaming = ops.iter().any(|op| op.supports_streaming);
         let enums: Vec<TokenStream> = ops.iter().map(|op| self.emit_response_enum(op)).collect();
 
@@ -816,6 +1318,8 @@ impl<'a> ServerCodegen<'a> {
             //! Per-operation response enums. Pick a variant to pick a
             //! status code — IntoResponse maps each variant to its
             //! documented (StatusCode, Json) pair.
+
+            #provenance_attribute
 
             #![allow(clippy::large_enum_variant)]
 
@@ -952,19 +1456,58 @@ fn emit_param_enum(name: &str, values: &[String]) -> TokenStream {
     }
 }
 
-fn axum_method_call(method: &str) -> TokenStream {
+fn axum_method_call(method: &str) -> Option<TokenStream> {
     match method.to_ascii_uppercase().as_str() {
-        "GET" => quote! { get },
-        "POST" => quote! { post },
-        "PUT" => quote! { put },
-        "PATCH" => quote! { patch },
-        "DELETE" => quote! { delete },
-        "HEAD" => quote! { head },
-        "OPTIONS" => quote! { options },
-        // Any other verb (TRACE, CONNECT, custom) → fall back to the
-        // generic routing builder.
-        _ => quote! { any },
+        "CONNECT" => Some(quote! { connect }),
+        "DELETE" => Some(quote! { delete }),
+        "GET" => Some(quote! { get }),
+        "HEAD" => Some(quote! { head }),
+        "OPTIONS" => Some(quote! { options }),
+        "PATCH" => Some(quote! { patch }),
+        "POST" => Some(quote! { post }),
+        "PUT" => Some(quote! { put }),
+        "TRACE" => Some(quote! { trace }),
+        _ => None,
     }
+}
+
+/// Build one exact-method dispatcher for every nonstandard operation sharing a
+/// path within one generated trait. Axum has convenience functions for the
+/// standard RFC methods, but OpenAPI 3.2 also defines QUERY and permits custom
+/// `additionalOperations`. Axum allows only one `any` fallback per path, so all
+/// custom methods on that path and trait must share this dispatcher. Generation
+/// rejects the cross-trait form before reaching this helper.
+fn axum_custom_route(
+    path: &str,
+    dispatcher: &syn::Ident,
+    methods: &[(String, syn::Ident)],
+    trait_ident: &syn::Ident,
+) -> (TokenStream, TokenStream) {
+    let arms = methods.iter().map(|(method, handler)| {
+        quote! {
+            #method => ::axum::handler::Handler::call(#handler::<T>, request, api).await
+        }
+    });
+    let route = quote! {
+        .route(#path, ::axum::routing::any(#dispatcher::<T>))
+    };
+    let dispatcher_fn = quote! {
+        async fn #dispatcher<T>(
+            ::axum::extract::State(api): ::axum::extract::State<T>,
+            request: ::axum::extract::Request,
+        ) -> ::axum::response::Response
+        where
+            T: #trait_ident + Clone + Send + Sync + 'static,
+        {
+            match request.method().as_str() {
+                #(#arms,)*
+                _ => ::axum::response::IntoResponse::into_response(
+                    ::axum::http::StatusCode::METHOD_NOT_ALLOWED,
+                ),
+            }
+        }
+    };
+    (route, dispatcher_fn)
 }
 
 /// OpenAPI uses `{param}` placeholders; axum 0.7 accepts the same
@@ -986,10 +1529,33 @@ fn body_type(op: &OperationInfo) -> Option<String> {
 fn group_by_tag<'a>(ops: &[&'a OperationInfo]) -> BTreeMap<String, Vec<&'a OperationInfo>> {
     let mut groups: BTreeMap<String, Vec<&OperationInfo>> = BTreeMap::new();
     for op in ops {
-        let tag = op.tags.first().cloned().unwrap_or_else(|| "Server".into());
+        let tag = primary_tag(op);
         groups.entry(tag).or_default().push(op);
     }
     groups
+}
+
+fn primary_tag(op: &OperationInfo) -> String {
+    op.tags.first().cloned().unwrap_or_else(|| "Server".into())
+}
+
+fn validate_custom_method_route_groups(ops: &[&OperationInfo]) -> Result<(), ServerCodegenError> {
+    let mut tags_by_path: BTreeMap<&str, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for op in ops {
+        if axum_method_call(&op.method).is_none() {
+            tags_by_path
+                .entry(&op.path)
+                .or_default()
+                .insert(primary_tag(op));
+        }
+    }
+    if let Some((path, tags)) = tags_by_path.into_iter().find(|(_, tags)| tags.len() > 1) {
+        return Err(ServerCodegenError::CrossTagCustomMethods {
+            path: path.to_string(),
+            tags: tags.into_iter().collect::<Vec<_>>().join(", "),
+        });
+    }
+    Ok(())
 }
 
 fn trait_ident_for_tag(tag: &str) -> syn::Ident {
@@ -1116,5 +1682,31 @@ mod tests {
     fn untagged_falls_back_to_server_api() {
         let id = trait_ident_for_tag("");
         assert_eq!(id.to_string(), "ServerApi");
+    }
+
+    #[test]
+    fn custom_methods_on_one_path_share_an_exact_dispatcher() {
+        let dispatcher = format_ident!("cache_custom_method_dispatch");
+        let methods = vec![
+            ("PURGE".to_string(), format_ident!("purge_cache_handler")),
+            ("QUERY".to_string(), format_ident!("query_cache_handler")),
+        ];
+        let trait_ident = format_ident!("CacheApi");
+        let (route, dispatcher) = axum_custom_route("/cache", &dispatcher, &methods, &trait_ident);
+        let route = route.to_string();
+        let dispatcher = dispatcher.to_string();
+        assert!(route.contains("routing :: any"));
+        assert_eq!(route.matches("routing :: any").count(), 1);
+        assert!(dispatcher.contains("\"PURGE\""));
+        assert!(dispatcher.contains("\"QUERY\""));
+        assert!(dispatcher.contains("purge_cache_handler"));
+        assert!(dispatcher.contains("query_cache_handler"));
+        assert!(dispatcher.contains("METHOD_NOT_ALLOWED"));
+    }
+
+    #[test]
+    fn standard_methods_use_axum_method_routes_without_guards() {
+        assert!(axum_method_call("TRACE").is_some());
+        assert!(axum_method_call("QUERY").is_none());
     }
 }

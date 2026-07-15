@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Tests for tools array generation
 //!
 //! These tests ensure that tools arrays are properly typed as union types

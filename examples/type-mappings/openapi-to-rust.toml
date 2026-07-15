@@ -1,0 +1,16 @@
+[generator]
+spec_path = "../../specs/openai.yaml"
+output_dir = "generated"
+module_name = "openai"
+
+[generator.types]
+date_time = "chrono"
+uuid = "uuid"
+byte = "base64"
+unsigned = true
+
+[generator.types.shape]
+additional_properties_typed = true
+
+[features]
+enable_async_client = true

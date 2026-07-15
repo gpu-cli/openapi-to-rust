@@ -12,7 +12,7 @@
 //! `SchemaType::Primitive.serde_with`.
 
 use openapi_to_rust::{
-    CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
+    ByteStrategy, CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
 };
 use serde_json::json;
 
@@ -40,9 +40,23 @@ fn generate(spec: serde_json::Value, mapper: TypeMapper) -> String {
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
+    codegen.generate(&mut analysis).expect("generate")
+}
+
+fn generate_with_types(spec: serde_json::Value, types: TypeMappingConfig) -> String {
+    let mut analyzer =
+        SchemaAnalyzer::with_type_mapper(spec, TypeMapper::new(types.clone())).expect("analyzer");
+    let mut analysis = analyzer.analyze().expect("analyze");
+    let codegen = CodeGenerator::new(GeneratorConfig {
+        module_name: "sample".into(),
+        enable_async_client: false,
+        types,
+        ..Default::default()
+    });
     codegen.generate(&mut analysis).expect("generate")
 }
 
@@ -143,6 +157,80 @@ fn byte_default_emits_vec_u8_with_base64_codec() {
         code.contains("mod base64_serde"),
         "Generated file should include the base64_serde helper module. Code:\n{code}"
     );
+    assert!(code.contains("STANDARD as ENGINE"), "Code:\n{code}");
+    assert!(!code.contains("URL_SAFE_NO_PAD"), "Code:\n{code}");
+}
+
+#[test]
+fn byte_url_unpadded_emits_rfc7515_codec() {
+    let code = generate_with_types(
+        spec_with_format("byte"),
+        TypeMappingConfig {
+            byte: ByteStrategy::Base64UrlUnpadded,
+            ..TypeMappingConfig::default()
+        },
+    );
+    assert!(code.contains("URL_SAFE_NO_PAD as ENGINE"), "Code:\n{code}");
+    assert!(!code.contains("STANDARD as ENGINE"), "Code:\n{code}");
+}
+
+#[test]
+fn generated_byte_url_unpadded_codec_round_trips() {
+    let code = generate_with_types(
+        spec_with_format("byte"),
+        TypeMappingConfig {
+            byte: ByteStrategy::Base64UrlUnpadded,
+            ..TypeMappingConfig::default()
+        },
+    );
+    let temp = tempfile::TempDir::new().expect("scratch crate");
+    std::fs::create_dir_all(temp.path().join("src")).expect("scratch src");
+    std::fs::write(temp.path().join("src/generated.rs"), code).expect("generated module");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        r#"[package]
+name = "byte-url-unpadded-roundtrip"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+    )
+    .expect("scratch manifest");
+    std::fs::write(
+        temp.path().join("src/main.rs"),
+        r##"#![allow(dead_code)]
+mod generated;
+
+fn main() {
+    let value = generated::Sample { value: vec![251, 255] };
+    let json = serde_json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"value":"-_8"}"#);
+    let decoded: generated::Sample = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.value, vec![251, 255]);
+}
+"##,
+    )
+    .expect("scratch main");
+
+    let status = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "--offline"])
+        .current_dir(temp.path())
+        .env(
+            "CARGO_TARGET_DIR",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/generated-byte-roundtrip"),
+        )
+        .status()
+        .expect("cargo run");
+    assert!(
+        status.success(),
+        "generated URL-safe codec did not round-trip"
+    );
 }
 
 #[test]
@@ -197,6 +285,7 @@ fn required_deps_are_populated_for_typed_scalars() {
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -204,26 +293,33 @@ fn required_deps_are_populated_for_typed_scalars() {
 
     let crate_names: Vec<&str> = result.required_deps.iter().map(|d| d.crate_name).collect();
     // Sorted, deterministic ordering.
-    assert_eq!(crate_names, vec!["base64", "chrono", "url", "uuid"]);
+    assert_eq!(
+        crate_names,
+        vec!["base64", "chrono", "serde", "url", "uuid"]
+    );
 }
 
 #[test]
-fn required_deps_empty_for_pure_string_spec() {
+fn required_deps_include_serde_for_pure_string_spec() {
     let spec = spec_with_format("hostname"); // unknown format → String
     let mut analyzer =
         SchemaAnalyzer::with_type_mapper(spec, TypeMapper::default()).expect("analyzer");
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
     let result = codegen.generate_all(&mut analysis).expect("generate_all");
 
-    assert!(
-        result.required_deps.is_empty(),
-        "spec with no typed scalars should have empty required_deps. Got: {:?}",
-        result.required_deps
+    assert_eq!(
+        result
+            .required_deps
+            .iter()
+            .map(|dependency| dependency.crate_name)
+            .collect::<Vec<_>>(),
+        vec!["serde"]
     );
 }
 
@@ -238,6 +334,7 @@ fn write_files_drops_required_deps_toml_when_typed_scalars_used() {
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
         output_dir: temp.path().into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -259,7 +356,7 @@ fn write_files_drops_required_deps_toml_when_typed_scalars_used() {
 }
 
 #[test]
-fn write_files_skips_required_deps_toml_when_no_typed_scalars() {
+fn write_files_emits_required_deps_toml_for_base_serde_dependency() {
     let spec = spec_with_format("hostname");
     let mut analyzer =
         SchemaAnalyzer::with_type_mapper(spec, TypeMapper::default()).expect("analyzer");
@@ -269,6 +366,7 @@ fn write_files_skips_required_deps_toml_when_no_typed_scalars() {
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
         output_dir: temp.path().into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -276,10 +374,9 @@ fn write_files_skips_required_deps_toml_when_no_typed_scalars() {
     codegen.write_files(&result).expect("write_files");
 
     let deps_path = temp.path().join("REQUIRED_DEPS.toml");
-    assert!(
-        !deps_path.exists(),
-        "REQUIRED_DEPS.toml should NOT be written when no typed scalars are used"
-    );
+    let body = std::fs::read_to_string(deps_path).expect("complete dependency fragment");
+    assert!(body.contains("serde = { version = \"1\", features = [\"derive\"] }"));
+    assert!(!body.contains("reqwest ="), "types-only output: {body}");
 }
 
 #[test]

@@ -15,9 +15,9 @@
 //!   [`SchemaType::Primitive`](crate::analysis::SchemaType::Primitive)
 //!   to the field-emission site in `generator.rs`, which wraps them
 //!   in a `#[serde(with = …)]` attribute.
-//! - [`UsedFeatures`] tracks which optional crates the mapper
-//!   actually emitted references to. Q2.8 will read this after
-//!   generation and write a `REQUIRED_DEPS.toml`.
+//! - [`UsedFeatures`] records typed-scalar crate usage for helper emission and
+//!   compatibility APIs. The complete generated dependency manifest is
+//!   collected from the exact emitted files after operation/model pruning.
 //!
 //! # Conservative mode
 //! Pass `TypeMappingConfig::conservative()` (CLI: `--types-conservative`)
@@ -41,8 +41,7 @@ pub struct MappedType {
     /// Optional `#[serde(with = "...")]` codec path. The generator
     /// wraps this in a `with = "<value>"` field attribute.
     pub serde_with: Option<String>,
-    /// Optional crate this mapping introduced. Tracked in
-    /// [`UsedFeatures`] for the dep advisory (Q2.8).
+    /// Optional crate this mapping introduced, tracked in [`UsedFeatures`].
     pub feature: Option<TypeFeature>,
 }
 
@@ -103,9 +102,7 @@ pub enum TypeFeature {
 }
 
 impl TypeFeature {
-    /// Canonical dependency line for this feature. Q2.8 uses this to
-    /// emit `REQUIRED_DEPS.toml` next to the generated code so users
-    /// know exactly which crates to add to their Cargo.toml.
+    /// Canonical dependency requirement for this typed scalar.
     pub fn dep_requirement(self) -> DepRequirement {
         match self {
             Self::Chrono => DepRequirement::new("chrono", "0.4").with_features(&["serde"]),
@@ -125,8 +122,8 @@ impl TypeFeature {
                 "parsing",
                 "macros",
             ]),
-            Self::Iso8601 => DepRequirement::new("iso8601", "0.6"),
-            Self::Uuid => DepRequirement::new("uuid", "1").with_features(&["serde", "v4"]),
+            Self::Iso8601 => DepRequirement::new("iso8601", "0.6").with_features(&["serde"]),
+            Self::Uuid => DepRequirement::new("uuid", "1").with_features(&["serde"]),
             Self::Bytes => DepRequirement::new("bytes", "1").with_features(&["serde"]),
             Self::Base64 => DepRequirement::new("base64", "0.22"),
             Self::Url => DepRequirement::new("url", "2").with_features(&["serde"]),
@@ -141,6 +138,8 @@ pub struct DepRequirement {
     pub crate_name: &'static str,
     pub version: &'static str,
     pub features: Vec<&'static str>,
+    pub default_features: bool,
+    pub optional: bool,
 }
 
 impl DepRequirement {
@@ -149,18 +148,32 @@ impl DepRequirement {
             crate_name,
             version,
             features: Vec::new(),
+            default_features: true,
+            optional: false,
         }
     }
 
     pub fn with_features(mut self, features: &[&'static str]) -> Self {
         self.features = features.to_vec();
+        self.features.sort_unstable();
+        self.features.dedup();
+        self
+    }
+
+    pub fn without_default_features(mut self) -> Self {
+        self.default_features = false;
+        self
+    }
+
+    pub fn optional(mut self) -> Self {
+        self.optional = true;
         self
     }
 
     /// Render as a single TOML `[dependencies]` line. Picks the
     /// most compact form that still expresses the required features.
     pub fn to_toml_line(&self) -> String {
-        if self.features.is_empty() {
+        if self.features.is_empty() && self.default_features && !self.optional {
             format!("{} = \"{}\"", self.crate_name, self.version)
         } else {
             let feats = self
@@ -169,18 +182,25 @@ impl DepRequirement {
                 .map(|f| format!("\"{f}\""))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!(
-                "{} = {{ version = \"{}\", features = [{}] }}",
-                self.crate_name, self.version, feats
-            )
+            let mut attributes = vec![format!("version = \"{}\"", self.version)];
+            if !self.default_features {
+                attributes.push("default-features = false".to_string());
+            }
+            if !self.features.is_empty() {
+                attributes.push(format!("features = [{feats}]"));
+            }
+            if self.optional {
+                attributes.push("optional = true".to_string());
+            }
+            format!("{} = {{ {} }}", self.crate_name, attributes.join(", "))
         }
     }
 }
 
 /// Render `REQUIRED_DEPS.toml` content from a sorted set of
 /// requirements. Returns `None` when the input is empty so the
-/// caller can skip writing the file (no clutter when no optional
-/// crates were used).
+/// caller can skip writing the file when no generated Rust files need
+/// external crates.
 pub fn render_required_deps_toml(deps: &[DepRequirement]) -> Option<String> {
     if deps.is_empty() {
         return None;
@@ -188,13 +208,9 @@ pub fn render_required_deps_toml(deps: &[DepRequirement]) -> Option<String> {
     let mut out = String::new();
     out.push_str(
         "# Generated by openapi-to-rust.\n\
-         # These crates are required by the typed-scalar formats used\n\
-         # in your OpenAPI spec. Copy these lines into the [dependencies]\n\
-         # section of your consuming crate's Cargo.toml.\n\
-         #\n\
-         # To opt out of typed scalars (and avoid these deps), set\n\
-         # the relevant strategies to \"string\" in [generator.types],\n\
-         # or pass --types-conservative on the CLI.\n\
+         # Complete direct dependencies for this generated output.\n\
+         # Append this fragment to the consuming crate's Cargo.toml, or\n\
+         # merge it with existing dependency and feature sections.\n\
          \n\
          [dependencies]\n",
     );
@@ -202,32 +218,187 @@ pub fn render_required_deps_toml(deps: &[DepRequirement]) -> Option<String> {
         out.push_str(&dep.to_toml_line());
         out.push('\n');
     }
+    if deps.iter().any(|dep| dep.crate_name == "specta") {
+        out.push_str("\n[features]\nspecta = [\"dep:specta\"]\n");
+    }
     Some(out)
+}
+
+/// Merge requirements by crate name, unioning features deterministically.
+/// A dependency is optional only when every occurrence is optional, and
+/// default features are enabled when any occurrence needs them.
+pub fn merge_dep_requirements(
+    requirements: impl IntoIterator<Item = DepRequirement>,
+) -> Vec<DepRequirement> {
+    let mut merged: std::collections::BTreeMap<&'static str, DepRequirement> =
+        std::collections::BTreeMap::new();
+    for mut dependency in requirements {
+        dependency.features.sort_unstable();
+        dependency.features.dedup();
+        match merged.get_mut(dependency.crate_name) {
+            Some(existing) => {
+                debug_assert_eq!(existing.version, dependency.version);
+                existing.default_features |= dependency.default_features;
+                existing.optional &= dependency.optional;
+                existing.features.extend(dependency.features);
+                existing.features.sort_unstable();
+                existing.features.dedup();
+            }
+            None => {
+                merged.insert(dependency.crate_name, dependency);
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
+/// Collect the complete direct dependency set from the exact Rust files that
+/// will be written. Scanning emitted paths keeps model pruning and operation
+/// selection authoritative: dependencies cannot leak in from schemas or
+/// operations that were analyzed but not generated.
+pub fn collect_generated_dep_requirements<'a>(
+    contents: impl IntoIterator<Item = &'a str>,
+    enable_specta: bool,
+) -> Vec<DepRequirement> {
+    let generated = contents.into_iter().collect::<Vec<_>>().join("\n");
+    let mut dependencies = Vec::new();
+    let uses = |needle: &str| generated.contains(needle);
+
+    if uses("serde::") {
+        dependencies.push(DepRequirement::new("serde", "1").with_features(&["derive"]));
+    }
+    if uses("serde_json::") {
+        dependencies.push(DepRequirement::new("serde_json", "1"));
+    }
+    if uses("serde_urlencoded::") {
+        dependencies.push(DepRequirement::new("serde_urlencoded", "0.7"));
+    }
+    if uses("chrono::") {
+        dependencies.push(TypeFeature::Chrono.dep_requirement());
+    }
+    let uses_time = uses("time::OffsetDateTime") || uses("time::Date") || uses("time::Time");
+    if uses_time {
+        let feature = if uses("time::Date") || uses("time::Time") {
+            TypeFeature::TimeDate
+        } else {
+            TypeFeature::Time
+        };
+        dependencies.push(feature.dep_requirement());
+    }
+    if uses("iso8601::") {
+        dependencies.push(TypeFeature::Iso8601.dep_requirement());
+    }
+    if uses("uuid::") {
+        dependencies.push(TypeFeature::Uuid.dep_requirement());
+    }
+    if uses("bytes::") {
+        dependencies.push(TypeFeature::Bytes.dep_requirement());
+    }
+    if uses("base64::") {
+        dependencies.push(TypeFeature::Base64.dep_requirement());
+    }
+    if uses("url::") {
+        let dependency = if uses("url::Url") {
+            TypeFeature::Url.dep_requirement()
+        } else {
+            DepRequirement::new("url", "2")
+        };
+        dependencies.push(dependency);
+    }
+    if uses("email_address::") {
+        dependencies.push(TypeFeature::EmailAddress.dep_requirement());
+    }
+
+    if uses("reqwest::") {
+        let mut features = vec!["rustls-tls"];
+        if uses(".json(&") {
+            features.push("json");
+        }
+        dependencies.push(
+            DepRequirement::new("reqwest", "0.12")
+                .without_default_features()
+                .with_features(&features),
+        );
+    }
+    if uses("reqwest_middleware::") {
+        let dependency = if uses(".multipart(form)") {
+            DepRequirement::new("reqwest-middleware", "0.4").with_features(&["multipart"])
+        } else {
+            DepRequirement::new("reqwest-middleware", "0.4")
+        };
+        dependencies.push(dependency);
+    }
+    if uses("reqwest_retry::") {
+        let dependency = DepRequirement::new("reqwest-retry", "0.7");
+        dependencies.push(if uses("reqwest_tracing::") {
+            dependency
+        } else {
+            dependency.without_default_features()
+        });
+    }
+    if uses("reqwest_tracing::") {
+        dependencies.push(DepRequirement::new("reqwest-tracing", "0.5"));
+    }
+    if uses("reqwest_eventsource::") {
+        dependencies.push(DepRequirement::new("reqwest-eventsource", "0.6"));
+    }
+    if uses("thiserror::") || uses("use thiserror::") {
+        dependencies.push(DepRequirement::new("thiserror", "1"));
+    }
+    if uses("async_trait::") {
+        dependencies.push(DepRequirement::new("async-trait", "0.1"));
+    }
+    if uses("futures_util::") {
+        dependencies.push(DepRequirement::new("futures-util", "0.3"));
+    }
+    if uses("futures_core::") {
+        dependencies.push(DepRequirement::new("futures-core", "0.3"));
+    }
+    if uses("use tracing::") {
+        dependencies.push(DepRequirement::new("tracing", "0.1"));
+    }
+    if uses("axum::") {
+        let mut features = vec!["json"];
+        if uses("axum::response::sse::") {
+            features.push("tokio");
+        }
+        dependencies.push(
+            DepRequirement::new("axum", "0.7")
+                .without_default_features()
+                .with_features(&features),
+        );
+    }
+    if enable_specta {
+        let mut features = vec!["derive"];
+        for (needle, feature) in [
+            ("bytes::", "bytes"),
+            ("chrono::", "chrono"),
+            ("time::OffsetDateTime", "time"),
+            ("url::Url", "url"),
+            ("uuid::", "uuid"),
+        ] {
+            if uses(needle) {
+                features.push(feature);
+            }
+        }
+        if uses_time {
+            features.push("time");
+        }
+        dependencies.push(
+            DepRequirement::new("specta", "2.0.0-rc.25")
+                .with_features(&features)
+                .optional(),
+        );
+    }
+
+    merge_dep_requirements(dependencies)
 }
 
 /// Snapshot a `UsedFeatures` set as a sorted, de-duplicated list of
 /// `DepRequirement`s. Sorting by crate name keeps the emitted file
 /// deterministic so it can be checked in or diffed.
 pub fn collect_dep_requirements(used: &UsedFeatures) -> Vec<DepRequirement> {
-    let mut deps: Vec<DepRequirement> = used.iter().map(|f| f.dep_requirement()).collect();
-    deps.sort_by_key(|d| d.crate_name);
-    // Several features can point at the same crate with different
-    // feature lists (e.g. Time vs TimeDate both need `time`); union
-    // the features so the single emitted line satisfies all of them.
-    let mut merged: Vec<DepRequirement> = Vec::new();
-    for dep in deps {
-        match merged.last_mut() {
-            Some(last) if last.crate_name == dep.crate_name => {
-                for feat in dep.features {
-                    if !last.features.contains(&feat) {
-                        last.features.push(feat);
-                    }
-                }
-            }
-            _ => merged.push(dep),
-        }
-    }
-    merged
+    merge_dep_requirements(used.iter().map(|feature| feature.dep_requirement()))
 }
 
 /// Tracks which optional crates the generator emitted code for.
@@ -306,9 +477,13 @@ pub enum UuidStrategy {
 pub enum ByteStrategy {
     String,
     /// `Vec<u8>` round-tripped via an inlined `base64_serde` module
-    /// (default).
+    /// using the standard padded alphabet (default).
     #[default]
     Base64,
+    /// `Vec<u8>` round-tripped with the URL-safe, unpadded alphabet
+    /// from RFC 7515 section 2. This setting applies to every
+    /// `format: byte` field in the generated module.
+    Base64UrlUnpadded,
     /// `Vec<u8>` with no codec (caller responsible for encoding).
     VecU8,
 }
@@ -365,7 +540,7 @@ pub enum EmailStrategy {
 /// TOML section. Defaults flip on every common typed scalar; opt out
 /// per format by setting the strategy to `string` in TOML.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeMappingConfig {
     pub date_time: DateStrategy,
     pub date: DateStrategy,
@@ -504,7 +679,7 @@ impl TypeMappingConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeShapeConfig {
     pub additional_properties_typed: Option<bool>,
     pub unique_items_to_set: Option<bool>,
@@ -512,7 +687,7 @@ pub struct TypeShapeConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeConstraintsConfig {
     /// Q2.4 constraint annotation mode. Defaults to `Doc` when the
     /// `[generator.types.constraints]` block is absent (see
@@ -540,7 +715,7 @@ pub enum ConstraintMode {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct TypeEnumsConfig {
     pub x_enum_varnames: Option<bool>,
     pub x_enum_descriptions: Option<bool>,
@@ -569,8 +744,7 @@ impl TypeMapper {
         }
     }
 
-    /// Snapshot of crates this mapper has emitted references to.
-    /// Read after generation by Q2.8 to write `REQUIRED_DEPS.toml`.
+    /// Snapshot of typed-scalar crates this mapper has referenced.
     pub fn used_features(&self) -> UsedFeatures {
         self.used.borrow().clone()
     }
@@ -751,11 +925,12 @@ impl TypeMapper {
         match strat {
             ByteStrategy::String => MappedType::plain("String"),
             ByteStrategy::VecU8 => MappedType::plain("Vec<u8>"),
-            ByteStrategy::Base64 => {
+            ByteStrategy::Base64 | ByteStrategy::Base64UrlUnpadded => {
                 self.record(TypeFeature::Base64);
                 // Path is resolved relative to the generated
                 // module; the helper module is emitted as
-                // `base64_serde` at the top of `types.rs`.
+                // `base64_serde` at the top of `types.rs`. Its
+                // alphabet is selected once during code generation.
                 MappedType::with_codec("Vec<u8>", "base64_serde", TypeFeature::Base64)
             }
         }
@@ -914,6 +1089,25 @@ mod tests {
         assert_eq!(mt.rust_type, "Vec<u8>");
         assert_eq!(mt.serde_with.as_deref(), Some("base64_serde"));
         assert_eq!(mt.feature, Some(TypeFeature::Base64));
+    }
+
+    #[test]
+    fn byte_url_unpadded_reuses_base64_codec() {
+        let mapper = TypeMapper::new(TypeMappingConfig {
+            byte: ByteStrategy::Base64UrlUnpadded,
+            ..TypeMappingConfig::default()
+        });
+        let mapped = mapper.string_format(Some("byte"));
+        assert_eq!(mapped.rust_type, "Vec<u8>");
+        assert_eq!(mapped.serde_with.as_deref(), Some("base64_serde"));
+        assert_eq!(mapped.feature, Some(TypeFeature::Base64));
+    }
+
+    #[test]
+    fn byte_url_unpadded_parses_from_toml() {
+        let config: TypeMappingConfig =
+            toml::from_str(r#"byte = "base64_url_unpadded""#).expect("parse type config");
+        assert_eq!(config.byte, ByteStrategy::Base64UrlUnpadded);
     }
 
     #[test]

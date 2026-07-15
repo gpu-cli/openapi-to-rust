@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Test for improved inline variant naming in untagged unions
 
 use openapi_to_rust::test_helpers::*;

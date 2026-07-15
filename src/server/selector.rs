@@ -59,18 +59,37 @@ impl Selector {
 fn split_method_path(s: &str) -> Option<(&str, &str)> {
     let (head, tail) = s.split_once(char::is_whitespace)?;
     let tail = tail.trim_start();
-    if !tail.starts_with('/') {
+    if !tail.starts_with('/') || !is_http_method_token(head) {
         return None;
     }
-    let head_upper = head.to_ascii_uppercase();
-    if matches!(
-        head_upper.as_str(),
-        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | "TRACE"
-    ) {
-        Some((head, tail))
-    } else {
-        None
-    }
+    Some((head, tail))
+}
+
+/// RFC 9110 method names are case-sensitive `token` values. OpenAPI 3.2 adds
+/// `QUERY` and permits arbitrary `additionalOperations`, so selector parsing
+/// must not hard-code the legacy eight verbs.
+fn is_http_method_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 impl fmt::Display for Selector {
@@ -96,6 +115,19 @@ pub enum SelectorParseError {
 /// Reason resolution failed, with a fuzzy-match suggestion when possible.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SelectorResolveError {
+    #[error(
+        "operationId `{requested}` is ambiguous after generator disambiguation: {matches}. Use a renamed ID shown above for renamed endpoints; select the unchanged `{requested}` endpoint with an exact `METHOD /path` selector"
+    )]
+    AmbiguousOperationId { requested: String, matches: String },
+    #[error(
+        "operationId `{requested}` was renamed to `{generated}` because its Rust name collides with another operation (`{method} {path}`). Use `{generated}` or the exact `METHOD /path` selector"
+    )]
+    RenamedOperationId {
+        requested: String,
+        generated: String,
+        method: String,
+        path: String,
+    },
     #[error(
         "no operation with id `{requested}`{}",
         format_suggestion(.suggestion.as_deref())
@@ -188,16 +220,62 @@ fn resolve_one(
     index: &OperationIndex,
 ) -> Result<ResolvedOne, SelectorResolveError> {
     match sel {
-        Selector::OperationId(id) => index
-            .operations()
-            .iter()
-            .find(|op| &op.operation_id == id)
-            .cloned()
-            .map(ResolvedOne::Single)
-            .ok_or_else(|| SelectorResolveError::UnknownOperationId {
-                requested: id.clone(),
-                suggestion: suggest_op_id(id, index),
-            }),
+        Selector::OperationId(id) => {
+            if let Some(aliases) = index.operation_id_aliases(id) {
+                if aliases.len() > 1 {
+                    let matches = aliases
+                        .iter()
+                        .filter_map(|generated| {
+                            index
+                                .operations()
+                                .iter()
+                                .find(|op| &op.operation_id == generated)
+                                .map(|op| {
+                                    format!("`{} {}` → `{}`", op.method, op.path, op.operation_id)
+                                })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(SelectorResolveError::AmbiguousOperationId {
+                        requested: id.clone(),
+                        matches,
+                    });
+                }
+
+                // A disambiguated generated ID can itself equal another
+                // operation's raw ID. Keep emitted IDs directly selectable;
+                // the raw-ID rename diagnostic only applies when there is no
+                // exact generated operation with this ID.
+                if let Some(op) = index.operations().iter().find(|op| &op.operation_id == id) {
+                    return Ok(ResolvedOne::Single(op.clone()));
+                }
+                if let Some(generated) = aliases.first()
+                    && generated != id
+                    && let Some(op) = index
+                        .operations()
+                        .iter()
+                        .find(|op| &op.operation_id == generated)
+                {
+                    return Err(SelectorResolveError::RenamedOperationId {
+                        requested: id.clone(),
+                        generated: generated.clone(),
+                        method: op.method.clone(),
+                        path: op.path.clone(),
+                    });
+                }
+            }
+
+            index
+                .operations()
+                .iter()
+                .find(|op| &op.operation_id == id)
+                .cloned()
+                .map(ResolvedOne::Single)
+                .ok_or_else(|| SelectorResolveError::UnknownOperationId {
+                    requested: id.clone(),
+                    suggestion: suggest_op_id(id, index),
+                })
+        }
         Selector::MethodPath { method, path } => index
             .operations()
             .iter()
@@ -361,6 +439,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_openapi_32_and_extension_methods() {
+        assert_eq!(
+            Selector::parse("query /v1/search").unwrap(),
+            Selector::MethodPath {
+                method: "QUERY".into(),
+                path: "/v1/search".into(),
+            }
+        );
+        assert_eq!(
+            Selector::parse("purge /cache").unwrap(),
+            Selector::MethodPath {
+                method: "PURGE".into(),
+                path: "/cache".into(),
+            }
+        );
+    }
+
+    #[test]
     fn parse_tag() {
         assert_eq!(
             Selector::parse("tag:Chat").unwrap(),
@@ -423,6 +519,64 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn duplicate_raw_operation_id_is_actionably_ambiguous() {
+        let mut aliases = std::collections::BTreeMap::new();
+        aliases.insert(
+            "foo".to_string(),
+            vec!["foo".to_string(), "foo_post".to_string()],
+        );
+        let i = idx(vec![
+            op("foo", "GET", "/first", &[]),
+            op("foo_post", "POST", "/second", &[]),
+        ])
+        .with_aliases(aliases);
+
+        let error = resolve(&[Selector::OperationId("foo".into())], &i).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("ambiguous"));
+        assert!(message.contains("foo_post"));
+        assert!(message.contains("METHOD /path"));
+    }
+
+    #[test]
+    fn renamed_case_colliding_operation_id_reports_emitted_name() {
+        let mut aliases = std::collections::BTreeMap::new();
+        aliases.insert("Foo".to_string(), vec!["Foo_post".to_string()]);
+        let i = idx(vec![
+            op("foo", "GET", "/first", &[]),
+            op("Foo_post", "POST", "/second", &[]),
+        ])
+        .with_aliases(aliases);
+
+        let error = resolve(&[Selector::OperationId("Foo".into())], &i).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("renamed to `Foo_post`"));
+        assert!(message.contains("POST /second"));
+
+        let resolved = resolve(&[Selector::OperationId("Foo_post".into())], &i).unwrap();
+        assert_eq!(resolved.operations[0].operation_id, "Foo_post");
+    }
+
+    #[test]
+    fn emitted_id_wins_when_it_matches_another_operations_raw_id() {
+        let mut aliases = std::collections::BTreeMap::new();
+        aliases.insert(
+            "foo".to_string(),
+            vec!["foo".to_string(), "foo_post".to_string()],
+        );
+        aliases.insert("foo_post".to_string(), vec!["foo_post_get".to_string()]);
+        let i = idx(vec![
+            op("foo", "GET", "/first", &[]),
+            op("foo_post", "POST", "/second", &[]),
+            op("foo_post_get", "GET", "/third", &[]),
+        ])
+        .with_aliases(aliases);
+
+        let resolved = resolve(&[Selector::OperationId("foo_post".into())], &i).unwrap();
+        assert_eq!(resolved.operations[0].path, "/second");
     }
 
     #[test]

@@ -11,5 +11,5 @@ expression: "&generated_code"
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ConstrainedObject {}

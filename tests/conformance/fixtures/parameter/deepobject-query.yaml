@@ -1,6 +1,6 @@
 # coverage: [objects.Parameter.style.deepObject, objects.Parameter.in.query]
 # fails_at: L3
-# reason: style/explode are typed since F1, but codegen still collapses object query params to String
+# reason: client/server wire behavior has focused tests; the harness does not yet execute L3
 openapi: 3.1.0
 info: { title: DeepObject Demo, version: 1.0.0 }
 paths:

@@ -51,7 +51,7 @@ impl AsRef<str> for MessageRole {
         self.as_str()
     }
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct MessageContentInlineVariant2Item {}
 ///The content of the message.
 #[derive(Debug, Clone, Deserialize, Serialize)]

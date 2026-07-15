@@ -20,6 +20,9 @@ use openapi_to_rust::openapi::Schema;
 use serde_json::Value;
 
 const SUITE_REL: &str = "tests/conformance/external/json-schema-test-suite/tests/draft2020-12";
+/// Ratchet measured on the pinned JSON-Schema-Test-Suite revision. Improvements
+/// are welcome; regressions beyond this baseline fail CI.
+const MAX_PARSE_FAILURES: usize = 38;
 
 /// Keywords whose support we have not yet implemented. Test files focused on
 /// these are recorded as `INTENTIONALLY_SKIPPED` rather than failing the
@@ -27,7 +30,7 @@ const SUITE_REL: &str = "tests/conformance/external/json-schema-test-suite/tests
 const SKIP_LIST: &[(&str, &str)] = &[
     (
         "dynamicRef.json",
-        "$dynamicRef/$dynamicAnchor not modeled (only obsolete $recursiveRef)",
+        "dynamic-scope resolution is not implemented; typed parsing is covered by focused fixtures",
     ),
     ("vocabulary.json", "$vocabulary handling not modeled"),
     ("unknownKeyword.json", "deny_unknown_fields not yet enabled"),
@@ -122,10 +125,14 @@ fn json_schema_2020_12_parse_corpus() {
         skipped.len(),
     );
 
-    // Initial gate: we don't yet enforce a parse pass-rate threshold here —
-    // the report is informational. As the schema layer matures we'll ratchet
-    // this up: e.g. require parse_failed.len() < N, then == 0, then enforce
-    // round-trip losslessness.
+    assert!(
+        total_failed <= MAX_PARSE_FAILURES,
+        "JSON Schema parse failures regressed: {total_failed} > {MAX_PARSE_FAILURES}"
+    );
+    assert_eq!(
+        total_lossy, 0,
+        "parsed JSON Schema cases must preserve every input key"
+    );
 }
 
 fn workspace_root() -> PathBuf {

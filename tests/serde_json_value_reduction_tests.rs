@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Tests to ensure we minimize serde_json::Value usage in generated code
 //!
 //! These tests track and verify that we properly generate typed structures

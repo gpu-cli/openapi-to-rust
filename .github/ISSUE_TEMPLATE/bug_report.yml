@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible generator, CLI, or generated-code problem
+title: "[bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Remove secrets and reduce private specifications to the smallest OpenAPI fragment that still fails.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `openapi-to-rust --version`, or the commit SHA.
+      placeholder: openapi-to-rust 0.6.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - CLI or configuration
+        - Generated models
+        - Generated HTTP client
+        - Generated SSE client
+        - Generated Axum server
+        - Packaging or installation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Minimal OpenAPI fragment
+      description: Paste YAML or JSON, or link to a public stable document.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration and command
+      description: Include relevant TOML and the exact command. Redact credentials.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Actual behavior
+      description: Include the complete error and the relevant generated signature or wire output.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, `rustc --version`, and installation method.
+      placeholder: macOS 15; rustc 1.88.0; cargo install --locked
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed credentials and private API data.
+          required: true
+        - label: I searched existing issues for this behavior.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

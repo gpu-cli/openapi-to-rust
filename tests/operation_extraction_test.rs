@@ -264,6 +264,69 @@ fn test_mixed_explicit_and_generated_operation_ids() {
 }
 
 #[test]
+fn large_operation_sets_keep_collision_ids_deterministic() {
+    let mut paths = serde_json::Map::new();
+    for index in 0..2_000 {
+        paths.insert(
+            format!("/bulk/{index}"),
+            serde_json::json!({
+                "get": {
+                    "operationId": format!("bulkOperation{index:04}"),
+                    "responses": {"204": {"description": "ok"}}
+                }
+            }),
+        );
+    }
+    paths.insert(
+        "/collision/1".into(),
+        serde_json::json!({
+            "get": {
+                "operationId": "Foo.bar",
+                "responses": {"204": {"description": "ok"}}
+            }
+        }),
+    );
+    paths.insert(
+        "/collision/2".into(),
+        serde_json::json!({
+            "get": {
+                "operationId": "foo_bar",
+                "responses": {"204": {"description": "ok"}}
+            }
+        }),
+    );
+    paths.insert(
+        "/collision/3".into(),
+        serde_json::json!({
+            "get": {
+                "operationId": "foo_bar",
+                "responses": {"204": {"description": "ok"}}
+            }
+        }),
+    );
+
+    let mut spec = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": {"title": "large operation index", "version": "1.0.0"}
+    });
+    spec.as_object_mut()
+        .unwrap()
+        .insert("paths".into(), serde_json::Value::Object(paths));
+
+    let mut analyzer = SchemaAnalyzer::new(spec).unwrap();
+    let analysis = analyzer.analyze().unwrap();
+
+    assert_eq!(analysis.operations.len(), 2_003);
+    assert!(analysis.operations.contains_key("Foo.bar"));
+    assert!(analysis.operations.contains_key("foo_bar_get"));
+    assert!(analysis.operations.contains_key("foo_bar_get_2"));
+    assert_eq!(
+        analysis.operation_id_aliases.get("foo_bar").unwrap(),
+        &["foo_bar_get".to_string(), "foo_bar_get_2".to_string()]
+    );
+}
+
+#[test]
 fn test_extract_form_urlencoded_body() {
     let spec = std::fs::read_to_string("tests/fixtures/operation_extraction/form_urlencoded.json")
         .unwrap();

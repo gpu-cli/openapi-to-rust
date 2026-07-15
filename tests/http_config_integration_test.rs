@@ -2,6 +2,20 @@ use openapi_to_rust::{AuthConfig, ConfigFile};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
+fn write_config(toml_content: &str) -> NamedTempFile {
+    let spec_path = std::fs::canonicalize("tests/fixtures/simple.json")
+        .expect("fixture path should canonicalize");
+    let toml_content = toml_content.replace(
+        "tests/fixtures/simple.json",
+        &spec_path.display().to_string(),
+    );
+    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
+    temp_file
+        .write_all(toml_content.as_bytes())
+        .expect("Failed to write to temp file");
+    temp_file
+}
+
 #[test]
 fn test_http_config_toml_to_runtime() {
     let toml_content = r#"
@@ -28,10 +42,7 @@ name = "user-agent"
 value = "rust-client"
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -73,10 +84,7 @@ initial_delay_ms = 1000
 max_delay_ms = 30000
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -106,10 +114,7 @@ type = "Bearer"
 header_name = "Authorization"
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -142,10 +147,7 @@ type = "ApiKey"
 header_name = "X-API-Key"
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -178,10 +180,7 @@ type = "Custom"
 header_name = "X-Custom-Auth"
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -214,10 +213,7 @@ module_name = "test"
 enable_async_client = true
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -245,10 +241,7 @@ enable_async_client = true
 enabled = false
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -290,10 +283,7 @@ name = "content-type"
 value = "application/json"
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();
@@ -331,10 +321,7 @@ enable_async_client = true
 [http_client.retry]
 "#;
 
-    let mut temp_file = NamedTempFile::new().expect("Failed to create temp file");
-    temp_file
-        .write_all(toml_content.as_bytes())
-        .expect("Failed to write to temp file");
+    let temp_file = write_config(toml_content);
 
     let config_file = ConfigFile::load(temp_file.path()).expect("Failed to load config");
     let generator_config = config_file.into_generator_config();

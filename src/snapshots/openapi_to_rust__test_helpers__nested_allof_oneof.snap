@@ -26,7 +26,7 @@ pub enum CreateResponseInput {
     String(String),
     InputArray(Vec<InputItem>),
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ResponseProperties {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,

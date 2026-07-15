@@ -1,3 +1,5 @@
+#![cfg(feature = "test-helpers")]
+
 //! Test for improved union array naming (fixing UnionArray1 -> contextual names)
 
 use openapi_to_rust::test_helpers::*;

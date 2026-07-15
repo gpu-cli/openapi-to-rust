@@ -1,7 +1,14 @@
 use crate::{CodeGenerator, GeneratorConfig, SchemaAnalyzer, streaming::StreamingConfig};
 use clap::{Arg, Command};
 use std::fs;
+use std::io::Read;
 use std::process;
+use std::time::Duration;
+
+/// Maximum accepted size for a remotely fetched OpenAPI document (64 MiB).
+pub const MAX_REMOTE_SPEC_BYTES: u64 = 64 * 1024 * 1024;
+/// End-to-end timeout for fetching a remote OpenAPI document.
+pub const REMOTE_SPEC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Configuration for the CLI helper
 pub struct CliConfig {
@@ -15,7 +22,8 @@ pub struct CliConfig {
     pub enable_specta: bool,
 }
 
-/// Run the complete generation CLI with the provided configuration
+/// Run the legacy embedded generation CLI with the provided configuration.
+#[deprecated(note = "use the openapi-to-rust binary's generate command")]
 pub async fn run_generation_cli(cli_config: CliConfig) {
     let matches = Command::new("api-gen")
         .version("0.1.0")
@@ -85,7 +93,7 @@ pub async fn run_generation_cli(cli_config: CliConfig) {
     }
 
     // Load OpenAPI spec
-    let spec_content = match load_spec(input, verbose).await {
+    let spec_content = match load_spec(input) {
         Ok(content) => content,
         Err(e) => {
             eprintln!("❌ Error loading spec: {e}");
@@ -247,28 +255,134 @@ pub async fn run_generation_cli(cli_config: CliConfig) {
     }
 }
 
-async fn load_spec(input: &str, verbose: bool) -> Result<String, Box<dyn std::error::Error>> {
-    if input.starts_with("http://") || input.starts_with("https://") {
-        // Load from URL
-        if verbose {
-            println!("🌐 Fetching from URL...");
-        }
+/// Whether an input string names a supported remote OpenAPI source.
+pub fn is_remote_spec(input: &str) -> bool {
+    reqwest::Url::parse(input).is_ok_and(|url| matches!(url.scheme(), "https" | "http"))
+}
 
-        let response = reqwest::get(input).await?;
-        if !response.status().is_success() {
-            return Err(format!("HTTP error: {}", response.status()).into());
-        }
+/// Parse and enforce the remote-source transport policy.
+pub fn validate_remote_spec_url(input: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(input)
+        .map_err(|error| format!("invalid remote OpenAPI URL: {error}"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("remote OpenAPI URLs must not contain embedded credentials".to_string());
+    }
+    match url.scheme() {
+        "https" => Ok(url),
+        "http" if is_loopback_host(url.host_str()) => Ok(url),
+        "http" => Err(
+            "remote OpenAPI URLs must use HTTPS (plain HTTP is allowed only for localhost/loopback)"
+                .to_string(),
+        ),
+        scheme => Err(format!(
+            "unsupported OpenAPI URL scheme `{scheme}`; use HTTPS or a local file path"
+        )),
+    }
+}
 
-        let content = response.text().await?;
-        Ok(content)
-    } else {
-        // Load from file
-        if verbose {
-            println!("📁 Reading from file...");
-        }
+/// Remove URL credentials, query strings, and fragments before recording a
+/// source label in generated code. Local paths are retained as supplied.
+pub fn sanitize_source_provenance(input: &str) -> String {
+    let sanitize_controls = |value: &str| {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    '�'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>()
+    };
+    let Ok(mut url) = reqwest::Url::parse(input) else {
+        return sanitize_controls(input);
+    };
+    if !matches!(url.scheme(), "https" | "http") {
+        return sanitize_controls(input);
+    }
+    let query_was_redacted = url.query().is_some();
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut label = url.to_string();
+    if query_was_redacted {
+        label.push_str(" (query redacted)");
+    }
+    sanitize_controls(&label)
+}
 
-        let content = fs::read_to_string(input)?;
-        Ok(content)
+/// Load a local or remote OpenAPI document with bounded remote I/O.
+///
+/// HTTPS is accepted everywhere. Plain HTTP is accepted only for loopback
+/// hosts so local development and deterministic integration tests do not need
+/// a certificate while non-local traffic remains encrypted.
+pub fn load_spec(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if !is_remote_spec(input) {
+        if input.contains("://") {
+            return match validate_remote_spec_url(input) {
+                Ok(_) => Err("unsupported remote OpenAPI URL".into()),
+                Err(error) => Err(error.into()),
+            };
+        }
+        return Ok(fs::read_to_string(input)?);
+    }
+
+    let url = validate_remote_spec_url(input)?;
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(REMOTE_SPEC_TIMEOUT)
+        // Redirects are intentionally disabled: an allowed HTTPS URL could
+        // otherwise redirect to disallowed plaintext transport.
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("openapi-to-rust/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    let response = client.get(url).send().map_err(|error| {
+        format!(
+            "failed to fetch remote OpenAPI document: {}",
+            error.without_url()
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "failed to fetch OpenAPI document: HTTP {}",
+            response.status()
+        )
+        .into());
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_REMOTE_SPEC_BYTES)
+    {
+        return Err(format!(
+            "remote OpenAPI document exceeds the {} MiB response-size limit",
+            MAX_REMOTE_SPEC_BYTES / 1024 / 1024
+        )
+        .into());
+    }
+
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_REMOTE_SPEC_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_REMOTE_SPEC_BYTES {
+        return Err(format!(
+            "remote OpenAPI document exceeds the {} MiB response-size limit",
+            MAX_REMOTE_SPEC_BYTES / 1024 / 1024
+        )
+        .into());
+    }
+    Ok(String::from_utf8(bytes)?)
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    match host {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback()),
+        None => false,
     }
 }
 
@@ -286,7 +400,10 @@ pub fn parse_oas_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-fn parse_spec(content: &str, input: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+pub fn parse_spec(
+    content: &str,
+    input: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     // Determine format from extension or content
     let is_yaml = input.ends_with(".yaml")
         || input.ends_with(".yml")

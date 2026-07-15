@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions and design discussion
+    url: https://github.com/gpu-cli/openapi-to-rust/discussions
+    about: Ask for help or explore an idea before filing a concrete issue.
+  - name: Private security report
+    url: https://github.com/gpu-cli/openapi-to-rust/security/advisories/new
+    about: Report suspected vulnerabilities privately; never include them in a public issue.
