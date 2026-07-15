@@ -21,14 +21,14 @@ pub struct NestedResponseResultsItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<NestedResponseMetadata>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct NestedResponseMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<NestedResponseAttributes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct NestedResponseAttributes {
     /// Additional properties matching the spec's
     /// `additionalProperties` value schema.

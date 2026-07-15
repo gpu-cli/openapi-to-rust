@@ -42,7 +42,7 @@ pub struct RequestTextBlock {
     pub cache_control: Option<RequestTextBlockCacheControl>,
     pub text: String,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct RequestTextBlockCacheControl {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,

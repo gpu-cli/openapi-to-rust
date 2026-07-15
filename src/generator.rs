@@ -95,6 +95,17 @@ struct DiscriminatedVariantInfo {
     is_parent_untagged: bool,
 }
 
+/// One object property after discriminator filtering and Rust-identifier
+/// disambiguation. Struct fields, request-model constructors, and builders
+/// all consume this shared projection so their names and types cannot drift.
+struct EmittedObjectProperty<'a> {
+    wire_name: &'a str,
+    property: &'a crate::analysis::PropertyInfo,
+    ident: syn::Ident,
+    is_required: bool,
+    field_type: TokenStream,
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratorConfig {
     /// Path to OpenAPI specification file
@@ -1526,49 +1537,72 @@ impl CodeGenerator {
         // same key (impossible in JSON but tolerated in YAML merging).
         let mut used_field_idents: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // Keep the serde-flatten catch-all stable while allowing a declared
+        // property with the same sanitized Rust name. The declared property
+        // receives the normal `_2` suffix and a serde rename back to its wire
+        // name below.
+        if !matches!(
+            additional_properties,
+            crate::analysis::ObjectAdditionalProperties::Forbidden
+        ) {
+            used_field_idents.insert("additional_properties".to_string());
+        }
 
-        let mut fields: Vec<TokenStream> = sorted_properties
-            .into_iter()
-            .filter(|(field_name, _)| {
-                // Skip the discriminator field ONLY if:
-                // 1. This struct is a variant in a discriminated union, AND
-                // 2. The parent union is tagged (not untagged)
-                if let Some(info) = discriminator_info {
-                    if !info.is_parent_untagged
-                        && field_name.as_str() == info.discriminator_field.as_str()
-                    {
-                        false // Skip the field
-                    } else {
-                        true // Keep the field
-                    }
-                } else {
-                    true // No discriminator info, keep all fields
-                }
-            })
-            .map(|(field_name, prop)| {
-                let raw = self.to_rust_field_name(field_name);
-                let mut chosen = raw.clone();
-                let mut suffix = 2;
-                while !used_field_idents.insert(chosen.clone()) {
-                    chosen = format!("{raw}_{suffix}");
-                    suffix += 1;
-                }
-                let field_ident = Self::to_field_ident(&chosen);
-                let is_required = required.contains(field_name);
-                let field_type =
-                    self.generate_field_type(&schema.name, field_name, prop, is_required, analysis);
+        let mut emitted_properties = Vec::new();
+        for (field_name, property) in sorted_properties {
+            // Skip the discriminator field ONLY if:
+            // 1. This struct is a variant in a discriminated union, AND
+            // 2. The parent union is tagged (not untagged)
+            if discriminator_info.is_some_and(|info| {
+                !info.is_parent_untagged && field_name.as_str() == info.discriminator_field.as_str()
+            }) {
+                continue;
+            }
 
-                let serde_attrs =
-                    self.generate_serde_field_attrs(field_name, prop, is_required, analysis);
+            let raw = self.to_rust_field_name(field_name);
+            let mut chosen = raw.clone();
+            let mut suffix = 2;
+            while !used_field_idents.insert(chosen.clone()) {
+                chosen = format!("{raw}_{suffix}");
+                suffix += 1;
+            }
+            let ident = Self::to_field_ident(&chosen);
+            let is_required = required.contains(field_name);
+            let field_type =
+                self.generate_field_type(&schema.name, field_name, property, is_required, analysis);
+            emitted_properties.push(EmittedObjectProperty {
+                wire_name: field_name,
+                property,
+                ident,
+                is_required,
+                field_type,
+            });
+        }
+
+        let mut fields: Vec<TokenStream> = emitted_properties
+            .iter()
+            .map(|emitted| {
+                let field_name = emitted.wire_name;
+                let property = emitted.property;
+                let field_ident = &emitted.ident;
+                let field_type = &emitted.field_type;
+                let serde_attrs = self.generate_serde_field_attrs(
+                    &schema.name,
+                    field_name,
+                    field_ident,
+                    property,
+                    emitted.is_required,
+                    analysis,
+                );
                 let specta_attrs = self.generate_specta_field_attrs(field_name);
 
-                let doc_comment = if let Some(desc) = &prop.description {
+                let doc_comment = if let Some(desc) = &property.description {
                     let sanitized_desc = self.sanitize_doc_comment(desc);
                     quote! { #[doc = #sanitized_desc] }
                 } else {
                     TokenStream::new()
                 };
-                let constraint_doc = self.generate_constraint_doc(&prop.constraints);
+                let constraint_doc = self.generate_constraint_doc(&property.constraints);
 
                 quote! {
                     #doc_comment
@@ -1613,18 +1647,54 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        // Default is safe only when no emitted wire property is required.
+        // Optional fields are represented as Option<T>, and the generated
+        // additional-properties map (when present) is empty by default. We do
+        // not invent values for required data, even when the Rust type itself
+        // happens to implement Default.
+        let can_derive_default = emitted_properties
+            .iter()
+            .all(|property| !property.is_required);
+
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
         // between Rust, JSON API, and TypeScript
-        let derives = if self.config.enable_specta {
-            quote! {
+        let derives = match (self.config.enable_specta, can_derive_default) {
+            (true, true) => quote! {
+                #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+                #[cfg_attr(feature = "specta", derive(specta::Type))]
+            },
+            (true, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
-            }
-        } else {
-            quote! {
+            },
+            (false, true) => quote! {
+                #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+            },
+            (false, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
-            }
+            },
+        };
+
+        let builder = if self.is_request_body_root(&schema.name, analysis)
+            && emitted_properties
+                .iter()
+                .any(|property| property.is_required)
+            && (emitted_properties
+                .iter()
+                .any(|property| !property.is_required)
+                || !matches!(
+                    additional_properties,
+                    crate::analysis::ObjectAdditionalProperties::Forbidden
+                )) {
+            self.generate_request_model_builder(
+                schema,
+                &emitted_properties,
+                additional_properties,
+                analysis,
+            )
+        } else {
+            TokenStream::new()
         };
 
         Ok(quote! {
@@ -1633,7 +1703,223 @@ impl CodeGenerator {
             pub struct #struct_name {
                 #(#fields)*
             }
+
+            #builder
         })
+    }
+
+    fn is_request_body_root(
+        &self,
+        schema_name: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> bool {
+        analysis.operations.values().any(|operation| {
+            let Some(request_schema) = operation
+                .request_body
+                .as_ref()
+                .and_then(crate::analysis::RequestBodyContent::schema_name)
+            else {
+                return false;
+            };
+
+            let mut current = request_schema;
+            let mut visited = std::collections::HashSet::new();
+            loop {
+                if current == schema_name {
+                    return true;
+                }
+                if !visited.insert(current) {
+                    return false;
+                }
+                let Some(crate::analysis::AnalyzedSchema {
+                    schema_type: crate::analysis::SchemaType::Reference { target },
+                    ..
+                }) = analysis.schemas.get(current)
+                else {
+                    return false;
+                };
+                current = target;
+            }
+        })
+    }
+
+    fn generate_request_model_builder(
+        &self,
+        schema: &crate::analysis::AnalyzedSchema,
+        properties: &[EmittedObjectProperty<'_>],
+        additional_properties: &crate::analysis::ObjectAdditionalProperties,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> TokenStream {
+        let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
+        let builder_base = format!("{}Builder", struct_name);
+        let reserved_type_names: std::collections::HashSet<String> = analysis
+            .schemas
+            .keys()
+            .map(|name| self.to_rust_type_name(name))
+            .collect();
+        let mut builder_name = builder_base.clone();
+        let mut suffix = 2;
+        while reserved_type_names.contains(&builder_name) {
+            builder_name = format!("{builder_base}{suffix}");
+            suffix += 1;
+        }
+        let builder_name = format_ident!("{builder_name}");
+
+        let required_parameters: Vec<TokenStream> = properties
+            .iter()
+            .filter(|property| property.is_required)
+            .map(|property| {
+                let ident = &property.ident;
+                let field_type = &property.field_type;
+                quote! { #ident: #field_type }
+            })
+            .collect();
+        let required_idents: Vec<&syn::Ident> = properties
+            .iter()
+            .filter(|property| property.is_required)
+            .map(|property| &property.ident)
+            .collect();
+        let optional_initializers: Vec<TokenStream> = properties
+            .iter()
+            .filter(|property| !property.is_required)
+            .map(|property| {
+                let ident = &property.ident;
+                quote! { #ident: None }
+            })
+            .collect();
+
+        let additional_initializer = match additional_properties {
+            crate::analysis::ObjectAdditionalProperties::Forbidden => TokenStream::new(),
+            crate::analysis::ObjectAdditionalProperties::Untyped
+            | crate::analysis::ObjectAdditionalProperties::Typed { .. } => quote! {
+                additional_properties: ::std::collections::BTreeMap::new(),
+            },
+        };
+
+        let mut used_builder_methods =
+            std::collections::HashSet::from(["new".to_string(), "build".to_string()]);
+        if !matches!(
+            additional_properties,
+            crate::analysis::ObjectAdditionalProperties::Forbidden
+        ) {
+            used_builder_methods.insert("additional_properties".to_string());
+        }
+        let optional_setters: Vec<TokenStream> = properties
+            .iter()
+            .filter(|property| !property.is_required)
+            .map(|property| {
+                let field_ident = &property.ident;
+                let field_type = self.generate_property_base_type(
+                    &schema.name,
+                    property.wire_name,
+                    property.property,
+                    analysis,
+                );
+                // Allocate every setter in the builder's method namespace.
+                // `new` and `build` keep their documented `with_` escape;
+                // further collisions receive deterministic numeric suffixes.
+                let field_name = field_ident.to_string();
+                let plain_field_name = field_name.strip_prefix("r#").unwrap_or(&field_name);
+                let mut setter_name = if matches!(plain_field_name, "new" | "build") {
+                    format!("with_{plain_field_name}")
+                } else {
+                    field_name.clone()
+                };
+                let setter_base = setter_name.clone();
+                let mut suffix = 2;
+                while !used_builder_methods.insert(setter_name.clone()) {
+                    setter_name = format!("{setter_base}_{suffix}");
+                    suffix += 1;
+                }
+                let setter_ident = Self::to_field_ident(&setter_name);
+                let wire_name = property.wire_name;
+                quote! {
+                    #[doc = concat!("Set the optional `", #wire_name, "` request field.")]
+                    #[must_use]
+                    pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
+                        self.value.#field_ident = Some(#field_ident);
+                        self
+                    }
+                }
+            })
+            .collect();
+
+        let additional_setter = match additional_properties {
+            crate::analysis::ObjectAdditionalProperties::Forbidden => TokenStream::new(),
+            crate::analysis::ObjectAdditionalProperties::Untyped => quote! {
+                /// Replace the request's additional properties.
+                #[must_use]
+                pub fn additional_properties(
+                    mut self,
+                    additional_properties: ::std::collections::BTreeMap<
+                        String,
+                        serde_json::Value,
+                    >,
+                ) -> Self {
+                    self.value.additional_properties = additional_properties;
+                    self
+                }
+            },
+            crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
+                let value_type = self.generate_array_item_type(value_type, analysis);
+                quote! {
+                    /// Replace the request's additional properties.
+                    #[must_use]
+                    pub fn additional_properties(
+                        mut self,
+                        additional_properties: ::std::collections::BTreeMap<
+                            String,
+                            #value_type,
+                        >,
+                    ) -> Self {
+                        self.value.additional_properties = additional_properties;
+                        self
+                    }
+                }
+            }
+        };
+
+        quote! {
+            impl #struct_name {
+                /// Construct this request with every required wire field.
+                pub fn new(#(#required_parameters),*) -> Self {
+                    Self {
+                        #(#required_idents,)*
+                        #(#optional_initializers,)*
+                        #additional_initializer
+                    }
+                }
+
+                /// Start a dependency-free builder with every required wire field.
+                pub fn builder(#(#required_parameters),*) -> #builder_name {
+                    #builder_name::new(#(#required_idents),*)
+                }
+            }
+
+            /// Dependency-free builder for [`#struct_name`].
+            #[derive(Debug, Clone)]
+            #[must_use]
+            pub struct #builder_name {
+                value: #struct_name,
+            }
+
+            impl #builder_name {
+                /// Start a builder with every required wire field.
+                pub fn new(#(#required_parameters),*) -> Self {
+                    Self {
+                        value: #struct_name::new(#(#required_idents),*),
+                    }
+                }
+
+                #(#optional_setters)*
+                #additional_setter
+
+                /// Finish building the request model.
+                pub fn build(self) -> #struct_name {
+                    self.value
+                }
+            }
+        }
     }
 
     fn generate_discriminated_enum(
@@ -1989,9 +2275,47 @@ impl CodeGenerator {
         is_required: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> TokenStream {
+        let base_type = self.generate_property_base_type(schema_name, field_name, prop, analysis);
+
+        if self.property_is_option_wrapped(schema_name, field_name, prop, is_required, analysis) {
+            quote! { Option<#base_type> }
+        } else {
+            base_type
+        }
+    }
+
+    fn property_is_option_wrapped(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        prop: &crate::analysis::PropertyInfo,
+        is_required: bool,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> bool {
+        let override_key = format!("{schema_name}.{field_name}");
+        let is_nullable_override = self
+            .config
+            .nullable_field_overrides
+            .get(&override_key)
+            .copied()
+            .unwrap_or(false);
+
+        !is_required
+            || prop.nullable
+            || is_nullable_override
+            || (prop.default.is_some() && self.type_lacks_default(&prop.schema_type, analysis))
+    }
+
+    fn generate_property_base_type(
+        &self,
+        schema_name: &str,
+        _field_name: &str,
+        prop: &crate::analysis::PropertyInfo,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> TokenStream {
         use crate::analysis::SchemaType;
 
-        let base_type = match &prop.schema_type {
+        match &prop.schema_type {
             SchemaType::Primitive { rust_type, .. } => {
                 // syn handles generics + complex paths
                 // (chrono::DateTime<chrono::Utc>, Vec<u8>, …).
@@ -2043,33 +2367,14 @@ impl CodeGenerator {
                 // Fallback for complex types
                 quote! { serde_json::Value }
             }
-        };
-
-        // Check if this field has a nullable override
-        let override_key = format!("{schema_name}.{field_name}");
-        let is_nullable_override = self
-            .config
-            .nullable_field_overrides
-            .get(&override_key)
-            .copied()
-            .unwrap_or(false);
-
-        if is_required && !prop.nullable && !is_nullable_override {
-            // If the field has a default value but its type doesn't implement Default,
-            // wrap in Option<T> so serde can default to None instead of requiring Default.
-            if prop.default.is_some() && self.type_lacks_default(&prop.schema_type, analysis) {
-                quote! { Option<#base_type> }
-            } else {
-                base_type
-            }
-        } else {
-            quote! { Option<#base_type> }
         }
     }
 
     fn generate_serde_field_attrs(
         &self,
+        schema_name: &str,
         field_name: &str,
+        field_ident: &syn::Ident,
         prop: &crate::analysis::PropertyInfo,
         is_required: bool,
         analysis: &crate::analysis::SchemaAnalysis,
@@ -2078,7 +2383,7 @@ impl CodeGenerator {
 
         // Generate rename attribute if field name differs from Rust identifier
         // Strip r# prefix for comparison since serde handles raw idents transparently
-        let rust_field_name = self.to_rust_field_name(field_name);
+        let rust_field_name = field_ident.to_string();
         let comparison_name = rust_field_name
             .strip_prefix("r#")
             .unwrap_or(&rust_field_name);
@@ -2113,10 +2418,13 @@ impl CodeGenerator {
             ..
         } = &prop.schema_type
         {
-            // Mirrors the wrapping logic in generate_field_type:
-            // the field is Option<T> when the schema marks it
-            // optional or nullable.
-            let is_option_wrapped = !is_required || prop.nullable;
+            let is_option_wrapped = self.property_is_option_wrapped(
+                schema_name,
+                field_name,
+                prop,
+                is_required,
+                analysis,
+            );
             let codec_path = if is_option_wrapped {
                 format!("{codec}::option")
             } else {

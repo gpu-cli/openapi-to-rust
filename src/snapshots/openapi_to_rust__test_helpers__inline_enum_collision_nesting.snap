@@ -11,7 +11,7 @@ expression: "&generated_code"
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PlanData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attributes: Option<PlanDataAttributes>,
@@ -43,17 +43,17 @@ impl AsRef<str> for PlanDataTypePlans {
         self.as_str()
     }
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PlanDataAttributes {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specs: Option<PlanDataSpecs>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PlanDataSpecs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drives: Option<Vec<PlanDataDrivesItem>>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PlanDataDrivesItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<PlanDataType>,
