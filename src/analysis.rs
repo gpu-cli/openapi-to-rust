@@ -398,17 +398,17 @@ pub struct ParameterInfo {
     /// Wire serialization for object/array query parameters, decided from
     /// the parameter's `style`/`explode` and schema shape (T14, GH #27).
     /// `None` = plain single `name=value` pair (scalars, string enums, and
-    /// the opaque-string fallback for styles that aren't generated yet).
+    /// the ordinary scalar `name=value` representation. Unsupported complex
+    /// shapes carry an explicit [`QuerySerialization::Unsupported`] reason so
+    /// downstream client/server generators cannot silently drift.
     /// For the object modes, `schema_ref` holds the struct type
     /// generated/resolved for the object schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_serialization: Option<QuerySerialization>,
 }
 
-/// How the client serializes an object- or array-schema query parameter
-/// onto the request URL. Consumed by `ClientGenerator::generate_query_params`
-/// and `get_param_rust_type`; server codegen and the registry deliberately
-/// keep the `String` fallback for now (openapi-generator-0jz).
+/// How generated clients serialize and generated servers extract an object-
+/// or array-schema query parameter.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum QuerySerialization {
     /// style=form + explode=true object (the OAS 3.x defaults for query):
@@ -427,6 +427,11 @@ pub enum QuerySerialization {
     /// style=form + explode=false array: one comma-joined pair —
     /// `?tags=a,b,c`. Parameter typed `Vec<item_type>`.
     FormArray { item_type: ArrayItemType },
+    /// A complex query shape whose wire representation is undefined by
+    /// OpenAPI or not implemented symmetrically. Clients retain the explicit
+    /// opaque-string escape hatch; server generation rejects it with this
+    /// actionable reason instead of emitting an impossible extractor.
+    Unsupported { reason: String },
 }
 
 /// Item type of a typed array query parameter. The two variants need
@@ -4585,6 +4590,14 @@ impl SchemaAnalyzer {
     /// other struct refs stay `String` until deepObject / explode=false
     /// serialization is generated (T14).
     fn referenced_schema_is_string_enum(&self, name: &str) -> bool {
+        if self.resolve_cached_schema(name).is_some_and(|schema| {
+            matches!(
+                schema.schema_type,
+                SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. }
+            )
+        }) {
+            return true;
+        }
         let Some(schema_value) = self
             .openapi_spec
             .get("components")
@@ -4657,6 +4670,21 @@ impl SchemaAnalyzer {
                     {
                         schema_ref = Some(name.to_string());
                         query_serialization = object_serialization.clone();
+                    } else if is_query
+                        && form_style
+                        && let Some(item_type) = self.referenced_array_param_item_type(name)
+                    {
+                        // A parameter may reference a reusable array schema
+                        // rather than declaring `type: array` inline. Preserve
+                        // that component as a pruning root while projecting the
+                        // public parameter type to the same Vec<T> used by
+                        // inline arrays.
+                        schema_ref = Some(name.to_string());
+                        query_serialization = Some(if form_exploded {
+                            QuerySerialization::FormExplodedArray { item_type }
+                        } else {
+                            QuerySerialization::FormArray { item_type }
+                        });
                     }
                 }
             } else if object_serialization.is_some() && Self::schema_is_inline_object(schema) {
@@ -4682,9 +4710,10 @@ impl SchemaAnalyzer {
                 // Typed form-style array (openapi-generator-anu): the client
                 // takes `Vec<item_type>` and emits repeated (explode=true) or
                 // comma-joined (explode=false) pairs. `rust_type` deliberately
-                // stays "String": server codegen and the registry key off it
-                // (openapi-generator-0jz). Arrays whose items don't type
-                // (objects, nested arrays) fall through to the fallback.
+                // stays "String" because the shared query-serialization plan
+                // is the authoritative Vec<T> projection. Arrays whose items
+                // don't type (objects, nested arrays) fall through to the
+                // explicit unsupported shape below.
                 query_serialization = Some(if form_exploded {
                     QuerySerialization::FormExplodedArray { item_type }
                 } else {
@@ -4721,6 +4750,55 @@ impl SchemaAnalyzer {
                             }
                         }
                     }
+                }
+            }
+
+            if is_query && query_serialization.is_none() {
+                let referenced_name = schema
+                    .reference()
+                    .and_then(|reference| self.extract_schema_name(reference));
+                let is_object = referenced_name
+                    .is_some_and(|name| self.referenced_schema_is_object(name))
+                    || Self::schema_is_inline_object(schema);
+                let is_array = referenced_name
+                    .is_some_and(|name| self.referenced_schema_is_array(name))
+                    || matches!(
+                        schema.schema_type(),
+                        Some(crate::openapi::SchemaType::Array)
+                    );
+                let is_composed = referenced_name
+                    .is_some_and(|name| self.referenced_schema_is_composed_query_shape(name));
+                let reason = if param.style.as_deref() == Some("deepObject")
+                    && param.explode == Some(false)
+                {
+                    Some("style=deepObject with explode=false is undefined by OpenAPI".to_string())
+                } else if param.style.as_deref() == Some("deepObject") && !is_object {
+                    Some("style=deepObject is defined only for object query parameters".to_string())
+                } else if is_object {
+                    Some(format!(
+                        "object query parameters do not support style={}",
+                        param.style.as_deref().unwrap_or("form")
+                    ))
+                } else if is_array && form_style {
+                    Some(
+                        "form array query parameters require scalar or string-enum items"
+                            .to_string(),
+                    )
+                } else if is_array {
+                    Some(format!(
+                        "array query parameters do not yet support style={}",
+                        param.style.as_deref().unwrap_or("form")
+                    ))
+                } else if is_composed {
+                    Some(
+                        "composed or union query schemas cannot be projected to an unambiguous flat wire shape"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    query_serialization = Some(QuerySerialization::Unsupported { reason });
                 }
             }
         }
@@ -4769,21 +4847,70 @@ impl SchemaAnalyzer {
         Some(ArrayItemType::Scalar(scalar))
     }
 
-    /// True when `#/components/schemas/{name}` is an object schema — declared
-    /// `type: object` or, absent a `type`, carrying `properties`. Used to
-    /// decide whether a $ref query parameter can be form-exploded (issue #27).
-    fn referenced_schema_is_object(&self, name: &str) -> bool {
-        let Some(schema_value) = self
-            .openapi_spec
-            .get("components")
-            .and_then(|c| c.get("schemas"))
-            .and_then(|s| s.get(name))
-        else {
-            return false;
+    /// Resolve a reusable component array (including `$ref` aliases) and
+    /// apply the same item projection as an inline array parameter.
+    fn referenced_array_param_item_type(&self, name: &str) -> Option<ArrayItemType> {
+        let schema = self.resolve_cached_schema(name)?;
+        let SchemaType::Array { item_type } = &schema.schema_type else {
+            return None;
         };
-        match schema_value.get("type").and_then(|v| v.as_str()) {
-            Some(t) => t == "object",
-            None => schema_value.get("properties").is_some(),
+        self.analyzed_array_item_type(item_type)
+    }
+
+    fn analyzed_array_item_type(&self, item_type: &SchemaType) -> Option<ArrayItemType> {
+        match item_type {
+            SchemaType::Primitive { rust_type, .. } => {
+                Some(ArrayItemType::Scalar(rust_type.clone()))
+            }
+            SchemaType::Reference { target } => {
+                let resolved = self.resolve_cached_schema(target)?;
+                matches!(
+                    resolved.schema_type,
+                    SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. }
+                )
+                .then(|| ArrayItemType::EnumRef(target.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// True when a component (following `$ref` aliases) analyzes to an object.
+    /// Used to decide whether a referenced query parameter can use a typed
+    /// object serialization plan (issue #27).
+    fn referenced_schema_is_object(&self, name: &str) -> bool {
+        self.resolve_cached_schema(name)
+            .is_some_and(|schema| matches!(schema.schema_type, SchemaType::Object { .. }))
+    }
+
+    fn referenced_schema_is_array(&self, name: &str) -> bool {
+        self.resolve_cached_schema(name)
+            .is_some_and(|schema| matches!(schema.schema_type, SchemaType::Array { .. }))
+    }
+
+    fn referenced_schema_is_composed_query_shape(&self, name: &str) -> bool {
+        self.resolve_cached_schema(name).is_some_and(|schema| {
+            matches!(
+                schema.schema_type,
+                SchemaType::Composition { .. }
+                    | SchemaType::Union { .. }
+                    | SchemaType::DiscriminatedUnion { .. }
+            )
+        })
+    }
+
+    fn resolve_cached_schema(&self, name: &str) -> Option<&AnalyzedSchema> {
+        let mut current = name;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return None;
+            }
+            let schema = self.resolved_cache.get(current)?;
+            if let SchemaType::Reference { target } = &schema.schema_type {
+                current = target;
+            } else {
+                return Some(schema);
+            }
         }
     }
 

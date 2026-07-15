@@ -839,11 +839,7 @@ impl CodeGenerator {
     }
 
     fn builder_param_storage_type(&self, parameter: &ParameterInfo) -> TokenStream {
-        if Self::param_has_impl_as_ref_type(parameter) {
-            quote! { String }
-        } else {
-            self.get_param_rust_type(parameter)
-        }
+        self.get_param_owned_rust_type(parameter)
     }
 
     fn param_has_impl_as_ref_type(parameter: &ParameterInfo) -> bool {
@@ -1428,14 +1424,32 @@ impl CodeGenerator {
                     // serde_urlencoded, so each property becomes its own
                     // `key=value` pair; the parameter's own name never
                     // appears in the query string (RFC 6570 form-explosion).
+                    // `name[]=` is the shared zero-cardinality marker used to
+                    // preserve Some(empty) and required-empty values.
+                    let apply = quote! {
+                        let __empty = match serde_json::to_value(&v)
+                            .map_err(HttpError::serialization_error)?
+                        {
+                            serde_json::Value::Object(map) => map.is_empty(),
+                            _ => false,
+                        };
+                        if __empty {
+                            req = req.query(&[(format!("{}[]", #param_key), String::new())]);
+                        } else {
+                            req = req.query(&v);
+                        }
+                    };
                     if param.required {
                         req_appends.push(quote! {
-                            req = req.query(&#param_name);
+                            {
+                                let v = #param_name;
+                                #apply
+                            }
                         });
                     } else {
                         req_appends.push(quote! {
                             if let Some(v) = #param_name {
-                                req = req.query(&v);
+                                #apply
                             }
                         });
                     }
@@ -1446,20 +1460,27 @@ impl CodeGenerator {
                     // stringify through their JSON form; Null (unset
                     // Option) properties are skipped.
                     let apply = quote! {
-                        if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&v) {
-                            let mut deep_params: Vec<(String, String)> = Vec::new();
-                            for (k, val) in map {
-                                let s = match val {
-                                    serde_json::Value::Null => continue,
-                                    serde_json::Value::String(s) => s,
-                                    other => other.to_string(),
-                                };
-                                deep_params.push((format!("{}[{}]", #param_key, k), s));
-                            }
-                            if !deep_params.is_empty() {
-                                req = req.query(&deep_params);
-                            }
+                        let map = match serde_json::to_value(&v)
+                            .map_err(HttpError::serialization_error)?
+                        {
+                            serde_json::Value::Object(map) => map,
+                            _ => return Err(HttpError::serialization_error(
+                                format!("query parameter `{}` did not serialize as an object", #param_key)
+                            ).into()),
+                        };
+                        let mut deep_params: Vec<(String, String)> = Vec::new();
+                        for (k, val) in map {
+                            let s = match val {
+                                serde_json::Value::Null => continue,
+                                serde_json::Value::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            deep_params.push((format!("{}[{}]", #param_key, k), s));
                         }
+                        if deep_params.is_empty() {
+                            deep_params.push((format!("{}[]", #param_key), String::new()));
+                        }
+                        req = req.query(&deep_params);
                     };
                     if param.required {
                         req_appends.push(quote! {
@@ -1482,20 +1503,40 @@ impl CodeGenerator {
                     // the comma-joined key,value list (RFC 6570 form,
                     // explode=false).
                     let apply = quote! {
-                        if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&v) {
-                            let mut parts: Vec<String> = Vec::new();
-                            for (k, val) in map {
-                                let s = match val {
-                                    serde_json::Value::Null => continue,
-                                    serde_json::Value::String(s) => s,
-                                    other => other.to_string(),
-                                };
-                                parts.push(k);
-                                parts.push(s);
+                        let map = match serde_json::to_value(&v)
+                            .map_err(HttpError::serialization_error)?
+                        {
+                            serde_json::Value::Object(map) => map,
+                            _ => return Err(HttpError::serialization_error(
+                                format!("query parameter `{}` did not serialize as an object", #param_key)
+                            ).into()),
+                        };
+                        let mut parts: Vec<String> = Vec::new();
+                        for (k, val) in map {
+                            let s = match val {
+                                serde_json::Value::Null => continue,
+                                serde_json::Value::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            if k.contains(',') || s.contains(',') {
+                                return Err(HttpError::serialization_error(
+                                    format!(
+                                        "query object `{}` contains a comma in key `{}`; use explode=true for lossless string values",
+                                        #param_key,
+                                        k,
+                                    )
+                                ).into());
                             }
-                            if !parts.is_empty() {
-                                query_params.push((#param_key, parts.join(",")));
-                            }
+                            parts.push(k);
+                            parts.push(s);
+                        }
+                        if parts.is_empty() {
+                            query_params.push((
+                                format!("{}[]", #param_key),
+                                String::new(),
+                            ));
+                        } else {
+                            query_params.push((#param_key.to_string(), parts.join(",")));
                         }
                     };
                     if param.required {
@@ -1518,15 +1559,29 @@ impl CodeGenerator {
                     // `?tags=a&tags=b` — one pair per element.
                     if param.required {
                         param_building.push(quote! {
-                            for item in #param_name {
-                                query_params.push((#param_key, item.to_string()));
+                            if #param_name.is_empty() {
+                                query_params.push((
+                                    format!("{}[]", #param_key),
+                                    String::new(),
+                                ));
+                            } else {
+                                for item in #param_name {
+                                    query_params.push((#param_key.to_string(), item.to_string()));
+                                }
                             }
                         });
                     } else {
                         param_building.push(quote! {
                             if let Some(v) = #param_name {
-                                for item in v {
-                                    query_params.push((#param_key, item.to_string()));
+                                if v.is_empty() {
+                                    query_params.push((
+                                        format!("{}[]", #param_key),
+                                        String::new(),
+                                    ));
+                                } else {
+                                    for item in v {
+                                        query_params.push((#param_key.to_string(), item.to_string()));
+                                    }
                                 }
                             }
                         });
@@ -1535,15 +1590,30 @@ impl CodeGenerator {
                 }
                 Some(QuerySerialization::FormArray { .. }) => {
                     // `?tags=a,b,c` — one comma-joined pair. Empty vectors
-                    // are omitted entirely.
+                    // use the shared `tags[]=` zero-cardinality marker.
                     let apply = quote! {
-                        if !v.is_empty() {
+                        if v.is_empty() {
                             query_params.push((
-                                #param_key,
-                                v.iter()
-                                    .map(|item| item.to_string())
-                                    .collect::<Vec<String>>()
-                                    .join(","),
+                                format!("{}[]", #param_key),
+                                String::new(),
+                            ));
+                        } else {
+                            let mut parts = Vec::with_capacity(v.len());
+                            for item in &v {
+                                let item = item.to_string();
+                                if item.contains(',') {
+                                    return Err(HttpError::serialization_error(
+                                        format!(
+                                            "query array `{}` contains a comma; use explode=true for lossless string values",
+                                            #param_key,
+                                        )
+                                    ).into());
+                                }
+                                parts.push(item);
+                            }
+                            query_params.push((
+                                #param_key.to_string(),
+                                parts.join(","),
                             ));
                         }
                     };
@@ -1563,6 +1633,7 @@ impl CodeGenerator {
                     }
                     continue;
                 }
+                Some(QuerySerialization::Unsupported { .. }) => {}
                 None => {}
             }
 
@@ -1570,11 +1641,11 @@ impl CodeGenerator {
                 // Required parameters: always add
                 if Self::param_uses_as_ref_str(param) {
                     param_building.push(quote! {
-                        query_params.push((#param_key, #param_name.as_ref().to_string()));
+                        query_params.push((#param_key.to_string(), #param_name.as_ref().to_string()));
                     });
                 } else {
                     param_building.push(quote! {
-                        query_params.push((#param_key, #param_name.to_string()));
+                        query_params.push((#param_key.to_string(), #param_name.to_string()));
                     });
                 }
             } else {
@@ -1582,13 +1653,13 @@ impl CodeGenerator {
                 if Self::param_uses_as_ref_str(param) {
                     param_building.push(quote! {
                         if let Some(v) = #param_name {
-                            query_params.push((#param_key, v.as_ref().to_string()));
+                            query_params.push((#param_key.to_string(), v.as_ref().to_string()));
                         }
                     });
                 } else {
                     param_building.push(quote! {
                         if let Some(v) = #param_name {
-                            query_params.push((#param_key, v.to_string()));
+                            query_params.push((#param_key.to_string(), v.to_string()));
                         }
                     });
                 }
@@ -1602,7 +1673,7 @@ impl CodeGenerator {
         } else {
             quote! {
                 {
-                    let mut query_params: Vec<(&str, String)> = Vec::new();
+                    let mut query_params: Vec<(String, String)> = Vec::new();
                     #(#param_building)*
                     if !query_params.is_empty() {
                         req = req.query(&query_params);
@@ -1808,6 +1879,20 @@ impl CodeGenerator {
 
     /// Get the Rust type for a parameter
     fn get_param_rust_type(&self, param: &crate::analysis::ParameterInfo) -> TokenStream {
+        if Self::param_has_impl_as_ref_type(param) {
+            quote! { impl AsRef<str> }
+        } else {
+            self.get_param_owned_rust_type(param)
+        }
+    }
+
+    /// Owned parameter type shared by client-builder storage and generated
+    /// server extraction. [`ParameterInfo::query_serialization`] is the
+    /// authoritative projection for typed query objects and arrays.
+    pub(crate) fn get_param_owned_rust_type(
+        &self,
+        param: &crate::analysis::ParameterInfo,
+    ) -> TokenStream {
         use crate::analysis::QuerySerialization;
         // Typed form-style arrays take Vec<item> (openapi-generator-anu).
         // Scalars parse as-is (they may be type paths from [type_mappings]);
@@ -1839,18 +1924,12 @@ impl CodeGenerator {
             let ident = syn::Ident::new(&rust_name, proc_macro2::Span::call_site());
             return quote! { #ident };
         }
-        let type_str = &param.rust_type;
-        match type_str.as_str() {
-            "String" => quote! { impl AsRef<str> },
-            "i64" => quote! { i64 },
-            "i32" => quote! { i32 },
-            "f64" => quote! { f64 },
-            "bool" => quote! { bool },
-            _ => {
-                let type_ident = syn::Ident::new(type_str, proc_macro2::Span::call_site());
+        syn::parse_str::<syn::Type>(&param.rust_type)
+            .map(|ty| quote! { #ty })
+            .unwrap_or_else(|_| {
+                let type_ident = syn::Ident::new(&param.rust_type, proc_macro2::Span::call_site());
                 quote! { #type_ident }
-            }
-        }
+            })
     }
 
     /// True when the parameter's compile-time type is `impl AsRef<str>` and
@@ -2199,7 +2278,7 @@ impl CodeGenerator {
     /// `rust_ident` set by the analyzer (which dedupes across the whole
     /// operation), falling back to a fresh sanitize of the wire name when
     /// no analyzer-side ident is present.
-    fn param_ident_str(&self, param: &crate::analysis::ParameterInfo) -> String {
+    pub(crate) fn param_ident_str(&self, param: &crate::analysis::ParameterInfo) -> String {
         if let Some(ident) = &param.rust_ident {
             // Apply the keyword-escape and self/super/crate dance the
             // sanitize fn does. The analyzer's base ident is already the

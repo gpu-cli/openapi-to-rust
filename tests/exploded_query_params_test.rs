@@ -144,7 +144,7 @@ fn required_exploded_object_param_is_not_option() {
         "required exploded param should be a bare struct arg; got:\n{code}"
     );
     assert!(
-        code.contains("req = req . query (& filter)"),
+        code.contains("let v = filter") && code.contains("req = req . query (& v)"),
         "required exploded param must serialize unconditionally; got:\n{code}"
     );
 }
@@ -197,7 +197,7 @@ fn explode_false_object_serializes_comma_joined() {
         "explode=false object must comma-join key,value parts; got:\n{code}"
     );
     assert!(
-        code.contains("query_params . push ((\"filter\" , parts . join (\",\")))"),
+        code.contains("query_params . push ((\"filter\" . to_string () , parts . join (\",\")))"),
         "explode=false object keeps the parameter name as the single key; got:\n{code}"
     );
 }
@@ -259,7 +259,8 @@ fn form_exploded_array_repeats_pairs() {
         "exploded string array should be typed Vec<String>; got:\n{code}"
     );
     assert!(
-        code.contains("for item in v { query_params . push ((\"tags\" , item . to_string ())) ; }"),
+        code.contains("for item in v")
+            && code.contains("\"tags\" . to_string () , item . to_string ()"),
         "exploded array must push one pair per element; got:\n{code}"
     );
 }
@@ -285,7 +286,8 @@ fn form_exploded_array_types_integer_items_through_type_mapper() {
 
 #[test]
 fn form_noexplode_array_joins_with_commas() {
-    // form + explode=false array: `?tags=a,b,c`; empty vectors are omitted.
+    // form + explode=false array: `?tags=a,b,c`; empty vectors use a marker
+    // so a generated server can distinguish Some(empty) from None.
     let code = generate_methods(spec_with_filter_param(json!({
         "name": "tags",
         "in": "query",
@@ -302,8 +304,8 @@ fn form_noexplode_array_joins_with_commas() {
         "non-exploded array must comma-join its items; got:\n{code}"
     );
     assert!(
-        code.contains("if ! v . is_empty ()"),
-        "empty non-exploded arrays must be omitted; got:\n{code}"
+        code.contains("if v . is_empty ()") && code.contains("format ! (\"{}[]\" , \"tags\")"),
+        "empty non-exploded arrays must emit the zero-cardinality marker; got:\n{code}"
     );
 }
 
@@ -421,7 +423,7 @@ fn exploded_and_plain_query_params_coexist() {
     let code = generate_methods(spec);
 
     assert!(
-        code.contains("(\"limit\" , v . to_string ())"),
+        code.contains("(\"limit\" . to_string () , v . to_string ())"),
         "plain scalar param must still go through the pair vector; got:\n{code}"
     );
     assert!(
