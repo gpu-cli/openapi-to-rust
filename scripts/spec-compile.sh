@@ -3,10 +3,8 @@
 #
 # Auto-discovers specs/*.yaml and specs/*.json. Each spec produces a separate
 # scratch crate; we run the `openapi-to-rust` generator into it, then check
-# all scratch crates as ONE cargo workspace: a single dependency resolution,
-# a single target-dir lock, and cargo schedules the per-crate checks across
-# all cores itself. Any regression here means a real-world spec stops
-# compiling.
+# each crate against its emitted REQUIRED_DEPS.toml. Checks stay isolated so
+# Cargo feature unification cannot hide a missing per-spec feature.
 #
 # Usage:
 #   scripts/spec-compile.sh                        # all specs in specs/
@@ -103,30 +101,6 @@ for entry in "${SPECS[@]}"; do
   dir="$ROOT/$name"
   mkdir -p "$dir/src/generated"
 
-  cat >"$dir/Cargo.toml" <<EOF
-[package]
-name = "spec-compile-$name"
-version = "0.0.0"
-edition = "2024"
-publish = false
-
-[dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-serde_urlencoded = "0.7"
-reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
-reqwest-middleware = { version = "0.4", features = ["multipart"] }
-reqwest-retry = "0.7"
-reqwest-tracing = "0.5"
-thiserror = "1"
-url = { version = "2", features = ["serde"] }
-# Q2 typed-scalar deps (default-on; harmless when unused).
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["serde", "v4"] }
-bytes = { version = "1", features = ["serde"] }
-base64 = "0.22"
-EOF
-
   cat >"$dir/src/lib.rs" <<EOF
 #![allow(dead_code, unused_imports, clippy::all)]
 pub mod generated;
@@ -157,6 +131,22 @@ EOF
     continue
   fi
 
+  deps="$dir/src/generated/REQUIRED_DEPS.toml"
+  if [ ! -f "$deps" ]; then
+    echo "GEN-FAIL (missing REQUIRED_DEPS.toml)"
+    failed_gen+=("$name")
+    continue
+  fi
+  {
+    echo "[package]"
+    echo "name = \"spec-compile-$name\""
+    echo "version = \"0.0.0\""
+    echo "edition = \"2024\""
+    echo "publish = false"
+    echo
+    cat "$deps"
+  } >"$dir/Cargo.toml"
+
   echo "GEN-OK"
   gen_ok+=("$name")
 done
@@ -165,48 +155,21 @@ if [ "${SPEC_COMPILE_PARSE_ONLY:-}" = "1" ]; then
   passed=("${gen_ok[@]}")
   [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
 elif [ ${#gen_ok[@]} -gt 0 ]; then
-  # ---- Phase 2: check everything as one workspace ------------------------
-  {
-    echo "[workspace]"
-    echo "resolver = \"2\""
-    echo "members = ["
-    for name in "${gen_ok[@]}"; do
-      echo "  \"$name\","
-    done
-    echo "]"
-  } >"$ROOT/Cargo.toml"
-
+  # ---- Phase 2: check every exact generated manifest ---------------------
   echo
-  echo "[spec-compile] cargo check (workspace of ${#gen_ok[@]} crates)..."
-  ws_log="$ROOT/check.log"
-  if ( cd "$ROOT" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check --workspace --keep-going $OFFLINE ) >"$ws_log" 2>&1; then
-    passed=("${gen_ok[@]}")
-    for name in "${gen_ok[@]}"; do
+  echo "[spec-compile] cargo check (${#gen_ok[@]} isolated manifest(s))..."
+  for name in "${gen_ok[@]}"; do
+    log="$ROOT/$name/check.log"
+    if ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check $OFFLINE ) >"$log" 2>&1; then
       printf "%-30s PASS\n" "$name"
-    done
-    [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
-  else
-    # Attribute failures per crate. Everything that compiles is already
-    # cached from the workspace pass, so these re-checks are cheap. Passing
-    # crates are cleaned up only after the loop — they must stay on disk
-    # while they're still members of the workspace being checked.
-    for name in "${gen_ok[@]}"; do
-      log="$ROOT/$name/check.log"
-      if ( cd "$ROOT" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check -p "spec-compile-$name" $OFFLINE ) >"$log" 2>&1; then
-        printf "%-30s PASS\n" "$name"
-        passed+=("$name")
-      else
-        err_count=$(grep -cE "^error" "$log" || true)
-        printf "%-30s CHECK-FAIL (%s errs)\n" "$name" "$err_count"
-        failed_check+=("$name")
-      fi
-    done
-    if [ "${SPEC_COMPILE_KEEP:-}" != "1" ]; then
-      for name in "${passed[@]}"; do
-        rm -rf "$ROOT/$name"
-      done
+      passed+=("$name")
+    else
+      err_count=$(grep -cE "^error" "$log" || true)
+      printf "%-30s CHECK-FAIL (%s errs)\n" "$name" "$err_count"
+      failed_check+=("$name")
     fi
-  fi
+  done
+  [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
 fi
 
 echo

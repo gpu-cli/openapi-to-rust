@@ -827,12 +827,8 @@ fn selective_openai_client_compiles() {
     generator.write_files(&result).unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "pub mod generated;\n").unwrap();
 
-    let generated_dependencies = result
-        .required_deps
-        .iter()
-        .map(|dependency| dependency.to_toml_line())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let generated_dependencies =
+        std::fs::read_to_string(output_dir.join("REQUIRED_DEPS.toml")).unwrap();
     std::fs::write(
         temp.path().join("Cargo.toml"),
         format!(
@@ -841,12 +837,6 @@ name = "selective-openai-client"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-serde = {{ version = "1", features = ["derive"] }}
-serde_json = "1"
-thiserror = "2"
-reqwest = {{ version = "0.12", features = ["json", "multipart"] }}
-reqwest-middleware = {{ version = "0.4", features = ["multipart"] }}
 {generated_dependencies}
 "#
         ),

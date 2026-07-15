@@ -40,6 +40,7 @@ fn generate(spec: serde_json::Value, mapper: TypeMapper) -> String {
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -197,6 +198,7 @@ fn required_deps_are_populated_for_typed_scalars() {
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -204,26 +206,33 @@ fn required_deps_are_populated_for_typed_scalars() {
 
     let crate_names: Vec<&str> = result.required_deps.iter().map(|d| d.crate_name).collect();
     // Sorted, deterministic ordering.
-    assert_eq!(crate_names, vec!["base64", "chrono", "url", "uuid"]);
+    assert_eq!(
+        crate_names,
+        vec!["base64", "chrono", "serde", "url", "uuid"]
+    );
 }
 
 #[test]
-fn required_deps_empty_for_pure_string_spec() {
+fn required_deps_include_serde_for_pure_string_spec() {
     let spec = spec_with_format("hostname"); // unknown format → String
     let mut analyzer =
         SchemaAnalyzer::with_type_mapper(spec, TypeMapper::default()).expect("analyzer");
     let mut analysis = analyzer.analyze().expect("analyze");
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
     let result = codegen.generate_all(&mut analysis).expect("generate_all");
 
-    assert!(
-        result.required_deps.is_empty(),
-        "spec with no typed scalars should have empty required_deps. Got: {:?}",
-        result.required_deps
+    assert_eq!(
+        result
+            .required_deps
+            .iter()
+            .map(|dependency| dependency.crate_name)
+            .collect::<Vec<_>>(),
+        vec!["serde"]
     );
 }
 
@@ -238,6 +247,7 @@ fn write_files_drops_required_deps_toml_when_typed_scalars_used() {
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
         output_dir: temp.path().into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -259,7 +269,7 @@ fn write_files_drops_required_deps_toml_when_typed_scalars_used() {
 }
 
 #[test]
-fn write_files_skips_required_deps_toml_when_no_typed_scalars() {
+fn write_files_emits_required_deps_toml_for_base_serde_dependency() {
     let spec = spec_with_format("hostname");
     let mut analyzer =
         SchemaAnalyzer::with_type_mapper(spec, TypeMapper::default()).expect("analyzer");
@@ -269,6 +279,7 @@ fn write_files_skips_required_deps_toml_when_no_typed_scalars() {
     let cfg = GeneratorConfig {
         module_name: "sample".into(),
         output_dir: temp.path().into(),
+        enable_async_client: false,
         ..Default::default()
     };
     let codegen = CodeGenerator::new(cfg);
@@ -276,10 +287,9 @@ fn write_files_skips_required_deps_toml_when_no_typed_scalars() {
     codegen.write_files(&result).expect("write_files");
 
     let deps_path = temp.path().join("REQUIRED_DEPS.toml");
-    assert!(
-        !deps_path.exists(),
-        "REQUIRED_DEPS.toml should NOT be written when no typed scalars are used"
-    );
+    let body = std::fs::read_to_string(deps_path).expect("complete dependency fragment");
+    assert!(body.contains("serde = { version = \"1\", features = [\"derive\"] }"));
+    assert!(!body.contains("reqwest ="), "types-only output: {body}");
 }
 
 #[test]

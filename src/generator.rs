@@ -234,13 +234,9 @@ pub struct GenerationResult {
     pub files: Vec<GeneratedFile>,
     /// Generated mod.rs content that exports all modules
     pub mod_file: GeneratedFile,
-    /// Optional crates the generated code references (chrono, uuid,
-    /// url, …) — populated from the analyzer's TypeMapper
-    /// used-features set. The CLI uses this to write
-    /// `REQUIRED_DEPS.toml` next to the generated module and to
-    /// print a stderr summary so users know exactly what to add to
-    /// their `Cargo.toml`. Empty when no typed-scalar crates were
-    /// referenced.
+    /// Complete direct dependencies for the exact files in this result,
+    /// including required crate features and compatible versions. The CLI
+    /// writes these as `REQUIRED_DEPS.toml` next to the generated module.
     pub required_deps: Vec<crate::type_mapping::DepRequirement>,
     /// Number of schemas removed by opt-in client/server model pruning.
     pub pruned_schemas: usize,
@@ -287,7 +283,15 @@ impl CodeGenerator {
             });
 
             // Generate streaming client if configured
-            if let Some(ref streaming_config) = self.config.streaming_config {
+            if self.config.enable_sse_client
+                && let Some(ref streaming_config) = self.config.streaming_config
+            {
+                if streaming_config.generate_client && !streaming_config.event_parser_helpers {
+                    return Err(GeneratorError::ValidationError(
+                        "streaming generate_client=true requires event_parser_helpers=true"
+                            .to_string(),
+                    ));
+                }
                 let streaming_content =
                     self.generate_streaming_client(streaming_config, analysis)?;
                 files.push(GeneratedFile {
@@ -317,6 +321,27 @@ impl CodeGenerator {
             });
         }
 
+        // Server files are part of the same generation result so module wiring,
+        // dependency collection, and disk writes cannot drift from the CLI's
+        // post-processing path.
+        if !self.config.registry_only
+            && let Some(server) = self
+                .config
+                .server
+                .as_ref()
+                .filter(|server| !server.operations.is_empty())
+        {
+            let server_files =
+                crate::server::codegen::ServerCodegen::new(&self.config, analysis, server)
+                    .generate()
+                    .map_err(|error| {
+                        GeneratorError::CodeGenError(format!(
+                            "server code generation failed: {error}"
+                        ))
+                    })?;
+            files.extend(server_files);
+        }
+
         // Generate mod.rs file
         let mod_content = self.generate_mod_file(&files)?;
         let mod_file = GeneratedFile {
@@ -324,11 +349,10 @@ impl CodeGenerator {
             content: mod_content,
         };
 
-        // Snapshot the optional crates the analyzer's TypeMapper
-        // touched. Q2.8 surfaces these via REQUIRED_DEPS.toml
-        // (written by `write_files`) and a CLI stderr summary.
-        let required_deps =
-            crate::type_mapping::collect_dep_requirements(&analysis.used_type_features);
+        let required_deps = crate::type_mapping::collect_generated_dep_requirements(
+            files.iter().map(|file| file.content.as_str()),
+            self.config.enable_specta,
+        );
 
         Ok(GenerationResult {
             files,
@@ -720,7 +744,7 @@ impl CodeGenerator {
             _ => Default::default(),
         };
 
-        let streaming_ids = if self.config.registry_only {
+        let streaming_ids = if self.config.registry_only || !self.config.enable_sse_client {
             Default::default()
         } else if let Some(streaming) = &self.config.streaming_config {
             let mut ids = std::collections::BTreeSet::new();
@@ -757,7 +781,7 @@ impl CodeGenerator {
             .server
             .as_ref()
             .is_some_and(|server| server.prune_models && !server.operations.is_empty());
-        let extra_schema_roots = if self.config.registry_only {
+        let extra_schema_roots = if self.config.registry_only || !self.config.enable_sse_client {
             Vec::new()
         } else {
             self.config
@@ -1004,17 +1028,26 @@ impl CodeGenerator {
 
     /// Generate mod.rs file that exports all modules
     fn generate_mod_file(&self, files: &[GeneratedFile]) -> Result<String> {
-        let mut module_declarations = Vec::new();
-        let mut pub_uses = Vec::new();
+        let mut module_names = std::collections::BTreeSet::new();
 
         for file in files {
-            if let Some(module_name) = file.path.file_stem().and_then(|s| s.to_str()) {
-                if module_name != "mod" {
-                    module_declarations.push(format!("pub mod {module_name};"));
-                    pub_uses.push(format!("pub use {module_name}::*;"));
-                }
+            let module_name = if file.path.components().count() > 1 {
+                file.path.iter().next().and_then(|part| part.to_str())
+            } else {
+                file.path.file_stem().and_then(|stem| stem.to_str())
+            };
+            if let Some(module_name) = module_name.filter(|name| *name != "mod") {
+                module_names.insert(module_name.to_string());
             }
         }
+        let module_declarations = module_names
+            .iter()
+            .map(|name| format!("pub mod {name};"))
+            .collect::<Vec<_>>();
+        let pub_uses = module_names
+            .iter()
+            .map(|name| format!("pub use {name}::*;"))
+            .collect::<Vec<_>>();
 
         // `module_name` is a configurable *label* — it does NOT pick
         // the on-disk directory (that's `output_dir`) and it does NOT
@@ -1059,6 +1092,9 @@ impl CodeGenerator {
         // Write all files
         for file in &result.files {
             let file_path = self.config.output_dir.join(&file.path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::write(&file_path, &file.content)?;
         }
 
@@ -1066,14 +1102,11 @@ impl CodeGenerator {
         let mod_path = self.config.output_dir.join(&result.mod_file.path);
         fs::write(&mod_path, &result.mod_file.content)?;
 
-        // Q2.8: write REQUIRED_DEPS.toml when the generated code
-        // references any optional crates (chrono, uuid, url, …).
-        // Skipped silently when the set is empty so we don't litter
-        // the output dir for specs whose generated types only use
-        // std/serde/serde_json.
+        let deps_path = self.config.output_dir.join("REQUIRED_DEPS.toml");
         if let Some(toml) = crate::type_mapping::render_required_deps_toml(&result.required_deps) {
-            let deps_path = self.config.output_dir.join("REQUIRED_DEPS.toml");
             fs::write(&deps_path, toml)?;
+        } else if deps_path.exists() {
+            fs::remove_file(&deps_path)?;
         }
 
         Ok(())

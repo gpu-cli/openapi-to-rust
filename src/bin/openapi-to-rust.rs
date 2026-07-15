@@ -252,57 +252,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 generator.config().output_dir.display()
             );
 
-            // P4: server-side scaffolding. Runs only when [server] is
-            // set in the TOML and selectors resolve cleanly.
-            if let Some(server_section) = generator.config().server.as_ref() {
-                if !server_section.operations.is_empty() {
-                    use openapi_to_rust::server::codegen::ServerCodegen;
-                    println!("⚙️  Generating server scaffolding (axum)...");
-                    let server_files =
-                        ServerCodegen::new(generator.config(), &analysis, server_section)
-                            .generate()?;
-                    let out = generator.config().output_dir.clone();
-                    let server_dir = out.join("server");
-                    std::fs::create_dir_all(&server_dir)?;
-                    for f in &server_files {
-                        let path = out.join(&f.path);
-                        if let Some(parent) = path.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&path, &f.content)?;
-                    }
-                    // Append server module declaration to mod.rs.
-                    let mod_path = out.join("mod.rs");
-                    if mod_path.exists() {
-                        let body = std::fs::read_to_string(&mod_path)?;
-                        if !body.contains("pub mod server") {
-                            let mut updated = body;
-                            if !updated.ends_with('\n') {
-                                updated.push('\n');
-                            }
-                            updated.push_str("\npub mod server;\npub use server::*;\n");
-                            std::fs::write(&mod_path, updated)?;
-                        }
-                    }
-                    println!(
-                        "✅ Wrote {} server files to {}/server/",
-                        server_files.len(),
-                        out.display()
-                    );
-                    print_server_hint(&analysis, server_section);
-                }
+            // Server files are generated and written as part of the same
+            // result as types and clients so dependency reporting is complete.
+            if !generator.config().registry_only
+                && let Some(server_section) = generator.config().server.as_ref()
+                && !server_section.operations.is_empty()
+            {
+                let out = generator.config().output_dir.clone();
+                println!("✅ Wrote server scaffolding to {}/server/", out.display());
+                print_server_hint(&analysis, server_section);
             }
 
-            // Q2.8 dep advisory: surface optional crates the
-            // generated code references so the operator knows what
-            // to add to their Cargo.toml. write_files already
-            // dropped a copy-pasteable REQUIRED_DEPS.toml next to
-            // the generated module; the stderr summary makes it
-            // discoverable without scanning the output dir.
+            // Surface the complete direct dependency set. write_files already
+            // emitted the same copyable fragment next to the generated module.
             if !result.required_deps.is_empty() {
                 eprintln!();
                 eprintln!(
-                    "📦 Generated code uses {} optional crate(s). Add to your Cargo.toml:",
+                    "📦 Generated code requires {} direct crate(s). Add to your Cargo.toml:",
                     result.required_deps.len()
                 );
                 eprintln!();

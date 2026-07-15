@@ -198,7 +198,7 @@ Two complete examples are in the repo:
 | `server/errors.rs` | `enum <Op>Response { Ok(T), BadRequest(E), …, OkStream(Sse<…>) }` with `IntoResponse` |
 | `server/router.rs` | Per-tag `Router` factory; combined `build_router<…>(…)` for multi-tag selections |
 | `mod.rs` | Module declarations + re-exports |
-| `REQUIRED_DEPS.toml` | Optional crates the generated code references (chrono, uuid, url, bytes, base64) — copy into your consuming crate's `Cargo.toml` |
+| `REQUIRED_DEPS.toml` | Complete direct dependencies and crate features for the exact generated modes and selected operations — append or merge into the consuming `Cargo.toml` |
 
 ### Generated client usage
 
@@ -703,7 +703,7 @@ extraction (tracked separately).
 - `x-enum-varnames` honored.
 - Constraint doc comments (`minLength`/`maxLength`/`minimum`/`pattern`).
 - Per-format strategy opt-out via direct fields in `[generator.types]`; `--types-conservative` flag.
-- `REQUIRED_DEPS.toml` emitted listing optional crates the generated code references (+ stderr advisory).
+- Deterministic `REQUIRED_DEPS.toml` emitted for types, HTTP clients, retry/tracing, SSE, Axum servers, and typed scalars (+ stderr advisory).
 - Clean primitive variants for `anyOf` unions.
 
 **Other**

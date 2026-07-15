@@ -230,7 +230,7 @@ fn generated_flat_and_builder_calls_compile_together() {
     let mut analyzer = SchemaAnalyzer::new(builder_spec()).unwrap();
     let mut analysis = analyzer.analyze().unwrap();
     let generator = CodeGenerator::new(GeneratorConfig {
-        output_dir,
+        output_dir: output_dir.clone(),
         module_name: "operation_builders".into(),
         enable_async_client: true,
         enable_sse_client: false,
@@ -360,7 +360,7 @@ fn openai_composition_body_gets_reachable_field_setters() {
     let temp = tempfile::TempDir::new().unwrap();
     let output_dir = temp.path().join("src/generated");
     let generator = CodeGenerator::new(GeneratorConfig {
-        output_dir,
+        output_dir: output_dir.clone(),
         module_name: "openai_builder".into(),
         enable_async_client: true,
         enable_sse_client: false,
@@ -403,12 +403,8 @@ pub async fn composed_body_builder_compiles(
 "#,
     )
     .unwrap();
-    let generated_dependencies = result
-        .required_deps
-        .iter()
-        .map(|dependency| dependency.to_toml_line())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let generated_dependencies =
+        std::fs::read_to_string(output_dir.join("REQUIRED_DEPS.toml")).unwrap();
     std::fs::write(
         temp.path().join("Cargo.toml"),
         format!(
@@ -417,12 +413,6 @@ name = "openai-operation-builder-smoke"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
-serde = {{ version = "1", features = ["derive"] }}
-serde_json = "1"
-thiserror = "2"
-reqwest = {{ version = "0.12", features = ["json", "multipart"] }}
-reqwest-middleware = {{ version = "0.4", features = ["multipart"] }}
 {generated_dependencies}
 "#
         ),

@@ -78,8 +78,9 @@ pub struct SchemaAnalysis {
     /// Optional crates the [`TypeMapper`] was asked to reference
     /// during analysis (e.g. chrono when a `format: date-time` field
     /// became `chrono::DateTime<Utc>`). The generator reads this to
-    /// decide which helper modules (e.g. `base64_serde`) to emit.
-    /// Q2.8 will additionally use it to write `REQUIRED_DEPS.toml`.
+    /// decide which helper modules (e.g. `base64_serde`) to emit. Complete
+    /// dependency reporting is collected from retained emitted files so
+    /// pruned schemas cannot leak stale requirements.
     ///
     /// [`TypeMapper`]: crate::type_mapping::TypeMapper
     pub used_type_features: crate::type_mapping::UsedFeatures,
