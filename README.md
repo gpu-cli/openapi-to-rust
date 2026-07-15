@@ -7,6 +7,21 @@
 
 A Rust code generator that turns OpenAPI 3.0/3.1 (and experimental 3.2) specifications into strongly-typed structs, async HTTP clients, SSE streaming clients, **and opt-in Axum server scaffolding** — including for the messy, real-world specs everyone actually ships.
 
+## 30-second trial
+
+Install the CLI from crates.io, then generate a tiny client from a stable,
+hosted fixture:
+
+```bash
+cargo install --locked openapi-to-rust
+openapi-to-rust generate https://raw.githubusercontent.com/gpu-cli/openapi-to-rust/v0.6.0/tests/fixtures/operation_extraction/simple_get.json
+```
+
+This writes `src/generated/{types,client,mod}.rs` and the exact dependencies
+needed to compile them in `src/generated/REQUIRED_DEPS.toml`. Use `--dry-run`
+to inspect the plan without writing, and `--check` in CI to detect stale
+committed output.
+
 We originally built this internally at [GPU CLI](https://gpu-cli.sh) to generate typed Rust clients for OpenAI, Anthropic, Cloudflare, and other large APIs. After battle-testing it against real-world specs with complex union types, discriminated enums, streaming endpoints, and the occasional spec/API drift, we decided to open source it.
 
 The repository contains **55 real-world specs**. The supported OpenAPI corpus is
@@ -646,11 +661,14 @@ history and migration notes.
 
 ## Contributing
 
-1. Fork the repo
-2. Add your OpenAPI spec or pattern to `specs/` or `tests/fixtures/`
-3. Write a snapshot test (`insta`)
-4. Run `cargo insta test` and review output
-5. Open a PR
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, targeted test commands,
+snapshot guidance, and the generated-API compatibility checklist. Questions
+belong in [GitHub Discussions](https://github.com/gpu-cli/openapi-to-rust/discussions);
+bugs and concrete feature requests use the repository issue forms.
+
+By participating, you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+Security reports follow [SECURITY.md](SECURITY.md); please do not file a public
+issue for a suspected vulnerability.
 
 ## License
 

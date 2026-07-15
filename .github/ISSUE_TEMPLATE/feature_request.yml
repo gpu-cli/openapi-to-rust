@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a concrete OpenAPI, generator, or ergonomics improvement
+title: "[feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What are you trying to generate or build, and why is the current output insufficient?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - OpenAPI or JSON Schema support
+        - Generated models
+        - Generated HTTP or SSE client
+        - Generated Axum server
+        - CLI and configuration
+        - Packaging, docs, or integrations
+    validations:
+      required: true
+  - type: textarea
+    id: spec
+    attributes:
+      label: Representative OpenAPI fragment
+      description: Show the smallest wire shape or operation that motivates the request, when applicable.
+      render: yaml
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Desired generated API or behavior
+      description: Include a small Rust sketch when the request changes generated code.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds and compatibility tradeoffs.
+  - type: checkboxes
+    id: compatibility
+    attributes:
+      label: Compatibility
+      options:
+        - label: I considered whether this changes existing generated Rust APIs or wire behavior.
+          required: true
+        - label: I searched existing issues and discussions for this request.
+          required: true

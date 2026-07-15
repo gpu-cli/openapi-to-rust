@@ -19,6 +19,10 @@ when correcting output that was wrong or incomplete on the wire.
 - A complete `REQUIRED_DEPS.toml` for the exact generated output.
 - `base64_url_unpadded` as a spec-wide `format: byte` strategy for RFC 7515
   URL-safe, unpadded data.
+- Contributor, support, security, conduct, issue-form, and pull-request
+  scaffolding, plus a docs.rs library overview and compile-checked example.
+- The public CLI as Cargo's default binary, so plain `cargo run -- ...` works
+  even though feature-gated internal maintenance binaries are declared.
 
 ### Fixed
 

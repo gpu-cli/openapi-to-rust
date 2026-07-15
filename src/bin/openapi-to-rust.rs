@@ -12,7 +12,9 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "openapi-to-rust")]
-#[command(about = "Generate Rust types and clients from OpenAPI specs")]
+#[command(
+    about = "Generate typed Rust models, HTTP/SSE clients, and Axum servers from OpenAPI specs"
+)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
