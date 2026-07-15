@@ -128,7 +128,7 @@
 //!
 //! # Examples
 //!
-//! See the [examples](https://github.com/your-repo/examples) directory for complete examples:
+//! See the [examples](https://github.com/gpu-cli/openapi-to-rust/tree/main/examples) directory for complete examples:
 //! - `toml_config_example.rs` - Various configuration patterns
 //! - `complete_workflow.rs` - Full generation workflow with TOML
 //!
@@ -581,7 +581,7 @@ fn inspect_type_config_layout(value: &toml::Value) -> Result<(), GeneratorError>
         .is_some()
     {
         return Err(GeneratorError::ValidationError(
-            "[generator.types.strategies] is obsolete. Move its fields directly under [generator.types]. Use snake_case keys such as date_time (not date-time); valid byte values are string, base64, and vec_u8 (for example: byte = \"base64\")."
+            "[generator.types.strategies] is obsolete. Move its fields directly under [generator.types]. Use snake_case keys such as date_time (not date-time); valid byte values are string, base64, base64_url_unpadded, and vec_u8 (for example: byte = \"base64\")."
                 .to_string(),
         ));
     }
