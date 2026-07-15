@@ -66,6 +66,11 @@ output_dir = "src/generated"
 module_name = "api"
 # All paths above are relative to this TOML file, not the shell's working directory.
 
+[generator.builders]
+# Add `*_builder()` when an operation has more than three optional values.
+enabled = true
+threshold = 3
+
 [features]
 enable_async_client = true
 
@@ -410,6 +415,18 @@ binary    = "string"        # default: "bytes"
 ```
 
 The CLI also supports `--types-conservative`, which collapses every typed scalar to `String`/`i64`/etc. Use it when you want zero optional-crate dependencies.
+
+### `[generator.builders]` — additive operation builders
+
+Large operations can keep their existing flat async method and also expose a `*_builder()` entry point:
+
+```toml
+[generator.builders]
+enabled = true
+threshold = 3
+```
+
+A builder is emitted when its optional query/header/body values and reachable optional request-body fields exceed `threshold`. Required path, query, header, and request-model values stay explicit. Setters own their values, and `.send().await` delegates to the existing flat method, so request serialization and response errors stay identical. Builder generation is disabled by default to preserve existing generated call sites.
 
 ## OpenAPI 3.1 / 3.2 support
 

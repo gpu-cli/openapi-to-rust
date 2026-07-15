@@ -86,24 +86,24 @@ fn strip_trailing_zero(v: f64) -> String {
 
 /// Info about schemas that are variants in discriminated unions
 #[derive(Clone)]
-struct DiscriminatedVariantInfo {
+pub(crate) struct DiscriminatedVariantInfo {
     /// The discriminator field name (e.g., "type")
-    discriminator_field: String,
+    pub(crate) discriminator_field: String,
     /// The const value of the discriminator (e.g., "text")
-    discriminator_value: String,
+    pub(crate) discriminator_value: String,
     /// Whether the parent union is untagged
-    is_parent_untagged: bool,
+    pub(crate) is_parent_untagged: bool,
 }
 
 /// One object property after discriminator filtering and Rust-identifier
 /// disambiguation. Struct fields, request-model constructors, and builders
 /// all consume this shared projection so their names and types cannot drift.
-struct EmittedObjectProperty<'a> {
-    wire_name: &'a str,
-    property: &'a crate::analysis::PropertyInfo,
-    ident: syn::Ident,
-    is_required: bool,
-    field_type: TokenStream,
+pub(crate) struct EmittedObjectProperty<'a> {
+    pub(crate) wire_name: &'a str,
+    pub(crate) property: &'a crate::analysis::PropertyInfo,
+    pub(crate) ident: syn::Ident,
+    pub(crate) is_required: bool,
+    pub(crate) field_type: TokenStream,
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +158,8 @@ pub struct GeneratorConfig {
     /// TOML section. Q2.0 introduces this field; with the default value
     /// every mapping preserves pre-refactor behavior.
     pub types: crate::type_mapping::TypeMappingConfig,
+    /// Additive operation-builder generation policy.
+    pub builders: crate::config::BuildersSection,
     /// Opt-in server codegen scope. `None` ⇒ emit no server code.
     /// Set by the `[server]` section in the TOML config.
     pub server: Option<crate::config::ServerSection>,
@@ -187,6 +189,7 @@ impl Default for GeneratorConfig {
             enable_registry: false,
             registry_only: false,
             types: crate::type_mapping::TypeMappingConfig::default(),
+            builders: crate::config::BuildersSection::default(),
             server: None,
             client: None,
         }
@@ -283,7 +286,8 @@ impl CodeGenerator {
             // Generate HTTP client if enabled
             if self.config.enable_async_client {
                 let operations = self.client_operations(analysis, scopes.client_ids.as_ref());
-                let http_content = self.generate_http_client_for_operations(&operations)?;
+                let http_content =
+                    self.generate_http_client_for_operations(analysis, &operations)?;
                 files.push(GeneratedFile {
                     path: "client.rs".into(),
                     content: http_content,
@@ -640,16 +644,17 @@ impl CodeGenerator {
     pub fn generate_http_client(&self, analysis: &SchemaAnalysis) -> Result<String> {
         let client_ids = self.resolve_client_operation_ids(analysis)?;
         let operations = self.client_operations(analysis, client_ids.as_ref());
-        self.generate_http_client_for_operations(&operations)
+        self.generate_http_client_for_operations(analysis, &operations)
     }
 
     fn generate_http_client_for_operations(
         &self,
+        analysis: &SchemaAnalysis,
         operations: &[&crate::analysis::OperationInfo],
     ) -> Result<String> {
         let error_types = self.generate_http_error_types();
         let client_struct = self.generate_http_client_struct();
-        let operation_methods = self.generate_operation_methods_for(operations);
+        let operation_methods = self.generate_operation_methods_for(analysis, operations);
 
         let generated = quote! {
             //! Generated HTTP client for regular API requests
@@ -1523,61 +1528,14 @@ impl CodeGenerator {
         discriminator_info: Option<&DiscriminatedVariantInfo>,
     ) -> Result<TokenStream> {
         let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
-
-        // Sort properties by name for deterministic output
-        let mut sorted_properties: Vec<_> = properties.iter().collect();
-        sorted_properties.sort_by_key(|(name, _)| name.as_str());
-
-        // Track Rust field-name uniqueness inside the struct. Two spec
-        // properties whose names sanitize to the same Rust identifier
-        // (e.g. `connectionString` and `connection_string` both → `connection_string`)
-        // would otherwise emit duplicate fields and trigger E0124 / E0062.
-        // We disambiguate by suffixing `_2`, `_3`, … on collisions, and we
-        // skip the duplicate entirely when the spec literally repeats the
-        // same key (impossible in JSON but tolerated in YAML merging).
-        let mut used_field_idents: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        // Keep the serde-flatten catch-all stable while allowing a declared
-        // property with the same sanitized Rust name. The declared property
-        // receives the normal `_2` suffix and a serde rename back to its wire
-        // name below.
-        if !matches!(
+        let emitted_properties = self.emitted_object_properties(
+            &schema.name,
+            properties,
+            required,
             additional_properties,
-            crate::analysis::ObjectAdditionalProperties::Forbidden
-        ) {
-            used_field_idents.insert("additional_properties".to_string());
-        }
-
-        let mut emitted_properties = Vec::new();
-        for (field_name, property) in sorted_properties {
-            // Skip the discriminator field ONLY if:
-            // 1. This struct is a variant in a discriminated union, AND
-            // 2. The parent union is tagged (not untagged)
-            if discriminator_info.is_some_and(|info| {
-                !info.is_parent_untagged && field_name.as_str() == info.discriminator_field.as_str()
-            }) {
-                continue;
-            }
-
-            let raw = self.to_rust_field_name(field_name);
-            let mut chosen = raw.clone();
-            let mut suffix = 2;
-            while !used_field_idents.insert(chosen.clone()) {
-                chosen = format!("{raw}_{suffix}");
-                suffix += 1;
-            }
-            let ident = Self::to_field_ident(&chosen);
-            let is_required = required.contains(field_name);
-            let field_type =
-                self.generate_field_type(&schema.name, field_name, property, is_required, analysis);
-            emitted_properties.push(EmittedObjectProperty {
-                wire_name: field_name,
-                property,
-                ident,
-                is_required,
-                field_type,
-            });
-        }
+            analysis,
+            discriminator_info,
+        );
 
         let mut fields: Vec<TokenStream> = emitted_properties
             .iter()
@@ -1706,6 +1664,63 @@ impl CodeGenerator {
 
             #builder
         })
+    }
+
+    /// Project an object schema into the exact public fields emitted in
+    /// `types.rs`. Request-model and operation builders share this metadata so
+    /// identifier disambiguation, discriminator filtering, and Option wrapping
+    /// cannot drift.
+    pub(crate) fn emitted_object_properties<'a>(
+        &self,
+        schema_name: &str,
+        properties: &'a BTreeMap<String, crate::analysis::PropertyInfo>,
+        required: &std::collections::HashSet<String>,
+        additional_properties: &crate::analysis::ObjectAdditionalProperties,
+        analysis: &crate::analysis::SchemaAnalysis,
+        discriminator_info: Option<&DiscriminatedVariantInfo>,
+    ) -> Vec<EmittedObjectProperty<'a>> {
+        let mut sorted_properties: Vec<_> = properties.iter().collect();
+        sorted_properties.sort_by_key(|(name, _)| name.as_str());
+
+        let mut used_field_idents = std::collections::HashSet::new();
+        if !matches!(
+            additional_properties,
+            crate::analysis::ObjectAdditionalProperties::Forbidden
+        ) {
+            used_field_idents.insert("additional_properties".to_string());
+        }
+
+        let mut emitted = Vec::new();
+        for (field_name, property) in sorted_properties {
+            if discriminator_info.is_some_and(|info| {
+                !info.is_parent_untagged && field_name.as_str() == info.discriminator_field.as_str()
+            }) {
+                continue;
+            }
+
+            let raw = self.to_rust_field_name(field_name);
+            let mut chosen = raw.clone();
+            let mut suffix = 2;
+            while !used_field_idents.insert(chosen.clone()) {
+                chosen = format!("{raw}_{suffix}");
+                suffix += 1;
+            }
+            let is_required = required.contains(field_name);
+            emitted.push(EmittedObjectProperty {
+                wire_name: field_name,
+                property,
+                ident: Self::to_field_ident(&chosen),
+                is_required,
+                field_type: self.generate_field_type(
+                    schema_name,
+                    field_name,
+                    property,
+                    is_required,
+                    analysis,
+                ),
+            });
+        }
+        emitted
     }
 
     fn is_request_body_root(
@@ -2306,7 +2321,7 @@ impl CodeGenerator {
             || (prop.default.is_some() && self.type_lacks_default(&prop.schema_type, analysis))
     }
 
-    fn generate_property_base_type(
+    pub(crate) fn generate_property_base_type(
         &self,
         schema_name: &str,
         _field_name: &str,

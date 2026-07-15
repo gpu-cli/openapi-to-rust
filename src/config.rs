@@ -203,6 +203,29 @@ pub struct GeneratorSection {
     /// Relative paths are resolved from the configuration file's directory.
     #[serde(default)]
     pub schema_extensions: Vec<PathBuf>,
+    /// Additive operation-builder generation policy.
+    #[serde(default)]
+    pub builders: BuildersSection,
+}
+
+/// Configuration for additive `*_builder()` operation entry points.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BuildersSection {
+    /// Generate builders for operations above [`Self::threshold`].
+    pub enabled: bool,
+    /// Minimum optional-value count. Builders are emitted only when an
+    /// operation has more optional values than this threshold.
+    pub threshold: usize,
+}
+
+impl Default for BuildersSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -428,6 +451,8 @@ struct GeneratorSectionWire {
     #[serde(default)]
     schema_extensions: Vec<PathBuf>,
     #[serde(default)]
+    builders: BuildersSection,
+    #[serde(default)]
     types: Option<crate::type_mapping::TypeMappingConfig>,
 }
 
@@ -452,6 +477,7 @@ impl TryFrom<ConfigFileWire> for ConfigFile {
                 output_dir: wire.generator.output_dir,
                 module_name: wire.generator.module_name,
                 schema_extensions: wire.generator.schema_extensions,
+                builders: wire.generator.builders,
             },
             features: wire.features,
             http_client: wire.http_client,
@@ -500,6 +526,7 @@ struct GeneratorSectionRef<'a> {
     output_dir: &'a Path,
     module_name: &'a str,
     schema_extensions: &'a [PathBuf],
+    builders: &'a BuildersSection,
     types: &'a crate::type_mapping::TypeMappingConfig,
 }
 
@@ -514,6 +541,7 @@ impl Serialize for ConfigFile {
                 output_dir: &self.generator.output_dir,
                 module_name: &self.generator.module_name,
                 schema_extensions: &self.generator.schema_extensions,
+                builders: &self.generator.builders,
                 types: &self.types,
             },
             features: &self.features,
@@ -891,6 +919,7 @@ impl ConfigFile {
             enable_registry: self.features.enable_registry,
             registry_only: self.features.registry_only,
             types,
+            builders: self.generator.builders,
             server: self.server,
             client: self.client,
         }
@@ -901,6 +930,10 @@ const EXAMPLE_CONFIG: &str = r#"[generator]
 spec_path = "openapi.json"
 output_dir = "src/generated"
 module_name = "types"
+
+[generator.builders]
+enabled = true
+threshold = 3
 
 [features]
 enable_async_client = true

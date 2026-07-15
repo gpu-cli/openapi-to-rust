@@ -149,10 +149,42 @@
 
 use crate::analysis::{OperationInfo, ParameterInfo, SchemaAnalysis};
 use crate::generator::CodeGenerator;
-use heck::ToSnakeCase;
+use heck::{ToPascalCase, ToSnakeCase};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::BTreeMap;
+
+struct AllocatedOperationParam<'a> {
+    param: &'a ParameterInfo,
+    ident: syn::Ident,
+}
+
+#[derive(Clone)]
+struct BodyFieldPlan {
+    wire_name: String,
+    preferred_method_name: String,
+    value_ident: syn::Ident,
+    value_type: TokenStream,
+    access_path: Vec<syn::Ident>,
+}
+
+enum RequiredBodyConstruction {
+    Default,
+    New(Vec<BodyConstructorParam>),
+    Whole,
+}
+
+struct BodyConstructorParam {
+    preferred_ident: syn::Ident,
+    value_type: TokenStream,
+}
+
+struct BodyModelPlan {
+    body_ident: syn::Ident,
+    body_type: TokenStream,
+    required_construction: RequiredBodyConstruction,
+    optional_fields: Vec<BodyFieldPlan>,
+}
 
 impl CodeGenerator {
     /// Generate the HTTP client struct with middleware support
@@ -401,7 +433,7 @@ impl CodeGenerator {
     /// configured `[client].operations` scope.
     pub fn generate_operation_methods(&self, analysis: &SchemaAnalysis) -> TokenStream {
         let operations: Vec<&OperationInfo> = analysis.operations.values().collect();
-        self.generate_operation_methods_for(&operations)
+        self.generate_operation_methods_for(analysis, &operations)
     }
 
     /// Generate every operation-owned client artifact from one resolved
@@ -409,6 +441,7 @@ impl CodeGenerator {
     /// enums in lockstep for selective clients.
     pub(crate) fn generate_operation_methods_for(
         &self,
+        analysis: &SchemaAnalysis,
         operations: &[&OperationInfo],
     ) -> TokenStream {
         let param_enums = self.generate_param_enum_types(operations);
@@ -425,15 +458,606 @@ impl CodeGenerator {
             .map(|op| self.generate_single_operation_method(op))
             .collect();
 
+        let (operation_builders, builder_entries) =
+            self.generate_operation_builders(analysis, operations);
+
         quote! {
             #param_enums
 
             #(#op_error_enums)*
 
+            #(#operation_builders)*
+
             impl HttpClient {
                 #(#methods)*
+                #(#builder_entries)*
             }
         }
+    }
+
+    fn generate_operation_builders(
+        &self,
+        analysis: &SchemaAnalysis,
+        operations: &[&OperationInfo],
+    ) -> (Vec<TokenStream>, Vec<TokenStream>) {
+        if !self.config().builders.enabled {
+            return (Vec::new(), Vec::new());
+        }
+
+        let mut used_entry_methods: std::collections::HashSet<String> = operations
+            .iter()
+            .map(|operation| self.get_method_name(operation).to_string())
+            .collect();
+        let mut used_type_names = std::collections::HashSet::new();
+        for schema_name in analysis.schemas.keys() {
+            let rust_name = self.to_rust_type_name(schema_name);
+            used_type_names.insert(rust_name.clone());
+            // Request-model builders live in `types.rs` and are imported by
+            // glob into the client module. Reserve their conventional names
+            // so operation builders cannot create ambiguous re-exports.
+            used_type_names.insert(format!("{rust_name}Builder"));
+        }
+        used_type_names.insert("HttpClient".to_string());
+        used_type_names.insert("ApiOpError".to_string());
+        used_type_names.extend(
+            [
+                "ClientBuilder",
+                "ClientWithMiddleware",
+                "RetryConfig",
+                "HttpError",
+                "BTreeMap",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        for operation in operations {
+            used_type_names.insert(self.op_error_enum_ident(operation).to_string());
+            used_type_names.extend(
+                operation
+                    .parameters
+                    .iter()
+                    .filter(|parameter| parameter.enum_values.is_some())
+                    .map(|parameter| parameter.rust_type.clone()),
+            );
+        }
+
+        let mut definitions = Vec::new();
+        let mut entries = Vec::new();
+        for operation in operations {
+            let allocated_params = self.allocated_operation_params(operation);
+            let body_plan = self.body_model_plan(operation, analysis);
+            let optional_param_count = allocated_params
+                .iter()
+                .filter(|allocated| !Self::builder_param_is_required(allocated.param))
+                .count();
+            let optional_body_count =
+                usize::from(operation.request_body.is_some() && !operation.request_body_required);
+            let body_field_count = body_plan
+                .as_ref()
+                .filter(|plan| {
+                    operation.request_body_required
+                        || matches!(
+                            &plan.required_construction,
+                            RequiredBodyConstruction::Default
+                        )
+                })
+                .map_or(0, |plan| plan.optional_fields.len());
+            let optional_count = optional_param_count + optional_body_count + body_field_count;
+            if optional_count <= self.config().builders.threshold {
+                continue;
+            }
+
+            let flat_method = self.get_method_name(operation);
+            let entry_base = format!("{flat_method}_builder");
+            let entry_name = Self::allocate_name(&entry_base, &mut used_entry_methods);
+            let entry_ident = Self::to_field_ident(&entry_name);
+
+            let builder_base = format!("{}Builder", flat_method.to_string().to_pascal_case());
+            let builder_name = Self::allocate_type_name(&builder_base, &mut used_type_names);
+            let builder_ident = format_ident!("{builder_name}");
+
+            let (definition, entry) = self.generate_single_operation_builder(
+                operation,
+                &allocated_params,
+                body_plan,
+                &flat_method,
+                &entry_ident,
+                &builder_ident,
+            );
+            definitions.push(definition);
+            entries.push(entry);
+        }
+
+        (definitions, entries)
+    }
+
+    fn generate_single_operation_builder(
+        &self,
+        operation: &OperationInfo,
+        allocated_params: &[AllocatedOperationParam<'_>],
+        body_plan: Option<BodyModelPlan>,
+        flat_method: &syn::Ident,
+        entry_ident: &syn::Ident,
+        builder_ident: &syn::Ident,
+    ) -> (TokenStream, TokenStream) {
+        let mut fields = vec![quote! { client: &'a HttpClient }];
+        let mut entry_parameters = Vec::new();
+        let mut initializers = vec![quote! { client: self }];
+        let mut call_arguments = Vec::new();
+        let mut setters = Vec::new();
+        let mut used_entry_params = std::collections::HashSet::new();
+        let mut used_methods = std::collections::HashSet::from(["send".to_string()]);
+
+        for allocated in allocated_params {
+            let field_ident = &allocated.ident;
+            let storage_type = self.builder_param_storage_type(allocated.param);
+            if Self::builder_param_is_required(allocated.param) {
+                fields.push(quote! { #field_ident: #storage_type });
+                let entry_name =
+                    Self::allocate_name(&field_ident.to_string(), &mut used_entry_params);
+                let entry_param = Self::to_field_ident(&entry_name);
+                if Self::param_has_impl_as_ref_type(allocated.param) {
+                    entry_parameters.push(quote! { #entry_param: impl Into<String> });
+                    initializers.push(quote! { #field_ident: #entry_param.into() });
+                } else {
+                    entry_parameters.push(quote! { #entry_param: #storage_type });
+                    initializers.push(quote! { #field_ident: #entry_param });
+                }
+            } else {
+                fields.push(quote! { #field_ident: Option<#storage_type> });
+                initializers.push(quote! { #field_ident: None });
+                let setter_ident =
+                    Self::allocate_builder_method(&field_ident.to_string(), &mut used_methods);
+                let wire_name = &allocated.param.name;
+                let assignment = if Self::param_has_impl_as_ref_type(allocated.param) {
+                    quote! { self.#field_ident = Some(#field_ident.into()); }
+                } else {
+                    quote! { self.#field_ident = Some(#field_ident); }
+                };
+                let setter_type = if Self::param_has_impl_as_ref_type(allocated.param) {
+                    quote! { impl Into<String> }
+                } else {
+                    storage_type.clone()
+                };
+                setters.push(quote! {
+                    #[doc = concat!("Set the optional `", #wire_name, "` operation parameter.")]
+                    #[must_use]
+                    pub fn #setter_ident(mut self, #field_ident: #setter_type) -> Self {
+                        #assignment
+                        self
+                    }
+                });
+            }
+            call_arguments.push(quote! { self.#field_ident });
+        }
+
+        if let Some(body_plan) = body_plan {
+            let BodyModelPlan {
+                body_ident,
+                body_type,
+                required_construction,
+                optional_fields,
+            } = body_plan;
+            let can_initialize_optional_body =
+                matches!(&required_construction, RequiredBodyConstruction::Default);
+            if operation.request_body_required {
+                fields.push(quote! { #body_ident: #body_type });
+                match required_construction {
+                    RequiredBodyConstruction::Default => {
+                        initializers.push(quote! { #body_ident: Default::default() });
+                    }
+                    RequiredBodyConstruction::New(constructor_params) => {
+                        let mut constructor_args = Vec::new();
+                        for constructor in constructor_params {
+                            let preferred = constructor.preferred_ident.to_string();
+                            let entry_name =
+                                Self::allocate_name(&preferred, &mut used_entry_params);
+                            let entry_param = Self::to_field_ident(&entry_name);
+                            let value_type = constructor.value_type;
+                            entry_parameters.push(quote! { #entry_param: #value_type });
+                            constructor_args.push(entry_param);
+                        }
+                        initializers.push(quote! {
+                            #body_ident: #body_type::new(#(#constructor_args),*)
+                        });
+                    }
+                    RequiredBodyConstruction::Whole => {
+                        let entry_name =
+                            Self::allocate_name(&body_ident.to_string(), &mut used_entry_params);
+                        let entry_param = Self::to_field_ident(&entry_name);
+                        entry_parameters.push(quote! { #entry_param: #body_type });
+                        initializers.push(quote! { #body_ident: #entry_param });
+                    }
+                }
+            } else {
+                fields.push(quote! { #body_ident: Option<#body_type> });
+                initializers.push(quote! { #body_ident: None });
+            }
+
+            let body_setter =
+                Self::allocate_builder_method(&body_ident.to_string(), &mut used_methods);
+            let body_assignment = if operation.request_body_required {
+                quote! { self.#body_ident = #body_ident; }
+            } else {
+                quote! { self.#body_ident = Some(#body_ident); }
+            };
+            setters.push(quote! {
+                /// Replace the complete request body.
+                #[must_use]
+                pub fn #body_setter(mut self, #body_ident: #body_type) -> Self {
+                    #body_assignment
+                    self
+                }
+            });
+
+            if operation.request_body_required || can_initialize_optional_body {
+                for field in optional_fields {
+                    let setter_ident = Self::allocate_builder_method(
+                        &field.preferred_method_name,
+                        &mut used_methods,
+                    );
+                    let value_ident = field.value_ident;
+                    let value_type = field.value_type;
+                    let wire_name = field.wire_name;
+                    let access_path = field.access_path;
+                    let assignment = if operation.request_body_required {
+                        let mut target = quote! { self.#body_ident };
+                        for access in &access_path {
+                            target = quote! { #target.#access };
+                        }
+                        quote! { #target = Some(#value_ident); }
+                    } else {
+                        let mut target = quote! { request };
+                        for access in &access_path {
+                            target = quote! { #target.#access };
+                        }
+                        quote! {
+                            let request = self.#body_ident.get_or_insert_with(Default::default);
+                            #target = Some(#value_ident);
+                        }
+                    };
+                    setters.push(quote! {
+                        #[doc = concat!("Set the optional request-body field `", #wire_name, "`.")]
+                        #[must_use]
+                        pub fn #setter_ident(mut self, #value_ident: #value_type) -> Self {
+                            #assignment
+                            self
+                        }
+                    });
+                }
+            }
+            call_arguments.push(quote! { self.#body_ident });
+        }
+
+        let response_type = self.get_response_type(operation);
+        let error_type = self.op_error_type_token(operation);
+        let operation_id = &operation.operation_id;
+        let definition = quote! {
+            #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
+            #[must_use]
+            pub struct #builder_ident<'a> {
+                #(#fields,)*
+            }
+
+            impl<'a> #builder_ident<'a> {
+                #(#setters)*
+
+                /// Send the request through the existing flat operation method.
+                pub async fn send(self) -> Result<#response_type, ApiOpError<#error_type>> {
+                    self.client.#flat_method(#(#call_arguments),*).await
+                }
+            }
+        };
+        let entry = quote! {
+            #[doc = concat!("Start an additive builder for `", #operation_id, "`.")]
+            pub fn #entry_ident(
+                &self,
+                #(#entry_parameters),*
+            ) -> #builder_ident<'_> {
+                #builder_ident {
+                    #(#initializers,)*
+                }
+            }
+        };
+        (definition, entry)
+    }
+
+    fn allocate_name(base: &str, used: &mut std::collections::HashSet<String>) -> String {
+        let mut candidate = base.to_string();
+        let mut suffix = 2;
+        while !used.insert(candidate.clone()) {
+            candidate = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        candidate
+    }
+
+    fn allocate_type_name(base: &str, used: &mut std::collections::HashSet<String>) -> String {
+        if used.insert(base.to_string()) {
+            return base.to_string();
+        }
+
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base}{suffix}");
+            if used.insert(candidate.clone()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
+    fn allocate_builder_method(
+        preferred: &str,
+        used: &mut std::collections::HashSet<String>,
+    ) -> syn::Ident {
+        let plain = preferred.strip_prefix("r#").unwrap_or(preferred);
+        let base = if used.contains(preferred) {
+            format!("with_{plain}")
+        } else {
+            preferred.to_string()
+        };
+        let allocated = Self::allocate_name(&base, used);
+        Self::to_field_ident(&allocated)
+    }
+
+    fn allocated_operation_params<'a>(
+        &self,
+        operation: &'a OperationInfo,
+    ) -> Vec<AllocatedOperationParam<'a>> {
+        // Builder-internal storage uses these names. Operation parameters are
+        // positional when delegated to the flat method, so suffixing only the
+        // builder field is safe and prevents duplicate struct fields.
+        let mut used = std::collections::HashSet::from([
+            "client".to_string(),
+            "request".to_string(),
+            "form".to_string(),
+            "body".to_string(),
+        ]);
+        let mut allocated = Vec::new();
+        for location in ["path", "query", "header"] {
+            for parameter in &operation.parameters {
+                if parameter.location != location {
+                    continue;
+                }
+                let raw = self.param_ident_str(parameter);
+                let chosen = Self::allocate_name(&raw, &mut used);
+                allocated.push(AllocatedOperationParam {
+                    param: parameter,
+                    ident: Self::to_field_ident(&chosen),
+                });
+            }
+        }
+        allocated
+    }
+
+    fn builder_param_is_required(parameter: &ParameterInfo) -> bool {
+        // The existing flat signature always emits path parameters as bare
+        // values. Invalid real-world specs sometimes omit `required: true`;
+        // mirror the flat contract so builder delegation remains type-correct.
+        parameter.location == "path" || parameter.required
+    }
+
+    fn builder_param_storage_type(&self, parameter: &ParameterInfo) -> TokenStream {
+        if Self::param_has_impl_as_ref_type(parameter) {
+            quote! { String }
+        } else {
+            self.get_param_rust_type(parameter)
+        }
+    }
+
+    fn param_has_impl_as_ref_type(parameter: &ParameterInfo) -> bool {
+        !matches!(
+            &parameter.query_serialization,
+            Some(
+                crate::analysis::QuerySerialization::FormExplodedArray { .. }
+                    | crate::analysis::QuerySerialization::FormArray { .. }
+            )
+        ) && Self::param_uses_as_ref_str(parameter)
+    }
+
+    fn body_model_plan(
+        &self,
+        operation: &OperationInfo,
+        analysis: &SchemaAnalysis,
+    ) -> Option<BodyModelPlan> {
+        use crate::analysis::{ObjectAdditionalProperties, RequestBodyContent, SchemaType};
+
+        let request_body = operation.request_body.as_ref()?;
+        let (body_name, body_ident) = match request_body {
+            RequestBodyContent::Json { schema_name }
+            | RequestBodyContent::FormUrlEncoded { schema_name } => {
+                (schema_name.as_str(), format_ident!("request"))
+            }
+            RequestBodyContent::Multipart => {
+                return Some(BodyModelPlan {
+                    body_ident: format_ident!("form"),
+                    body_type: quote! { reqwest::multipart::Form },
+                    required_construction: RequiredBodyConstruction::Whole,
+                    optional_fields: Vec::new(),
+                });
+            }
+            RequestBodyContent::OctetStream => {
+                return Some(BodyModelPlan {
+                    body_ident: format_ident!("body"),
+                    body_type: quote! { Vec<u8> },
+                    required_construction: RequiredBodyConstruction::Whole,
+                    optional_fields: Vec::new(),
+                });
+            }
+            RequestBodyContent::TextPlain => {
+                return Some(BodyModelPlan {
+                    body_ident: format_ident!("body"),
+                    body_type: quote! { String },
+                    required_construction: RequiredBodyConstruction::Whole,
+                    optional_fields: Vec::new(),
+                });
+            }
+        };
+        let body_type_name = self.to_rust_type_name(body_name);
+        let body_type = syn::Ident::new(&body_type_name, proc_macro2::Span::call_site());
+        let Some((resolved_name, resolved_schema)) =
+            self.resolve_reference_schema(body_name, analysis)
+        else {
+            return Some(BodyModelPlan {
+                body_ident,
+                body_type: quote! { #body_type },
+                required_construction: RequiredBodyConstruction::Whole,
+                optional_fields: Vec::new(),
+            });
+        };
+
+        let mut optional_fields = Vec::new();
+        let mut stack = std::collections::HashSet::new();
+        self.collect_optional_body_fields(
+            resolved_name,
+            Vec::new(),
+            analysis,
+            &mut stack,
+            &mut optional_fields,
+        );
+
+        let required_construction = match &resolved_schema.schema_type {
+            SchemaType::Object {
+                properties,
+                required,
+                additional_properties,
+            } if !self.is_discriminated_variant(resolved_name, analysis) => {
+                let emitted = self.emitted_object_properties(
+                    resolved_name,
+                    properties,
+                    required,
+                    additional_properties,
+                    analysis,
+                    None,
+                );
+                let required_fields: Vec<_> = emitted
+                    .iter()
+                    .filter(|field| field.is_required)
+                    .map(|field| BodyConstructorParam {
+                        preferred_ident: field.ident.clone(),
+                        value_type: field.field_type.clone(),
+                    })
+                    .collect();
+                if required_fields.is_empty() {
+                    RequiredBodyConstruction::Default
+                } else if emitted.iter().any(|field| !field.is_required)
+                    || !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
+                {
+                    RequiredBodyConstruction::New(required_fields)
+                } else {
+                    RequiredBodyConstruction::Whole
+                }
+            }
+            _ => RequiredBodyConstruction::Whole,
+        };
+
+        Some(BodyModelPlan {
+            body_ident,
+            body_type: quote! { #body_type },
+            required_construction,
+            optional_fields,
+        })
+    }
+
+    fn resolve_reference_schema<'a>(
+        &self,
+        schema_name: &'a str,
+        analysis: &'a SchemaAnalysis,
+    ) -> Option<(&'a str, &'a crate::analysis::AnalyzedSchema)> {
+        let mut current = schema_name;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return None;
+            }
+            let schema = analysis.schemas.get(current)?;
+            if let crate::analysis::SchemaType::Reference { target } = &schema.schema_type {
+                current = target;
+            } else {
+                return Some((current, schema));
+            }
+        }
+    }
+
+    fn collect_optional_body_fields(
+        &self,
+        schema_name: &str,
+        access_path: Vec<syn::Ident>,
+        analysis: &SchemaAnalysis,
+        stack: &mut std::collections::HashSet<String>,
+        output: &mut Vec<BodyFieldPlan>,
+    ) {
+        use crate::analysis::SchemaType;
+        if !stack.insert(schema_name.to_string()) {
+            return;
+        }
+        let Some(schema) = analysis.schemas.get(schema_name) else {
+            stack.remove(schema_name);
+            return;
+        };
+        match &schema.schema_type {
+            SchemaType::Reference { target } => {
+                self.collect_optional_body_fields(target, access_path, analysis, stack, output);
+            }
+            SchemaType::Object {
+                properties,
+                required,
+                additional_properties,
+            } if !self.is_discriminated_variant(schema_name, analysis) => {
+                for field in self.emitted_object_properties(
+                    schema_name,
+                    properties,
+                    required,
+                    additional_properties,
+                    analysis,
+                    None,
+                ) {
+                    if field.is_required {
+                        continue;
+                    }
+                    let mut field_path = access_path.clone();
+                    field_path.push(field.ident.clone());
+                    output.push(BodyFieldPlan {
+                        wire_name: field.wire_name.to_string(),
+                        preferred_method_name: field.ident.to_string(),
+                        value_ident: field.ident.clone(),
+                        value_type: self.generate_property_base_type(
+                            schema_name,
+                            field.wire_name,
+                            field.property,
+                            analysis,
+                        ),
+                        access_path: field_path,
+                    });
+                }
+            }
+            SchemaType::Composition { schemas } => {
+                for (index, schema_ref) in schemas.iter().enumerate() {
+                    let mut nested_path = access_path.clone();
+                    nested_path.push(format_ident!("part_{index}"));
+                    self.collect_optional_body_fields(
+                        &schema_ref.target,
+                        nested_path,
+                        analysis,
+                        stack,
+                        output,
+                    );
+                }
+            }
+            _ => {}
+        }
+        stack.remove(schema_name);
+    }
+
+    fn is_discriminated_variant(&self, schema_name: &str, analysis: &SchemaAnalysis) -> bool {
+        analysis.schemas.values().any(|schema| {
+            matches!(
+                &schema.schema_type,
+                crate::analysis::SchemaType::DiscriminatedUnion { variants, .. }
+                    if variants.iter().any(|variant| variant.type_name == schema_name)
+            )
+        })
     }
 
     /// Emit inline enum types for parameters whose schema is `type: string`

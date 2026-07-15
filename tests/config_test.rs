@@ -1,4 +1,4 @@
-use openapi_to_rust::config::GeneratorSection;
+use openapi_to_rust::config::{BuildersSection, GeneratorSection};
 use openapi_to_rust::type_mapping::{ByteStrategy, DateStrategy};
 use openapi_to_rust::{CodeGenerator, ConfigFile, GeneratorConfig, SchemaAnalyzer, TypeMapper};
 use std::io::Write;
@@ -52,6 +52,10 @@ spec_path = "{}"
 output_dir = "src/generated"
 module_name = "api"
 
+[generator.builders]
+enabled = true
+threshold = 3
+
 [features]
 enable_sse_client = true
 enable_async_client = true
@@ -101,6 +105,13 @@ value = "test-client"
 
     let config = result.unwrap();
     assert_eq!(config.generator.module_name, "api");
+    assert_eq!(
+        config.generator.builders,
+        BuildersSection {
+            enabled: true,
+            threshold: 3,
+        }
+    );
     assert!(config.features.enable_sse_client);
     assert!(config.features.enable_async_client);
     assert!(config.features.enable_specta);
@@ -129,6 +140,55 @@ value = "test-client"
     assert_eq!(config.nullable_overrides.get("Response.error"), Some(&true));
 
     assert_eq!(config.type_mappings.len(), 1);
+
+    let normalized = toml::to_string(&config).unwrap();
+    assert!(normalized.contains("[generator.builders]"));
+    assert!(normalized.contains("enabled = true"));
+    assert!(normalized.contains("threshold = 3"));
+    assert_eq!(
+        config.clone().into_generator_config().builders,
+        config.generator.builders
+    );
+}
+
+#[test]
+fn generator_builders_defaults_and_rejects_unknown_keys() {
+    let mut spec_file = NamedTempFile::new().unwrap();
+    writeln!(spec_file, r#"{{"openapi": "3.0.0"}}"#).unwrap();
+
+    let default_config = format!(
+        r#"[generator]
+spec_path = "{}"
+output_dir = "src/generated"
+module_name = "types"
+
+[features]
+enable_async_client = true"#,
+        spec_file.path().display()
+    );
+    let mut config_file = NamedTempFile::new().unwrap();
+    writeln!(config_file, "{default_config}").unwrap();
+    let config = ConfigFile::load(config_file.path()).unwrap();
+    assert_eq!(config.generator.builders, BuildersSection::default());
+
+    let invalid_config = format!(
+        r#"[generator]
+spec_path = "{}"
+output_dir = "src/generated"
+module_name = "types"
+
+[generator.builders]
+enabled = true
+threshold = 3
+typo = true"#,
+        spec_file.path().display()
+    );
+    let mut invalid_file = NamedTempFile::new().unwrap();
+    writeln!(invalid_file, "{invalid_config}").unwrap();
+    let error = ConfigFile::load(invalid_file.path())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown field `typo`"), "{error}");
 }
 
 #[test]
@@ -384,6 +444,7 @@ fn generator_section_retains_standalone_serde_compatibility() {
         output_dir: "src/generated".into(),
         module_name: "api".into(),
         schema_extensions: vec!["overlay.yaml".into()],
+        builders: BuildersSection::default(),
     };
 
     let serialized = toml::to_string(&section).unwrap();
@@ -392,6 +453,7 @@ fn generator_section_retains_standalone_serde_compatibility() {
     assert_eq!(reparsed.output_dir, section.output_dir);
     assert_eq!(reparsed.module_name, section.module_name);
     assert_eq!(reparsed.schema_extensions, section.schema_extensions);
+    assert_eq!(reparsed.builders, section.builders);
 }
 
 #[test]
