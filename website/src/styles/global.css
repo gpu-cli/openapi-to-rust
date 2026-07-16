@@ -12,13 +12,13 @@
 @layer base {
   :root {
     color-scheme: light;
-    --paper: #f6f1e7;
-    --paper-deep: #ebe4d8;
-    --white: #fffdf8;
+    --paper: #f5f5f2;
+    --paper-deep: #e8e8e2;
+    --white: #ffffff;
     --ink: #101521;
     --ink-soft: #232a38;
-    --muted: #5d625f;
-    --line: #cdc6b9;
+    --muted: #565c5a;
+    --line: #c8c8c1;
     --line-dark: #373d49;
     --rust: #c84c2c;
     --rust-dark: #92331c;
@@ -33,6 +33,17 @@
     --shadow: 0 18px 45px rgb(16 21 33 / 10%);
     --font-sans: "Avenir Next", Avenir, "Segoe UI", Helvetica, Arial, sans-serif;
     --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --space-2xs: 0.25rem;
+    --space-xs: 0.5rem;
+    --space-sm: 0.75rem;
+    --space-md: 1rem;
+    --space-lg: 1.5rem;
+    --space-xl: 2rem;
+    --space-2xl: 3rem;
+    --space-3xl: 4rem;
+    --space-4xl: 6rem;
+    --z-sticky: 50;
+    --z-skip-link: 100;
   }
 
   html {
@@ -42,10 +53,7 @@
 
   body {
     min-width: 320px;
-    background:
-      linear-gradient(to right, rgb(16 21 33 / 3%) 1px, transparent 1px),
-      var(--paper);
-    background-size: min(8vw, 96px) 100%;
+    background: var(--paper);
     color: var(--ink);
     font-family: var(--font-sans);
     font-size: 16px;
@@ -85,7 +93,7 @@
     text-wrap: balance;
   }
 
-  h1 { font-size: clamp(2.8rem, 7.5vw, 6.8rem); }
+  h1 { font-size: clamp(2.8rem, 7.5vw, 6rem); }
   h2 { font-size: clamp(2.1rem, 5vw, 4.4rem); }
   h3 { font-size: clamp(1.3rem, 2vw, 1.65rem); }
   h2[id], h3[id] { scroll-margin-top: 6rem; }
@@ -107,7 +115,7 @@
 
   .skip-link {
     position: fixed;
-    z-index: 100;
+    z-index: var(--z-skip-link);
     top: 0.75rem;
     left: 0.75rem;
     transform: translateY(-180%);
@@ -124,10 +132,10 @@
 @layer components {
   .site-header {
     position: sticky;
-    z-index: 50;
+    z-index: var(--z-sticky);
     top: 0;
     border-bottom: 1px solid rgb(16 21 33 / 16%);
-    background: rgb(246 241 231 / 94%);
+    background: rgb(245 245 242 / 94%);
     backdrop-filter: blur(14px);
   }
 
@@ -141,6 +149,7 @@
 
   .brand {
     display: inline-flex;
+    min-height: 44px;
     align-items: center;
     gap: 0.7rem;
     color: var(--ink);
@@ -272,7 +281,7 @@
 
   .code-block figcaption {
     display: grid;
-    grid-template-columns: 1fr auto 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: center;
     border-bottom: 1px solid var(--line-dark);
     color: var(--code-muted);
@@ -282,11 +291,6 @@
     letter-spacing: 0.04em;
   }
 
-  .window-dots { display: flex; gap: 0.32rem; }
-  .window-dots i { width: 7px; height: 7px; border-radius: 50%; background: #56606e; }
-  .window-dots i:first-child { background: var(--rust); }
-  .window-dots i:nth-child(2) { background: #e8b84f; }
-  .window-dots i:last-child { background: var(--sage); }
   .code-language { justify-self: end; text-transform: uppercase; }
 
   .copy-button {
@@ -307,6 +311,7 @@
   }
 
   .copy-button:hover { border-color: var(--lime); background: #252d3b; color: var(--lime); }
+  .copy-button[data-state="error"] { border-color: #ff9a7d; color: #ffb39f; }
 
   .code-block pre {
     overflow-x: auto;
@@ -444,7 +449,7 @@
   .footer-grid > div:first-child p { max-width: 360px; margin-top: 1.2rem; color: var(--code-muted); }
   .footer-grid h2 { margin-bottom: 1rem; color: var(--code-muted); font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.09em; text-transform: uppercase; }
   .footer-grid > div:not(:first-child) { display: flex; flex-direction: column; align-items: flex-start; gap: 0.65rem; }
-  .footer-grid a { color: var(--code-text); font-size: 0.86rem; text-decoration: none; }
+  .footer-grid a { display: inline-flex; min-height: 32px; align-items: center; color: var(--code-text); font-size: 0.86rem; text-decoration: none; }
   .footer-grid a:hover { color: var(--lime); }
 
   .footer-bottom {
@@ -516,11 +521,13 @@
 }
 
 @media (max-width: 560px) {
-  body { background-size: 72px 100%; }
-  .shell { width: min(calc(100% - 1.25rem), var(--shell)); }
+  .shell { width: min(calc(100% - 2rem), var(--shell)); }
   .brand > span:last-child { font-size: 0.78rem; }
   .button-row .button { width: 100%; }
   .page-hero { padding-top: 2rem; }
+  .code-block figcaption { grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-xs); }
+  .code-language { display: none; }
+  .copy-button { margin: -0.55rem -0.75rem -0.55rem 0; }
   .footer-grid { grid-template-columns: 1fr; }
   .footer-grid > div:first-child { grid-column: auto; }
   .footer-bottom { flex-direction: column; }

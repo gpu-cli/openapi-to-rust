@@ -10,7 +10,6 @@ const { label = "Terminal", language = "shell", code } = Astro.props;
 
 <figure class="code-block">
   <figcaption>
-    <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
     <span>{label}</span>
     <span class="code-language">{language}</span>
     <button class="copy-button" type="button" aria-label={`Copy ${label} code`} data-copy-button>
@@ -34,12 +33,14 @@ const { label = "Terminal", language = "shell", code } = Astro.props;
         if (label) label.textContent = "Copied";
         if (status) status.textContent = "Code copied to clipboard.";
       } catch {
+        button.dataset.state = "error";
+        if (label) label.textContent = "Copy failed";
         if (status) status.textContent = "Copy failed. Select the code and copy it manually.";
-        return;
       }
 
       window.setTimeout(() => {
         if (label) label.textContent = "Copy";
+        delete button.dataset.state;
       }, 1800);
     });
   });
