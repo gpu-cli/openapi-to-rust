@@ -1,0 +1,145 @@
+---
+import DocsLayout from "../layouts/DocsLayout.astro";
+import CodeBlock from "../components/CodeBlock.astro";
+
+const serverConfig = `[generator]
+spec_path = "openapi.yaml"
+output_dir = "src/generated"
+module_name = "api"
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+operations = [
+  "createResponse",
+  "GET /v1/responses/{response_id}",
+  "tag:Files",
+]
+prune_models = true`;
+
+const implementation = `use generated::server::{
+    build_router, CreateResponseResponse, ResponsesApi,
+};
+
+#[derive(Clone)]
+struct AppState;
+
+#[axum::async_trait]
+impl ResponsesApi for AppState {
+    async fn create_response(
+        &self,
+        body: CreateResponse,
+    ) -> CreateResponseResponse {
+        CreateResponseResponse::Ok(build_response(body))
+    }
+}
+
+let app = build_router(AppState);`;
+
+const toc = [
+  { id: "what", label: "What it generates" },
+  { id: "configure", label: "Select operations" },
+  { id: "implement", label: "Implement the trait" },
+  { id: "responses", label: "Typed responses" },
+  { id: "sse", label: "SSE responses" },
+  { id: "client-server", label: "Client and server" },
+  { id: "limits", label: "Limits" },
+];
+---
+
+<DocsLayout
+  title="OpenAPI to Axum Generator for Rust | Server Scaffolding"
+  description="Generate Axum server scaffolding from an OpenAPI 3.0 or 3.1 document: typed traits, response enums, routes, parameter extraction, and SSE support."
+  h1="Generate an Axum server from OpenAPI"
+  lead="Start from an existing OpenAPI contract, select the operations your service hosts, and generate the typed Axum boundary. You keep the business logic; the generator keeps routes and wire types aligned."
+  canonicalPath="/openapi-to-axum"
+  category="Guide"
+  {toc}
+>
+  <h2 id="what">What the Axum generator creates</h2>
+  <p>
+    openapi-to-rust is a spec-first Axum generator: the input is an OpenAPI YAML or JSON document and the output is Rust server scaffolding.
+    For selected operations, it emits:
+  </p>
+  <ul>
+    <li>A service trait per OpenAPI tag.</li>
+    <li>A typed response enum per operation, with variants tied to documented status codes.</li>
+    <li>Axum handlers and a combined <code>build_router(...)</code> factory.</li>
+    <li>Path, query, header, and request-body extraction.</li>
+    <li>An HTTP 400 short-circuit when required parameters are missing or invalid at the handler boundary.</li>
+    <li>SSE-ready response variants when streaming behavior is declared.</li>
+  </ul>
+  <p>
+    Shared request and response models live in the same generated <code>types.rs</code> used by the optional client. Your implementation remains ordinary Rust behind the generated trait.
+  </p>
+
+  <h2 id="configure">Select the operations your server hosts</h2>
+  <p>Add a <code>[server]</code> section to <code>openapi-to-rust.toml</code>:</p>
+  <CodeBlock label="openapi-to-rust.toml" language="toml" code={serverConfig} />
+  <p>
+    Selectors accept an exact <code>operationId</code>, an exact <code>METHOD /path</code>, or an entire
+    <code>tag:name</code>. With <code>prune_models = true</code>, schemas unreachable from the selected surface are omitted.
+  </p>
+  <p>Use the CLI to inspect and update the selection without hand-editing TOML:</p>
+  <CodeBlock label="Terminal" code={`openapi-to-rust server list --tag Responses
+openapi-to-rust server add createResponse
+openapi-to-rust server add --all-tag Files
+openapi-to-rust server remove deleteFile
+openapi-to-rust generate`} />
+
+  <h2 id="implement">Implement the generated Axum trait</h2>
+  <p>
+    Implement each selected operation on your application state, then pass that state to the generated router factory.
+    The exact types come from the OpenAPI contract, while authorization, storage, orchestration, and domain behavior remain yours.
+  </p>
+  <CodeBlock label="server.rs" language="rust" code={implementation} />
+  <p>
+    Tags let a larger service split implementation across focused traits. The combined router joins the selected tag routers so the application can serve one Axum <code>Router</code>.
+  </p>
+
+  <h2 id="responses">Return status-code-typed responses</h2>
+  <p>
+    Instead of returning an unstructured status and body pair, each generated operation exposes an enum whose variants correspond
+    to documented responses. A successful JSON response, a typed 4xx body, and an empty 204 become distinct Rust variants.
+  </p>
+  <p>
+    This makes the implementation’s possible wire responses visible in its return type. It does not add general runtime schema
+    validation: minimums, maximums, patterns, and similar constraints are included as documentation rather than validators.
+  </p>
+
+  <h2 id="sse">Generate SSE-ready Axum responses</h2>
+  <p>
+    When an operation declares <code>text/event-stream</code>, the response enum can include an SSE stream variant. The generated
+    <code>sse_response</code> helper accepts a stream of Axum SSE events and produces the payload expected by that variant.
+  </p>
+  <p>
+    Some public API documents omit streaming media types even when the live API supports them. Use a small overlay to add the missing
+    response content entry before generation. The included Anthropic Messages example uses this approach rather than maintaining a full fork of the upstream document.
+  </p>
+
+  <h2 id="client-server">Generate a client and server together</h2>
+  <p>
+    You can enable the async client and Axum server in the same configuration. Client and server selectors are independent, and model
+    pruning retains schemas reachable from either selected surface. This works well for gateways, protocol adapters, and services that host part of an API while calling another part.
+  </p>
+  <p>
+    See the complete
+    <a href="https://github.com/gpu-cli/openapi-to-rust/tree/main/examples/server-openai-responses">OpenAI Responses example</a>
+    for multi-tag routing, request bodies, SSE, query parameters, and required-parameter handling.
+  </p>
+
+  <h2 id="limits">Current server-generation limits</h2>
+  <ul>
+    <li>Axum is the only generated server framework.</li>
+    <li>Server generation is opt-in and the crate is pre-1.0.</li>
+    <li>OpenAPI 2.0 is not accepted.</li>
+    <li>Modeling a security scheme does not generate your authorization policy or credential storage.</li>
+    <li>OpenAPI 3.2 support is experimental; verify generated behavior for less-common fields.</li>
+  </ul>
+  <p>
+    Compare this workflow with OpenAPI Generator’s separate beta <code>rust-axum</code> target in the
+    <a href="/compare/openapi-generator">source-linked Rust generator comparison</a>.
+  </p>
+</DocsLayout>

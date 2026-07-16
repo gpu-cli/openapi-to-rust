@@ -1,0 +1,69 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import Breadcrumbs from "../../components/Breadcrumbs.astro";
+
+const title = "openapi-to-rust Documentation | Rust OpenAPI Codegen";
+const description = "Learn how to generate typed Rust models, Reqwest clients, SSE streams, and Axum servers from OpenAPI 3.0 and 3.1 specifications.";
+---
+
+<BaseLayout {title} {description} canonicalPath="/docs">
+  <div class="shell"><Breadcrumbs items={[{ label: "Documentation" }]} /></div>
+  <header class="page-hero shell">
+    <p class="eyebrow">Documentation</p>
+    <h1>openapi-to-rust documentation</h1>
+    <p class="lead">Start with one command, then shape generated clients and servers around the API surface your Rust project actually uses.</p>
+  </header>
+
+  <section class="shell docs-grid" aria-labelledby="start-title">
+    <div class="docs-lead">
+      <span>01</span>
+      <h2 id="start-title">Start generating</h2>
+      <p>Install the Cargo CLI, load a local or remote OpenAPI document, and compile the resulting Rust modules.</p>
+    </div>
+    <div class="docs-links">
+      <a href="/docs/getting-started"><span>Quick start</span><b>Generate your first Rust client</b><i aria-hidden="true">→</i></a>
+      <a href="/docs/rust-client-generator"><span>Client</span><b>Configure typed Reqwest methods</b><i aria-hidden="true">→</i></a>
+      <a href="/openapi-to-axum"><span>Server</span><b>Generate selected Axum operations</b><i aria-hidden="true">→</i></a>
+    </div>
+  </section>
+
+  <section class="shell docs-grid" aria-labelledby="understand-title">
+    <div class="docs-lead">
+      <span>02</span>
+      <h2 id="understand-title">Understand support</h2>
+      <p>See how OpenAPI schema shapes map to Rust and where experimental or intentionally unsupported behavior begins.</p>
+    </div>
+    <div class="docs-links">
+      <a href="/guides/openapi-3-1-rust"><span>OpenAPI 3.1</span><b>JSON Schema features and caveats</b><i aria-hidden="true">→</i></a>
+      <a href="/compatibility"><span>Evidence</span><b>Real-world corpus and CI tiers</b><i aria-hidden="true">→</i></a>
+      <a href="/compare/openapi-generator"><span>Comparison</span><b>Choose the right Rust generator</b><i aria-hidden="true">→</i></a>
+    </div>
+  </section>
+
+  <section class="docs-install">
+    <div class="shell install-grid">
+      <div><p class="eyebrow">Install</p><h2>One crate. No Java runtime.</h2></div>
+      <pre><code>cargo install --locked openapi-to-rust</code></pre>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .docs-grid { display: grid; grid-template-columns: 0.75fr 1.25fr; gap: clamp(3rem, 8vw, 8rem); border-top: 1px solid var(--ink); padding: 3.5rem 0 5rem; }
+  .docs-lead > span { color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.72rem; }
+  .docs-lead h2 { margin-top: 1rem; font-size: clamp(2rem, 4vw, 3.2rem); }
+  .docs-lead p { margin-top: 1rem; color: var(--muted); }
+  .docs-links { border-top: 1px solid var(--line); }
+  .docs-links a { display: grid; grid-template-columns: 120px 1fr auto; align-items: center; gap: 1rem; min-height: 88px; border-bottom: 1px solid var(--line); text-decoration: none; }
+  .docs-links span { color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.7rem; }
+  .docs-links b { font-size: 0.95rem; }
+  .docs-links i { color: var(--rust-dark); font-style: normal; }
+  .docs-links a:hover b { text-decoration: underline; text-underline-offset: 0.2em; }
+  .docs-install { margin-top: 3rem; background: var(--ink); color: var(--white); padding: 5rem 0; }
+  .docs-install .eyebrow { color: var(--lime); }
+  .install-grid { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 3rem; }
+  .install-grid h2 { font-size: clamp(2rem, 4vw, 3.4rem); }
+  .install-grid pre { overflow-x: auto; border: 1px solid var(--line-dark); border-radius: 5px; background: #080b11; padding: 1.2rem; color: var(--code-text); font-size: 0.85rem; }
+  @media (max-width: 760px) { .docs-grid, .install-grid { grid-template-columns: 1fr; } .docs-links a { grid-template-columns: 90px 1fr auto; } }
+  @media (max-width: 480px) { .docs-links a { grid-template-columns: 1fr auto; padding: 0.8rem 0; } .docs-links span { grid-column: 1 / -1; } }
+</style>

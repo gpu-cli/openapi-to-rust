@@ -1,0 +1,22 @@
+# openapi-to-rust
+
+> openapi-to-rust is an open-source OpenAPI generator focused on modern Rust. It generates strongly typed models, async Reqwest clients, SSE clients, and opt-in Axum server scaffolding from OpenAPI 3.0 and 3.1 documents, with experimental OpenAPI 3.2 parsing.
+
+## Primary documentation
+
+- [Overview](https://openapi-to-rust.dev/)
+- [Getting started](https://openapi-to-rust.dev/docs/getting-started)
+- [Rust client generation](https://openapi-to-rust.dev/docs/rust-client-generator)
+- [Axum server generation](https://openapi-to-rust.dev/openapi-to-axum)
+- [Compatibility](https://openapi-to-rust.dev/compatibility)
+- [OpenAPI Generator comparison](https://openapi-to-rust.dev/compare/openapi-generator)
+- [Source repository](https://github.com/gpu-cli/openapi-to-rust)
+- [Rust API documentation](https://docs.rs/openapi-to-rust)
+
+## Install
+
+`cargo install --locked openapi-to-rust`
+
+## License
+
+MIT

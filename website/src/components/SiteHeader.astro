@@ -1,0 +1,42 @@
+---
+const path = Astro.url.pathname;
+
+const links = [
+  { href: "/docs", label: "Docs" },
+  { href: "/compatibility", label: "Compatibility" },
+  { href: "/compare/openapi-generator", label: "Compare" },
+];
+
+const isActive = (href: string) => path === href || path.startsWith(`${href}/`);
+---
+
+<header class="site-header">
+  <div class="shell header-inner">
+    <a class="brand" href="/" aria-label="openapi-to-rust home">
+      <span class="brand-mark" aria-hidden="true"><span>{`{`}</span><b>→</b><span>rs</span></span>
+      <span>openapi-to-rust</span>
+    </a>
+
+    <nav class="desktop-nav" aria-label="Primary navigation">
+      {links.map((link) => (
+        <a href={link.href} aria-current={isActive(link.href) ? "page" : undefined}>
+          {link.label}
+        </a>
+      ))}
+      <a class="nav-github" href="https://github.com/gpu-cli/openapi-to-rust">
+        GitHub
+        <span aria-hidden="true">↗</span>
+      </a>
+    </nav>
+
+    <details class="mobile-nav">
+      <summary aria-label="Open navigation menu">
+        <span></span><span></span><span></span>
+      </summary>
+      <nav aria-label="Mobile navigation">
+        {links.map((link) => <a href={link.href} aria-current={isActive(link.href) ? "page" : undefined}>{link.label}</a>)}
+        <a href="https://github.com/gpu-cli/openapi-to-rust">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </details>
+  </div>
+</header>

@@ -1,0 +1,9 @@
+{
+  "name": "openapi-to-rust",
+  "short_name": "openapi-to-rust",
+  "description": "Generate typed Rust models, async clients, and Axum servers from OpenAPI.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3efe5",
+  "theme_color": "#101521"
+}

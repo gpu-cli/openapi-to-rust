@@ -1,0 +1,3 @@
+# The Vercel project is the Astro app, not the Rust workspace or local worktrees.
+/*
+!/website

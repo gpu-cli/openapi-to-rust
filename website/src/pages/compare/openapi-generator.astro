@@ -1,0 +1,163 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import CodeBlock from "../../components/CodeBlock.astro";
+
+const toc = [
+  { id: "short-answer", label: "Short answer" },
+  { id: "comparison", label: "Feature comparison" },
+  { id: "schema", label: "Schema composition" },
+  { id: "client-server", label: "Client and server" },
+  { id: "installation", label: "Installation" },
+  { id: "choose", label: "Which should you choose?" },
+  { id: "sources", label: "Sources" },
+];
+---
+
+<DocsLayout
+  title="OpenAPI Generator Rust Alternative | Feature Comparison"
+  description="Compare openapi-to-rust with OpenAPI Generator's Rust client and rust-axum server targets: schema support, installation, clients, servers, SSE, validation, and scope."
+  h1="openapi-to-rust vs OpenAPI Generator for Rust"
+  lead="Both projects generate Rust from OpenAPI, but they optimize for different jobs. This dated comparison separates OpenAPI Generator’s rust client and rust-axum server targets from the Rust-focused openapi-to-rust workflow."
+  canonicalPath="/compare/openapi-generator"
+  category="Comparison"
+  {toc}
+>
+  <div class="callout">
+    <strong>Independent project</strong>
+    <p>openapi-to-rust is not affiliated with OpenAPI Generator, OpenAPI Tools, or the OpenAPI Initiative. OpenAPI Generator is a trademark or project name of its respective maintainers.</p>
+  </div>
+
+  <h2 id="short-answer">The short answer</h2>
+  <p>
+    Choose <strong>OpenAPI Generator</strong> when you need one established tool across many languages, Swagger/OpenAPI 2.0 input,
+    ecosystem integrations, or its template customization model. Its published generator list includes more than 50 client targets and multiple Rust server targets.
+  </p>
+  <p>
+    Choose <strong>openapi-to-rust</strong> when the project is Rust-only and you want a Cargo-installed tool that can generate shared
+    models, selected async Reqwest client operations, selected Axum server operations, typed errors, and SSE support through one configuration.
+  </p>
+  <p>Neither tool is universally “best.” Test your actual specification: composition, parameter serialization, auth, and response shapes matter more than a generic feature count.</p>
+
+  <h2 id="comparison">Feature comparison</h2>
+  <p>
+    The OpenAPI Generator columns below summarize its published generator documentation as reviewed on July 15, 2026.
+    Those matrices can lag implementation, so links to the primary pages are included below the table.
+  </p>
+  <p class="scroll-hint" id="comparison-scroll-hint">Scroll horizontally to compare all 3 generators.</p>
+  <div class="table-wrap comparison-table" tabindex="0" aria-describedby="comparison-scroll-hint">
+    <table>
+      <caption>Rust code generator comparison, last verified July 15, 2026</caption>
+      <thead>
+        <tr><th scope="col">Capability</th><th scope="col">openapi-to-rust 0.6</th><th scope="col">OpenAPI Generator rust</th><th scope="col">OpenAPI Generator rust-axum</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Primary scope</th><td>Rust-focused client + server codegen</td><td>Rust client generator</td><td>Rust Axum server generator</td></tr>
+        <tr><th scope="row">Published maturity</th><td>Pre-1.0 crate</td><td>Metadata: stable; help text: beta</td><td>Beta</td></tr>
+        <tr><th scope="row">Install path</th><td>Cargo; Rust toolchain required</td><td colspan="2">npm, Homebrew, Docker, JAR, and other CLI options; most paths wrap or run Java</td></tr>
+        <tr><th scope="row">OpenAPI 2.0 input</th><td>No</td><td>Documented OAS2 + OAS3 features</td><td>Documented OAS2 + OAS3 features</td></tr>
+        <tr><th scope="row">Async HTTP client</th><td>Reqwest</td><td>Reqwest, Reqwest trait, Hyper 1.x, or Hyper 0.x</td><td>Not its purpose</td></tr>
+        <tr><th scope="row">Axum server</th><td>Opt-in selected-operation scaffolding</td><td>No; separate target</td><td>Yes</td></tr>
+        <tr><th scope="row">One config for client + server</th><td>Yes, with shared <code>types.rs</code></td><td colspan="2">Separate generator targets</td></tr>
+        <tr><th scope="row">Operation selection + model pruning</th><td>Exact ID, method/path, or tag</td><td>Global generator filtering exists; behavior differs</td><td>Global generator filtering exists; behavior differs</td></tr>
+        <tr><th scope="row">SSE-specific generation</th><td>Client reconnection + Axum response variants</td><td>Not documented on the Rust generator page</td><td>Not documented on the rust-axum page</td></tr>
+        <tr><th scope="row">Per-operation typed API errors</th><td>Yes</td><td>Multiple 2xx response option documented; equivalent typed error surface not documented</td><td>Typed server responses</td></tr>
+        <tr><th scope="row">Runtime request validation</th><td>No; constraints become docs</td><td>Not documented as a client feature</td><td>Yes by default; can be disabled</td></tr>
+        <tr><th scope="row">Real-world corpus policy</th><td>54 supported OpenAPI docs; two compile per PR, all weekly</td><td colspan="2">Large upstream project test suite; no equivalent claim made here</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="schema">Compare published schema-composition support carefully</h2>
+  <p>
+    OpenAPI Generator’s current <code>rust</code> client matrix marks <code>oneOf</code> supported while marking polymorphism,
+    generic unions, <code>allOf</code>, and <code>anyOf</code> unsupported. Its separate <code>rust-axum</code> matrix marks
+    <code>allOf</code>, <code>anyOf</code>, and <code>oneOf</code> supported while marking polymorphism and generic unions unsupported.
+  </p>
+  <p>
+    openapi-to-rust has focused fixtures for tested <code>oneOf</code>, <code>anyOf</code>, <code>allOf</code>, discriminator,
+    mixed scalar/object, and extensible-enum patterns. That does not mean every possible JSON Schema composition is supported.
+    Review snapshots and compile your exact document before choosing on this dimension.
+  </p>
+  <blockquote>
+    <p>Generator documentation uses broad feature labels. A minimized fixture using your actual union shape is stronger evidence than any yes/no matrix.</p>
+  </blockquote>
+
+  <h2 id="client-server">One Rust surface or separate targets</h2>
+  <p>
+    OpenAPI Generator exposes <code>rust</code> for a client and <code>rust-axum</code> for an Axum server. This separation fits a
+    multi-language architecture and gives each generator its own templates and options.
+  </p>
+  <p>
+    openapi-to-rust can enable client and server generation together. Each side selects its own operations and both use the same
+    generated model module. Model pruning computes the union of schemas reachable from selected client and server operations.
+    That makes the combined workflow useful for Rust gateways and services that consume one portion of a contract while implementing another.
+  </p>
+  <p>
+    The tradeoff is scope: openapi-to-rust only targets Reqwest clients and Axum servers. OpenAPI Generator offers more HTTP libraries,
+    languages, build plugins, and templating options.
+  </p>
+
+  <h2 id="installation">Cargo-native installation versus a multi-platform CLI</h2>
+  <div class="comparison-commands">
+    <CodeBlock label="openapi-to-rust" code={`cargo install --locked openapi-to-rust
+openapi-to-rust generate openapi.yaml`} />
+    <CodeBlock label="OpenAPI Generator" code={`npm install @openapitools/openapi-generator-cli -g
+openapi-generator-cli generate \\
+  -i openapi.yaml -g rust -o ./generated`} />
+  </div>
+  <p>
+    The Cargo route keeps a Rust-only toolchain but compiles locally and currently has no prebuilt binary. OpenAPI Generator offers more
+    installation choices, including npm, Homebrew, Docker, a JAR, PyPI wrappers, and build-system plugins. Many paths require or wrap a Java runtime.
+  </p>
+
+  <h2 id="choose">Which Rust OpenAPI generator should you choose?</h2>
+  <div class="decision-grid">
+    <div>
+      <h3>Start with openapi-to-rust if…</h3>
+      <ul>
+        <li>Your toolchain and generated targets are Rust-only.</li>
+        <li>You want Reqwest and Axum with shared types.</li>
+        <li>Selected operations, typed errors, or SSE are central requirements.</li>
+        <li>Your OpenAPI 3.1 spec relies on the tested real-world union patterns.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Start with OpenAPI Generator if…</h3>
+      <ul>
+        <li>You generate SDKs or servers in several languages.</li>
+        <li>You require Swagger/OpenAPI 2.0 input.</li>
+        <li>You need Hyper, Reqwest trait output, Gradle/Maven integration, or custom Mustache templates.</li>
+        <li>The rust-axum generator’s runtime validation matches your server requirements.</li>
+      </ul>
+    </div>
+  </div>
+  <p>
+    Run both against a pinned copy of your document, compile the output, and compare the generated API for the five most complex operations.
+    For openapi-to-rust, follow the <a href="/docs/getting-started">30-second client generation guide</a>.
+  </p>
+
+  <h2 id="sources">Primary sources</h2>
+  <ul>
+    <li><a href="https://openapi-generator.tech/docs/generators/rust/">OpenAPI Generator: rust client documentation</a></li>
+    <li><a href="https://openapi-generator.tech/docs/generators/rust-axum/">OpenAPI Generator: rust-axum server documentation</a></li>
+    <li><a href="https://openapi-generator.tech/docs/installation/">OpenAPI Generator: CLI installation options</a></li>
+    <li><a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/README.md">openapi-to-rust README and feature documentation</a></li>
+    <li><a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/.github/workflows/ci.yml">openapi-to-rust CI workflow</a></li>
+  </ul>
+  <p class="verification-note">Last source review: July 15, 2026. If an upstream page has changed, please <a href="https://github.com/gpu-cli/openapi-to-rust/issues">report the stale comparison</a>.</p>
+</DocsLayout>
+
+<style>
+  .comparison-table { margin-block: 2rem; }
+  .comparison-table table { min-width: 920px; }
+  .comparison-table th:first-child { position: sticky; z-index: 1; left: 0; box-shadow: 1px 0 0 var(--line); }
+  .comparison-table thead th:first-child { z-index: 2; }
+  .scroll-hint { margin-bottom: -1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.74rem; }
+  .comparison-commands { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-block: 2rem; }
+  .decision-grid > div { border: 1px solid var(--ink); border-radius: 5px; background: var(--white); padding: 1.3rem; }
+  .decision-grid h3 { margin-top: 0; font-size: 1.25rem; }
+  .decision-grid ul { margin-top: 1rem; }
+  .verification-note { border-top: 1px solid var(--line); padding-top: 1rem; font-family: var(--font-mono); font-size: 0.76rem; }
+  @media (max-width: 720px) { .comparison-commands, .decision-grid { grid-template-columns: 1fr; } }
+</style>

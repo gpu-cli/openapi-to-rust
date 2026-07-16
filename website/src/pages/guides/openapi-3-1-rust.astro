@@ -1,0 +1,135 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import CodeBlock from "../../components/CodeBlock.astro";
+
+const nullable = `components:
+  schemas:
+    Event:
+      type: object
+      properties:
+        received_at:
+          type: [string, "null"]
+          format: date-time
+        payload:
+          oneOf:
+            - $ref: '#/components/schemas/TextPayload'
+            - $ref: '#/components/schemas/ImagePayload'`;
+
+const toc = [
+  { id: "versions", label: "Accepted versions" },
+  { id: "json-schema", label: "JSON Schema 2020-12" },
+  { id: "composition", label: "Schema composition" },
+  { id: "formats", label: "Formats and scalars" },
+  { id: "modeled", label: "Modeled vs emitted" },
+  { id: "openapi-32", label: "OpenAPI 3.2" },
+  { id: "verify", label: "Verify your spec" },
+];
+---
+
+<DocsLayout
+  title="OpenAPI 3.1 to Rust Code Generator | Schema Support"
+  description="Understand how openapi-to-rust maps OpenAPI 3.1 and JSON Schema 2020-12 types, unions, discriminators, formats, nullable fields, and constraints to Rust."
+  h1="OpenAPI 3.0 and 3.1 support in Rust"
+  lead="openapi-to-rust accepts OpenAPI 3.0 and 3.1 documents and models the JSON Schema vocabulary used by OpenAPI 3.1. This guide separates fields the parser understands from behavior that changes generated Rust."
+  canonicalPath="/guides/openapi-3-1-rust"
+  category="Guide"
+  {toc}
+>
+  <h2 id="versions">Accepted OpenAPI versions</h2>
+  <div class="table-wrap">
+    <table>
+      <caption>OpenAPI version status</caption>
+      <thead><tr><th scope="col">Version</th><th scope="col">Status</th><th scope="col">What that means</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">3.0.x</th><td><span class="status">Supported</span></td><td>Accepted for typed model and operation generation.</td></tr>
+        <tr><th scope="row">3.1.x</th><td><span class="status">Supported</span></td><td>Accepted with 3.1 nullable types and modeled JSON Schema 2020-12 fields.</td></tr>
+        <tr><th scope="row">3.2.x</th><td><span class="status status-experimental">Experimental</span></td><td>Parses with a warning; selected new behavior is emitted.</td></tr>
+        <tr><th scope="row">2.0 / Swagger</th><td>Not supported</td><td>Convert the document to OpenAPI 3 before generation.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    “Supported” does not mean every valid extension or uncommon keyword changes code generation. Unknown fields are retained where
+    possible for compatibility, but an unrecognized or analysis-only field may not affect generated Rust.
+  </p>
+
+  <h2 id="json-schema">JSON Schema 2020-12 shapes</h2>
+  <p>
+    OpenAPI 3.1 aligns its Schema Object with JSON Schema 2020-12. One visible change is nullable typing:
+    a field can use <code>type: [string, "null"]</code> instead of OpenAPI 3.0’s <code>nullable: true</code>.
+  </p>
+  <CodeBlock label="openapi.yaml" language="yaml" code={nullable} />
+  <p>
+    The type array is used to determine Rust optionality. The parser also has typed representations for keywords including
+    <code>prefixItems</code>, <code>contains</code>, <code>patternProperties</code>, <code>dependentSchemas</code>,
+    <code>if</code>/<code>then</code>/<code>else</code>, <code>$defs</code>, and dynamic reference fields.
+  </p>
+  <div class="callout">
+    <strong>Typed is not the same as enforced</strong>
+    <p>Some JSON Schema keywords are preserved in the internal model without changing the emitted Rust type or adding runtime validation. Dynamic-reference anchor-scope resolution remains incomplete.</p>
+  </div>
+
+  <h2 id="composition">oneOf, anyOf, allOf, and discriminators</h2>
+  <p>
+    Composition is one of the reasons this generator is tested against large, real-world documents. A union of object schemas with
+    a discriminator can become a Serde tagged enum. A union that mixes a string enum and object variants becomes an untagged enum so both wire shapes deserialize.
+  </p>
+  <ul>
+    <li><code>oneOf</code> and <code>anyOf</code> can produce Rust enums based on the branch shapes.</li>
+    <li><code>allOf</code> properties are combined when the shape can be represented safely.</li>
+    <li>Explicit discriminator mappings and implicit discriminators inferred from <code>const</code> properties are handled for tested patterns.</li>
+    <li>Inline request, response, and parameter objects receive generated Rust names.</li>
+    <li>Open-ended string enums can include a <code>Custom(String)</code> fallback.</li>
+  </ul>
+  <p>
+    Union behavior depends on the exact schema shape. Add a focused fixture before relying on an uncommon combination; the repository’s
+    snapshot suite is the clearest source of expected generated output.
+  </p>
+
+  <h2 id="formats">Map OpenAPI formats to Rust scalars</h2>
+  <div class="table-wrap">
+    <table>
+      <caption>Selected default scalar mappings</caption>
+      <thead><tr><th scope="col">OpenAPI schema</th><th scope="col">Generated Rust</th></tr></thead>
+      <tbody>
+        <tr><th scope="row"><code>string / date-time</code></th><td><code>chrono::DateTime&lt;chrono::Utc&gt;</code></td></tr>
+        <tr><th scope="row"><code>string / uri</code></th><td><code>url::Url</code></td></tr>
+        <tr><th scope="row"><code>string / uuid</code></th><td><code>uuid::Uuid</code></td></tr>
+        <tr><th scope="row"><code>string / binary</code></th><td><code>bytes::Bytes</code></td></tr>
+        <tr><th scope="row"><code>string / byte</code></th><td><code>Vec&lt;u8&gt;</code> with Base64 encoding</td></tr>
+        <tr><th scope="row">unsigned integer formats</th><td><code>u32</code> or <code>u64</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Every format mapping can be opted out in TOML when a project prefers raw strings or a different domain type.</p>
+
+  <h2 id="modeled">Separate modeled fields from runtime support</h2>
+  <p>
+    The internal OpenAPI model includes components such as servers, security schemes, OAuth flows, encodings, headers, callbacks,
+    links, tags, external documentation, and discriminators. Modeling lets the parser retain and analyze those fields; it does not
+    promise a runtime implementation for every behavior.
+  </p>
+  <p>
+    For example, generated clients can apply Bearer, API-key, and custom header authentication, but modeled mutual TLS credentials are
+    not configured by the generated client. Schema constraints such as <code>minimum</code>, <code>maxLength</code>, and
+    <code>pattern</code> are emitted as documentation and are not runtime validators.
+  </p>
+
+  <h2 id="openapi-32">Experimental OpenAPI 3.2 support</h2>
+  <p>
+    OpenAPI 3.2 documents parse with an experimental warning. Selected deltas are typed, and a smaller set changes generation.
+    The <code>QUERY</code> method and additional Path Item operations, for example, can emit client methods through
+    <code>reqwest::Method::from_bytes(...)</code>. Other new fields may only be captured for forward compatibility.
+  </p>
+  <p>Do not describe this as full OpenAPI 3.2 support. Review generated code and add a fixture for every 3.2 feature your application depends on.</p>
+
+  <h2 id="verify">Verify the contract you depend on</h2>
+  <ol>
+    <li>Run <code>openapi-to-rust generate openapi.yaml --dry-run</code> to inspect planned output.</li>
+    <li>Generate and run <code>cargo check</code> in your application.</li>
+    <li>Add serialization round-trip tests for high-risk union and parameter shapes.</li>
+    <li>Use <code>--check</code> in CI to detect drift.</li>
+    <li>Contribute a minimized fixture when an uncommon keyword affects your API.</li>
+  </ol>
+  <p>For broader evidence, see the <a href="/compatibility">real-world compatibility corpus and CI policy</a>.</p>
+</DocsLayout>

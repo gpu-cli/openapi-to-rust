@@ -1,0 +1,46 @@
+---
+interface Props {
+  label?: string;
+  language?: string;
+  code: string;
+}
+
+const { label = "Terminal", language = "shell", code } = Astro.props;
+---
+
+<figure class="code-block">
+  <figcaption>
+    <span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span>{label}</span>
+    <span class="code-language">{language}</span>
+    <button class="copy-button" type="button" aria-label={`Copy ${label} code`} data-copy-button>
+      <span data-copy-label>Copy</span>
+    </button>
+  </figcaption>
+  <pre><code>{code}</code></pre>
+  <p class="sr-only" aria-live="polite" data-copy-status></p>
+</figure>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>("[data-copy-button]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const figure = button.closest(".code-block");
+      const code = figure?.querySelector("code")?.textContent ?? "";
+      const label = button.querySelector<HTMLElement>("[data-copy-label]");
+      const status = figure?.querySelector<HTMLElement>("[data-copy-status]");
+
+      try {
+        await navigator.clipboard.writeText(code);
+        if (label) label.textContent = "Copied";
+        if (status) status.textContent = "Code copied to clipboard.";
+      } catch {
+        if (status) status.textContent = "Copy failed. Select the code and copy it manually.";
+        return;
+      }
+
+      window.setTimeout(() => {
+        if (label) label.textContent = "Copy";
+      }, 1800);
+    });
+  });
+</script>

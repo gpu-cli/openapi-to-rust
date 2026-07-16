@@ -1,11 +1,13 @@
-# openapi-to-rust
+# openapi-to-rust — OpenAPI generator for Rust
 
 [![CI](https://github.com/gpu-cli/openapi-to-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/gpu-cli/openapi-to-rust/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/openapi-to-rust.svg)](https://crates.io/crates/openapi-to-rust)
 [![docs.rs](https://docs.rs/openapi-to-rust/badge.svg)](https://docs.rs/openapi-to-rust)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A Rust code generator that turns OpenAPI 3.0/3.1 (and experimental 3.2) specifications into strongly-typed structs, async HTTP clients, SSE streaming clients, **and opt-in Axum server scaffolding** — including for the messy, real-world specs everyone actually ships.
+`openapi-to-rust` is an OpenAPI generator for Rust that turns OpenAPI 3.0/3.1 (and experimental 3.2) specifications into strongly-typed structs, async HTTP clients, SSE streaming clients, **and opt-in Axum server scaffolding** — including for the messy, real-world specs everyone actually ships.
+
+Read the [guides and documentation](https://openapi-to-rust.dev/) for the quickest path from an OpenAPI document to compiling Rust.
 
 ## 30-second trial
 

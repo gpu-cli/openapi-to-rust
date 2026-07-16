@@ -1,0 +1,26 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+
+<BaseLayout
+  title="Page not found | openapi-to-rust"
+  description="The requested openapi-to-rust documentation page could not be found."
+  canonicalPath="/404"
+  noindex={true}
+>
+  <section class="not-found shell">
+    <p class="eyebrow">HTTP 404</p>
+    <h1>This route isn’t in the contract.</h1>
+    <p>The page may have moved, or the URL may be incomplete.</p>
+    <div class="button-row">
+      <a class="button button-primary" href="/">Go to the homepage</a>
+      <a class="button button-secondary" href="/docs">Browse the documentation</a>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .not-found { min-height: 65vh; display: grid; align-content: center; padding-block: 5rem; }
+  .not-found h1 { max-width: 900px; }
+  .not-found > p:not(.eyebrow) { margin: 1.5rem 0 2rem; color: var(--muted); font-size: 1.2rem; }
+</style>
