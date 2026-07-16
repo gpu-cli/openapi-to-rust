@@ -1,0 +1,516 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import CodeBlock from "../components/CodeBlock.astro";
+
+const title = "OpenAPI Generator for Rust | Reqwest Clients & Axum Servers";
+const description = "Generate typed Rust models, async Reqwest and SSE clients, and Axum server scaffolding from OpenAPI 3.0 and 3.1. Install openapi-to-rust with Cargo.";
+
+const installCommand = `cargo install --locked openapi-to-rust
+openapi-to-rust generate openapi.yaml`;
+
+const generatedEnum = `#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum ToolResultCaller {
+    #[serde(rename = "direct")]
+    DirectCaller(DirectCaller),
+    #[serde(rename = "server")]
+    ServerCaller(ServerCaller),
+}`;
+
+const ciCommand = `openapi-to-rust generate openapi.yaml --check --quiet
+cargo check`;
+
+const schemas = [
+  {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "openapi-to-rust",
+    alternateName: "OpenAPI to Rust",
+    url: "https://openapi-to-rust.dev/",
+    description,
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    name: "openapi-to-rust",
+    description,
+    codeRepository: "https://github.com/gpu-cli/openapi-to-rust",
+    downloadUrl: "https://crates.io/crates/openapi-to-rust",
+    programmingLanguage: "Rust",
+    runtimePlatform: "Rust 1.88 or newer",
+    softwareVersion: "0.6.0",
+    license: "https://opensource.org/license/mit",
+    keywords: "OpenAPI generator Rust, Rust API client generator, Axum server generator, Reqwest codegen",
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: [
+      {
+        "@type": "Question",
+        name: "What is an OpenAPI generator for Rust?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "An OpenAPI generator for Rust reads an OpenAPI YAML or JSON document and emits Rust types and API integration code. openapi-to-rust can generate typed models, async Reqwest clients, SSE clients, and opt-in Axum server scaffolding.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Does openapi-to-rust support OpenAPI 3.1?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Yes. openapi-to-rust accepts OpenAPI 3.0 and 3.1 documents. OpenAPI 3.2 parsing is available experimentally, and less-common keywords may be modeled without affecting generated runtime behavior.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "Can it generate an Axum server from OpenAPI?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "Yes. Select operations in the configuration and openapi-to-rust generates Axum traits, status-code-typed response enums, routing, required-parameter handling, and SSE-ready response variants.",
+        },
+      },
+      {
+        "@type": "Question",
+        name: "How is openapi-to-rust different from OpenAPI Generator?",
+        acceptedAnswer: {
+          "@type": "Answer",
+          text: "OpenAPI Generator is a broad multi-language project with separate Rust client and Rust Axum server targets. openapi-to-rust is a Rust-focused Cargo tool that generates shared types, selected client operations, and selected Axum server operations in one workflow.",
+        },
+      },
+    ],
+  },
+];
+---
+
+<BaseLayout {title} {description} canonicalPath="/" schema={schemas}>
+  <section class="hero">
+    <div class="shell hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">Rust-native code generation</p>
+        <h1>An OpenAPI generator for <span>Rust</span> that survives real-world specs.</h1>
+        <p class="hero-lead">
+          Generate strongly typed models, async Reqwest and SSE clients, and opt-in Axum server
+          scaffolding from OpenAPI 3.0, 3.1, and experimental 3.2 documents.
+        </p>
+        <div class="button-row">
+          <a class="button button-primary" href="#quick-start">Try one command <span aria-hidden="true">↓</span></a>
+          <a class="button button-secondary" href="/docs/getting-started">Read the docs <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="hero-install">
+          <CodeBlock label="Install with Cargo" code="cargo install --locked openapi-to-rust" />
+        </div>
+        <p class="hero-note"><span aria-hidden="true">●</span> Open source · MIT licensed · Rust 1.88+</p>
+      </div>
+
+      <div class="pipeline" role="group" aria-label="OpenAPI document transformed into generated Rust files">
+        <div class="pipeline-input">
+          <span class="file-label">INPUT // openapi.yaml</span>
+          <pre><code><span>openapi:</span> 3.1.0
+<span>paths:</span>
+  /v1/responses:
+    <b>post:</b>
+      operationId: createResponse</code></pre>
+        </div>
+        <div class="pipeline-arrow" aria-hidden="true"><span>generate</span></div>
+        <div class="pipeline-output">
+          <span class="file-label">OUTPUT // src/generated</span>
+          <ul>
+            <li><span>01</span><b>types.rs</b><em>shared models</em></li>
+            <li><span>02</span><b>client.rs</b><em>Reqwest calls</em></li>
+            <li><span>03</span><b>server/</b><em>Axum traits</em></li>
+          </ul>
+        </div>
+        <div class="compile-stamp"><span>✓</span> CARGO CHECK</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="proof" aria-label="Project proof points">
+    <div class="shell proof-grid">
+      <div><strong>54</strong><span>supported real-world OpenAPI specs</span></div>
+      <div><strong>3.0 + 3.1</strong><span>supported · 3.2 experimental</span></div>
+      <div><strong>2 sides</strong><span>typed clients + Axum servers</span></div>
+      <div><strong>1 command</strong><span>from document to Rust modules</span></div>
+    </div>
+  </section>
+
+  <section class="both-sides section-pad">
+    <div class="shell">
+      <p class="eyebrow">One contract. Both sides.</p>
+      <div class="section-heading-row">
+        <h2>Stop rebuilding the same API boundary twice.</h2>
+        <p>
+          Generate the client calls you consume and the server operations you host. Both sides use the
+          same <code>types.rs</code>, so request and response models stay aligned with the contract.
+        </p>
+      </div>
+
+      <div class="split-output">
+        <article>
+          <div class="output-number">01 / CLIENT</div>
+          <h3>Call APIs with typed Reqwest methods.</h3>
+          <p>Get async methods, auth, retries, tracing, typed response bodies, per-operation errors, and optional builders.</p>
+          <pre><code><span>let</span> response = client
+    .create_response(request)
+    .await?;</code></pre>
+          <a href="/docs/rust-client-generator">Explore Rust client generation <span aria-hidden="true">→</span></a>
+        </article>
+        <div class="shared-types">
+          <span>shared</span>
+          <b>types.rs</b>
+          <i aria-hidden="true"></i>
+        </div>
+        <article>
+          <div class="output-number">02 / SERVER</div>
+          <h3>Implement a generated Axum trait.</h3>
+          <p>Choose operations and get per-tag traits, typed response enums, routing, parameter extraction, and SSE-ready responses.</p>
+          <pre><code><span>impl</span> ResponsesApi <span>for</span> AppState {'{'}
+    <span>async fn</span> create_response(…)
+{'}'}</code></pre>
+          <a href="/openapi-to-axum">Explore Axum server generation <span aria-hidden="true">→</span></a>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="messy-specs section-pad">
+    <div class="shell">
+      <div class="section-heading-row">
+        <div>
+          <p class="eyebrow">Messy specs → clean Rust</p>
+          <h2>Model the wire shape you actually have.</h2>
+        </div>
+        <p>
+          Real API documents use nullable type arrays, nested composition, discriminator mappings,
+          inline objects, and open-ended enums. The generator turns those shapes into readable Serde types.
+        </p>
+      </div>
+
+      <div class="transformation">
+        <div class="spec-fragment">
+          <span class="artifact-tag">OPENAPI // ONEOF</span>
+          <pre><code>caller:
+  oneOf:
+    - $ref: '#/$defs/DirectCaller'
+    - $ref: '#/$defs/ServerCaller'
+  discriminator:
+    propertyName: type</code></pre>
+        </div>
+        <div class="transform-mark" aria-hidden="true">→</div>
+        <CodeBlock label="Generated types.rs" language="rust" code={generatedEnum} />
+      </div>
+      <p class="source-note">
+        Generated output shown above is taken from the project’s checked-in discriminator snapshot—not a hand-written ideal.
+        <a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/src/snapshots/openapi_to_rust__test_helpers__default_discriminated_union_field.snap">Inspect the fixture <span aria-hidden="true">↗</span></a>
+      </p>
+
+      <div class="capability-list">
+        <article><span>01</span><h3>Composed schemas</h3><p><code>oneOf</code>, <code>anyOf</code>, <code>allOf</code>, tagged and untagged enums.</p></article>
+        <article><span>02</span><h3>Typed formats</h3><p>Dates, UUIDs, URLs, bytes, unsigned integers, and per-format opt-outs.</p></article>
+        <article><span>03</span><h3>Typed failures</h3><p>Match documented API errors separately from transport failures.</p></article>
+        <article><span>04</span><h3>Open-ended data</h3><p>Typed <code>additionalProperties</code> and extensible enum fallbacks.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="real-world section-pad">
+    <div class="shell real-world-grid">
+      <div>
+        <p class="eyebrow">Evidence over promises</p>
+        <h2>Built against APIs people actually ship.</h2>
+        <p class="section-intro">
+          The repository contains 55 real-world documents. Fifty-four are supported OpenAPI specs; one
+          Swagger 2.0 document is intentionally skipped. Every pull request generates all 54 and
+          compile-checks the OpenAI and Anthropic outputs. Scheduled and manual CI compile-checks the full corpus.
+        </p>
+        <div class="button-row">
+          <a class="button button-primary" href="/compatibility">See compatibility evidence</a>
+          <a class="button button-secondary" href="https://github.com/gpu-cli/openapi-to-rust/tree/main/specs">Browse the corpus <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+      <div class="api-ledger" role="group" aria-label="Examples from the real-world API corpus">
+        <div><span>OPENAI</span><b>unions · SSE · typed errors</b><em>PR compile check</em></div>
+        <div><span>ANTHROPIC</span><b>content blocks · overlays</b><em>PR compile check</em></div>
+        <div><span>CLOUDFLARE</span><b>large schema surface</b><em>scheduled compile</em></div>
+        <div><span>+ 51 SPECS</span><b>parse + generate</b><em>every pull request</em></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="quick-start section-pad" id="quick-start">
+    <div class="shell">
+      <p class="eyebrow">From spec to compiling code</p>
+      <h2>Try the Rust OpenAPI generator in 30 seconds.</h2>
+      <div class="steps">
+        <article>
+          <span class="step-label">STEP 01</span>
+          <h3>Install the CLI</h3>
+          <p>Install the locked crate with Rust 1.88 or newer.</p>
+        </article>
+        <article>
+          <span class="step-label">STEP 02</span>
+          <h3>Generate from YAML or JSON</h3>
+          <p>Use a local file or a safely fetched HTTPS document.</p>
+        </article>
+        <article>
+          <span class="step-label">STEP 03</span>
+          <h3>Compile and commit</h3>
+          <p>Check generated output into your project and detect drift in CI.</p>
+        </article>
+      </div>
+      <CodeBlock label="Terminal" code={installCommand} />
+      <div class="quick-links">
+        <a href="/docs/getting-started"><span>New here?</span><b>Read the complete quick start</b><i aria-hidden="true">→</i></a>
+        <a href="/docs/rust-client-generator"><span>Building an SDK?</span><b>Configure the Reqwest client</b><i aria-hidden="true">→</i></a>
+        <a href="/openapi-to-axum"><span>Hosting an API?</span><b>Generate an Axum server</b><i aria-hidden="true">→</i></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="ci-section section-pad">
+    <div class="shell ci-grid">
+      <div>
+        <p class="eyebrow">Designed for committed codegen</p>
+        <h2>Make drift a build failure.</h2>
+        <p class="section-intro">
+          Use <code>--check</code> in CI to fail when committed generated files no longer match the
+          OpenAPI document or configuration. Use <code>--dry-run</code> first when you only want to inspect the plan.
+        </p>
+      </div>
+      <CodeBlock label="CI" language="shell" code={ciCommand} />
+    </div>
+  </section>
+
+  <section class="comparison-teaser section-pad">
+    <div class="shell comparison-grid">
+      <div>
+        <p class="eyebrow">Choosing a generator</p>
+        <h2>Rust-focused or multi-language?</h2>
+      </div>
+      <div>
+        <p>
+          OpenAPI Generator is a mature multi-language project with separate <code>rust</code> client and
+          <code>rust-axum</code> server targets. openapi-to-rust is intentionally narrower: a Cargo-native,
+          Rust-focused workflow with shared types and selectable client and server operations.
+        </p>
+        <a class="text-link" href="/compare/openapi-generator">Read the dated, source-linked comparison <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="faq section-pad">
+    <div class="shell faq-grid">
+      <div>
+        <p class="eyebrow">Questions, answered</p>
+        <h2>Rust OpenAPI generator FAQ</h2>
+      </div>
+      <div class="faq-list">
+        <details open>
+          <summary>What is an OpenAPI generator for Rust?</summary>
+          <p>An OpenAPI generator reads an API contract in YAML or JSON and emits Rust code from it. openapi-to-rust generates Serde models, an optional async Reqwest client, optional SSE support, and optional Axum server scaffolding.</p>
+        </details>
+        <details>
+          <summary>Does openapi-to-rust support OpenAPI 3.1?</summary>
+          <p>Yes. OpenAPI 3.0 and 3.1 documents are accepted. OpenAPI 3.2 parsing is experimental; some less-common keywords are retained or modeled without changing generated runtime behavior. The compatibility page documents the boundaries.</p>
+        </details>
+        <details>
+          <summary>Can it generate an Axum server from OpenAPI?</summary>
+          <p>Yes. Select individual operation IDs, routes, or tags. The generator emits per-tag traits, response enums, parameter extraction, routing, and SSE-ready response variants for the selected surface.</p>
+        </details>
+        <details>
+          <summary>How is this different from OpenAPI Generator’s Rust target?</summary>
+          <p>OpenAPI Generator serves many languages and exposes separate Rust client and Rust server generators. openapi-to-rust focuses only on Rust and can generate shared models plus selected Reqwest client and Axum server operations in the same project. The comparison page links to both projects’ current documentation.</p>
+        </details>
+        <details>
+          <summary>Can I generate only the operations I use?</summary>
+          <p>Yes. Client and server selectors accept an exact <code>operationId</code>, an exact <code>METHOD /path</code>, or <code>tag:name</code>. Optional model pruning retains schemas reachable from the union of selected client and server operations.</p>
+        </details>
+        <details>
+          <summary>Does generated code validate every OpenAPI constraint at runtime?</summary>
+          <p>No. Constraints such as minimums, maximums, and patterns are emitted as Rust documentation, not runtime validators. This keeps generated dependencies smaller and makes the behavior explicit.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="final-cta">
+    <div class="shell final-cta-grid">
+      <div>
+        <p class="eyebrow">Your API contract already knows the types.</p>
+        <h2>Put them in your Rust project.</h2>
+      </div>
+      <div>
+        <CodeBlock label="Install" code="cargo install --locked openapi-to-rust" />
+        <div class="button-row">
+          <a class="button button-primary" href="/docs/getting-started">Start generating</a>
+          <a class="button button-on-dark" href="https://github.com/gpu-cli/openapi-to-rust">View on GitHub <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .hero { padding: clamp(4rem, 10vw, 8rem) 0 5rem; }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(360px, 0.88fr); align-items: center; gap: clamp(3rem, 7vw, 7rem); }
+  .hero-copy h1 { max-width: 780px; font-size: clamp(3.2rem, 6vw, 5rem); }
+  .hero-copy h1 span { color: var(--rust-dark); }
+  .hero-lead { max-width: 700px; margin: 1.5rem 0 2rem; color: #3c424c; font-size: clamp(1.12rem, 2vw, 1.35rem); line-height: 1.6; }
+  .hero-note { display: flex; align-items: center; gap: 0.5rem; margin-top: 1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.72rem; }
+  .hero-note span { color: var(--sage); }
+  .hero-install { max-width: 610px; margin-top: 1.2rem; }
+  .hero-install :global(.code-block) { box-shadow: none; }
+  .hero-install :global(.code-block pre) { padding-block: 0.9rem; }
+
+  .pipeline { position: relative; border: 1px solid var(--ink); border-radius: 6px; background: var(--white); box-shadow: 10px 10px 0 var(--ink); }
+  .pipeline-input, .pipeline-output { padding: 1.25rem; }
+  .pipeline-input { background: var(--ink); color: var(--code-text); }
+  .file-label { display: block; margin-bottom: 1rem; color: var(--code-muted); font-family: var(--font-mono); font-size: 0.72rem; font-weight: 800; letter-spacing: 0.09em; }
+  .pipeline pre { overflow-x: auto; margin: 0; font-size: clamp(0.72rem, 1.3vw, 0.83rem); line-height: 1.7; }
+  .pipeline-input code span { color: var(--lime); }
+  .pipeline-input code b { color: #ffa98e; font-weight: 500; }
+  .pipeline-arrow { position: relative; display: grid; height: 45px; place-content: center; border-block: 1px solid var(--ink); background: var(--paper-deep); }
+  .pipeline-arrow::before { position: absolute; top: 0; bottom: 0; left: 2.2rem; width: 2px; background: var(--rust); content: ""; }
+  .pipeline-arrow::after { position: absolute; bottom: 7px; left: calc(2.2rem - 4px); width: 8px; height: 8px; transform: rotate(45deg); border-right: 2px solid var(--rust); border-bottom: 2px solid var(--rust); content: ""; }
+  .pipeline-arrow span { font-family: var(--font-mono); font-size: 0.64rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+  .pipeline-output ul { list-style: none; }
+  .pipeline-output li { display: grid; grid-template-columns: 32px 1fr auto; align-items: center; gap: 0.5rem; border-top: 1px solid var(--line); padding: 0.75rem 0; }
+  .pipeline-output li:last-child { padding-bottom: 0; }
+  .pipeline-output li span { color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.68rem; }
+  .pipeline-output li b { font-family: var(--font-mono); font-size: 0.84rem; }
+  .pipeline-output li em { color: var(--muted); font-size: 0.72rem; font-style: normal; }
+  .compile-stamp { position: absolute; right: -1rem; bottom: -1.4rem; transform: rotate(-3deg); border: 2px solid var(--ink); background: var(--lime); padding: 0.55rem 0.75rem; font-family: var(--font-mono); font-size: 0.68rem; font-weight: 900; letter-spacing: 0.08em; }
+
+  .proof { border-block: 1px solid var(--ink); background: var(--ink); color: var(--white); }
+  .proof-grid { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .proof-grid > div { min-height: 118px; padding: 1.35rem; border-left: 1px solid var(--line-dark); }
+  .proof-grid > div:last-child { border-right: 1px solid var(--line-dark); }
+  .proof strong { display: block; color: var(--lime); font-size: 1.45rem; line-height: 1.2; }
+  .proof strong { font-variant-numeric: tabular-nums; }
+  .proof span { display: block; max-width: 180px; margin-top: 0.35rem; color: var(--code-muted); font-size: 0.82rem; line-height: 1.4; }
+
+  .section-pad { padding: clamp(5rem, 11vw, 9rem) 0; }
+  .section-heading-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.6fr); align-items: end; gap: clamp(2rem, 7vw, 7rem); }
+  .section-heading-row > p { color: var(--muted); font-size: 1.06rem; }
+
+  .split-output { display: grid; grid-template-columns: 1fr 140px 1fr; margin-top: 4rem; border-block: 1px solid var(--ink); }
+  .split-output article { padding: 2.5rem 0; }
+  .split-output article:first-child { padding-right: clamp(1.5rem, 4vw, 4rem); }
+  .split-output article:last-child { padding-left: clamp(1.5rem, 4vw, 4rem); }
+  .output-number { margin-bottom: 3rem; color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.7rem; font-weight: 900; letter-spacing: 0.08em; }
+  .split-output h3 { max-width: 430px; font-size: clamp(1.8rem, 3vw, 2.7rem); }
+  .split-output p { max-width: 470px; margin-top: 1rem; color: var(--muted); }
+  .split-output pre { overflow-x: auto; margin: 1.8rem 0; border-radius: 4px; background: var(--ink); color: var(--code-text); padding: 1rem; font-size: 0.78rem; line-height: 1.7; }
+  .split-output pre span { color: var(--lime); }
+  .split-output article > a { color: var(--rust-dark); font-weight: 800; }
+  .shared-types { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; border-inline: 1px solid var(--ink); background: var(--paper-deep); font-family: var(--font-mono); text-align: center; }
+  .shared-types span { font-size: 0.64rem; letter-spacing: 0.1em; text-transform: uppercase; }
+  .shared-types b { color: var(--rust-dark); font-size: 0.82rem; }
+  .shared-types i { position: absolute; right: -8px; width: 15px; height: 15px; transform: rotate(45deg); border-top: 1px solid var(--ink); border-right: 1px solid var(--ink); background: var(--paper-deep); }
+
+  .messy-specs { border-block: 1px solid var(--ink); background: var(--paper-deep); }
+  .transformation { display: grid; grid-template-columns: 0.82fr 60px 1.18fr; align-items: stretch; margin-top: 4rem; }
+  .spec-fragment { border: 1px solid var(--ink); border-radius: 6px; background: var(--white); padding: 1.3rem; }
+  .artifact-tag { display: block; margin-bottom: 1.5rem; color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.74rem; font-weight: 800; letter-spacing: 0.08em; }
+  .spec-fragment pre { overflow-x: auto; font-size: clamp(0.72rem, 1.3vw, 0.84rem); line-height: 1.8; }
+  .transform-mark { display: grid; place-content: center; color: var(--rust); font-family: var(--font-mono); font-size: 1.8rem; }
+  .transformation :global(.code-block) { box-shadow: none; }
+  .source-note { max-width: 860px; margin: 1rem 0 0 auto; color: var(--muted); font-size: 0.84rem; }
+  .source-note a { color: var(--rust-dark); }
+  .capability-list { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 4rem; border-block: 1px solid var(--line); }
+  .capability-list article { padding: 1.4rem; border-right: 1px solid var(--line); }
+  .capability-list article:first-child { border-left: 1px solid var(--line); }
+  .capability-list article > span { color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.66rem; }
+  .capability-list h3 { margin-top: 2rem; font-size: 1.2rem; }
+  .capability-list p { margin-top: 0.6rem; color: var(--muted); font-size: 0.83rem; }
+
+  .real-world { background: var(--white); }
+  .real-world-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.72fr); align-items: center; gap: clamp(3rem, 8vw, 8rem); }
+  .real-world .button-row { margin-top: 2rem; }
+  .api-ledger { border-top: 2px solid var(--ink); }
+  .api-ledger div { display: grid; grid-template-columns: 0.72fr 1.25fr 0.8fr; gap: 1rem; border-bottom: 1px solid var(--line); padding: 1.1rem 0; }
+  .api-ledger span { color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.78rem; font-weight: 800; }
+  .api-ledger b { font-size: 0.85rem; }
+  .api-ledger em { color: var(--muted); font-family: var(--font-mono); font-size: 0.74rem; font-style: normal; }
+
+  .quick-start { border-block: 1px solid var(--ink); background: var(--ink); color: var(--white); }
+  .quick-start .eyebrow { color: var(--lime); }
+  .quick-start h2 { max-width: 900px; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); margin: 3.5rem 0 1.5rem; border-block: 1px solid var(--line-dark); }
+  .steps article { padding: 1.4rem; border-right: 1px solid var(--line-dark); }
+  .steps article:first-child { border-left: 1px solid var(--line-dark); }
+  .step-label { color: #ff9a7d; font-family: var(--font-mono); font-size: 0.74rem; font-weight: 900; letter-spacing: 0.09em; }
+  .steps h3 { margin-top: 1.8rem; color: var(--white); font-size: 1.25rem; }
+  .steps p { margin-top: 0.6rem; color: var(--code-muted); font-size: 0.84rem; }
+  .quick-start :global(.code-block) { box-shadow: none; border-color: #4b5361; background: #080b11; }
+  .quick-links { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 2rem; border-top: 1px solid var(--line-dark); }
+  .quick-links a { display: grid; grid-template-columns: 1fr auto; gap: 0.3rem 1rem; min-height: 115px; align-content: center; border-right: 1px solid var(--line-dark); padding: 1rem; color: var(--white); text-decoration: none; }
+  .quick-links a:first-child { border-left: 1px solid var(--line-dark); }
+  .quick-links span { grid-column: 1 / -1; color: var(--code-muted); font-family: var(--font-mono); font-size: 0.74rem; }
+  .quick-links b { font-size: 0.87rem; }
+  .quick-links i { color: var(--lime); font-style: normal; }
+  .quick-links a:hover { background: #171d29; }
+
+  .ci-section { background: var(--white); }
+  .ci-grid { display: grid; grid-template-columns: 1fr 0.8fr; align-items: center; gap: clamp(3rem, 8vw, 8rem); }
+
+  .comparison-teaser { border-block: 1px solid var(--ink); background: var(--lime); }
+  .comparison-grid { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(3rem, 9vw, 9rem); }
+  .comparison-grid p { max-width: 580px; font-size: 1.1rem; }
+  .text-link { display: inline-flex; gap: 0.5rem; margin-top: 1.5rem; font-weight: 900; }
+
+  .faq-grid { display: grid; grid-template-columns: 0.75fr 1.25fr; gap: clamp(3rem, 9vw, 9rem); }
+  .faq-list { border-top: 1px solid var(--ink); }
+  .faq-list details { border-bottom: 1px solid var(--line); padding: 1.25rem 0; }
+  .faq-list summary { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 1rem; cursor: pointer; font-size: 1.05rem; font-weight: 800; list-style: none; }
+  .faq-list summary::-webkit-details-marker { display: none; }
+  .faq-list summary::after { color: var(--rust-dark); content: "+"; font-family: var(--font-mono); font-size: 1.3rem; }
+  .faq-list details[open] summary::after { content: "−"; }
+  .faq-list p { max-width: 680px; padding: 0.4rem 2rem 0.4rem 0; color: var(--muted); }
+
+  .final-cta { background: var(--ink); color: var(--white); padding: clamp(5rem, 10vw, 8rem) 0; }
+  .final-cta .eyebrow { color: var(--lime); }
+  .final-cta-grid { display: grid; grid-template-columns: 1fr 0.85fr; align-items: center; gap: clamp(3rem, 8vw, 8rem); }
+  .final-cta :global(.code-block) { box-shadow: none; background: #080b11; }
+  .final-cta .button-row { margin-top: 1.2rem; }
+
+  @media (max-width: 940px) {
+    .hero-grid, .real-world-grid { grid-template-columns: 1fr; }
+    .pipeline { max-width: 680px; }
+    .section-heading-row { grid-template-columns: 1fr; align-items: start; }
+    .split-output { grid-template-columns: 1fr 100px 1fr; }
+    .transformation { grid-template-columns: 1fr; gap: 1rem; }
+    .transform-mark { transform: rotate(90deg); }
+    .capability-list { grid-template-columns: 1fr 1fr; }
+    .capability-list article:nth-child(3) { border-left: 1px solid var(--line); }
+    .ci-grid, .faq-grid, .final-cta-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 700px) {
+    .hero { padding-top: 3.5rem; }
+    .proof-grid { grid-template-columns: 1fr 1fr; }
+    .proof-grid > div:nth-child(3) { border-top: 1px solid var(--line-dark); }
+    .proof-grid > div:nth-child(4) { border-top: 1px solid var(--line-dark); }
+    .split-output { grid-template-columns: 1fr; }
+    .split-output article:first-child, .split-output article:last-child { padding-inline: 0; }
+    .shared-types { min-height: 90px; border: 1px solid var(--ink); }
+    .shared-types i { right: auto; bottom: -8px; transform: rotate(135deg); }
+    .steps, .quick-links { grid-template-columns: 1fr; }
+    .steps article, .steps article:first-child, .quick-links a, .quick-links a:first-child { border-inline: 1px solid var(--line-dark); border-bottom: 1px solid var(--line-dark); }
+    .comparison-grid { grid-template-columns: 1fr; }
+  }
+
+  @media (max-width: 500px) {
+    .pipeline { box-shadow: 6px 6px 0 var(--ink); }
+    .pipeline-output li { grid-template-columns: 28px 1fr; }
+    .pipeline-output li em { grid-column: 2; }
+    .compile-stamp { right: 0.4rem; }
+    .proof-grid { grid-template-columns: 1fr; }
+    .proof-grid > div { min-height: auto; border-top: 1px solid var(--line-dark); border-right: 1px solid var(--line-dark); }
+    .proof-grid > div:first-child { border-top: 0; }
+    .capability-list { grid-template-columns: 1fr; }
+    .capability-list article { border-left: 1px solid var(--line); }
+    .api-ledger div { grid-template-columns: 1fr; gap: 0.3rem; }
+  }
+</style>

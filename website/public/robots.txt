@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://openapi-to-rust.dev/sitemap-index.xml

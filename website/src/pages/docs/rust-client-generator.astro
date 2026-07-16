@@ -1,0 +1,143 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import CodeBlock from "../../components/CodeBlock.astro";
+
+const clientConfig = `[generator]
+spec_path = "openapi.json"
+output_dir = "src/generated"
+module_name = "api"
+
+[features]
+enable_async_client = true
+
+[client]
+operations = [
+  "createResponse",
+  "GET /v1/models",
+  "tag:Files",
+]
+prune_models = true
+
+[http_client]
+base_url = "https://api.example.com"
+timeout_seconds = 30
+
+[http_client.retry]
+max_retries = 3
+
+[http_client.auth]
+type = "Bearer"
+header_name = "Authorization"`;
+
+const errorCode = `match client.create_response(request).await {
+    Ok(body) => consume(body),
+    Err(ApiOpError::Api(error)) => match error.typed {
+        Some(CreateResponseApiError::Status4xx(body)) => {
+            eprintln!("API rejected the request: {body:?}");
+        }
+        _ => eprintln!("raw API body: {}", error.body),
+    },
+    Err(ApiOpError::Transport(error)) => {
+        eprintln!("request failed: {error}");
+    }
+}`;
+
+const toc = [
+  { id: "generate", label: "Generate a client" },
+  { id: "select", label: "Select operations" },
+  { id: "runtime", label: "Runtime behavior" },
+  { id: "types", label: "Generated types" },
+  { id: "errors", label: "Typed errors" },
+  { id: "streaming", label: "SSE streaming" },
+  { id: "limits", label: "Important limits" },
+];
+---
+
+<DocsLayout
+  title="Rust OpenAPI Client Generator | Typed Reqwest Codegen"
+  description="Generate an async, typed Reqwest client from OpenAPI with operation selection, Serde models, auth, retries, SSE, builders, and typed errors."
+  h1="Generate a typed Rust client from OpenAPI"
+  lead="openapi-to-rust turns a contract into readable Serde models and async Reqwest methods. Generate the entire API or keep only the operations your application calls."
+  canonicalPath="/docs/rust-client-generator"
+  {toc}
+>
+  <h2 id="generate">Generate the async Reqwest client</h2>
+  <p>
+    The HTTP client is the default output. After installing the CLI, point it at an OpenAPI 3.0 or 3.1 YAML or JSON document:
+  </p>
+  <CodeBlock label="Terminal" code={`openapi-to-rust generate openapi.yaml`} />
+  <p>
+    The generator emits <code>types.rs</code>, <code>client.rs</code>, module exports, and a
+    <code>REQUIRED_DEPS.toml</code> fragment. The dependency fragment is computed from the generated shapes, so a spec using UUIDs or dates includes the appropriate crates while a simpler document does not.
+  </p>
+  <CodeBlock label="openapi-to-rust.toml" language="toml" code={clientConfig} />
+
+  <h2 id="select">Select only the operations you use</h2>
+  <p>
+    Without a <code>[client]</code> section, the generator keeps every operation for backward compatibility.
+    The <code>operations</code> list accepts three selector forms:
+  </p>
+  <ul>
+    <li>An exact <code>operationId</code>, such as <code>createResponse</code>.</li>
+    <li>An exact method and path, such as <code>GET /v1/models</code>.</li>
+    <li>Every operation under a tag, such as <code>tag:Files</code>.</li>
+  </ul>
+  <p>
+    Set <code>prune_models = true</code> to remove schemas that are unreachable from the selected operations.
+    When client and server selection coexist, pruning retains the union of schemas needed by both surfaces.
+  </p>
+
+  <h2 id="runtime">Configure runtime behavior</h2>
+  <p>
+    Generated methods are asynchronous and use Reqwest. TOML configuration controls the base URL, timeout,
+    default headers, retry policy, tracing middleware, and authentication. Bearer, API-key, and custom header auth
+    can be applied at runtime rather than compiled into generated source.
+  </p>
+  <div class="callout">
+    <strong>Keep secrets out of code generation</strong>
+    <p>Configuration describes how auth is attached; credentials belong in your application’s environment or secret manager. Never place tokens in an OpenAPI document, generator config, or generated files.</p>
+  </div>
+  <p>
+    Path-template values are percent-encoded and parameter serialization follows the analyzed OpenAPI style where implemented.
+    Use overlays when a published document is almost correct but omits a media type or operation detail; overlays are deep-merged before analysis, avoiding a permanent fork of the upstream spec.
+  </p>
+
+  <h2 id="types">Get Rust types for difficult schema shapes</h2>
+  <p>
+    Generated models derive Serde serialization and deserialization. OpenAPI formats map to Rust types such as
+    <code>chrono::DateTime&lt;Utc&gt;</code>, <code>uuid::Uuid</code>, <code>url::Url</code>, and
+    <code>bytes::Bytes</code>, with per-format opt-outs in TOML.
+  </p>
+  <p>
+    Composition is shape-aware: discriminated object unions become tagged enums, while unions that mix scalar and object
+    branches become untagged enums. Typed <code>additionalProperties</code> values become maps rather than falling back to
+    <code>serde_json::Value</code> when the document provides a value schema.
+  </p>
+
+  <h2 id="errors">Match typed operation errors</h2>
+  <p>
+    Each operation gets an error enum for documented response bodies. Transport failures remain separate, so your application
+    can distinguish a failed network request from a valid 4xx or 5xx API response.
+  </p>
+  <CodeBlock label="Typed operation error" language="rust" code={errorCode} />
+
+  <h2 id="streaming">Generate SSE streaming clients</h2>
+  <p>
+    Server-Sent Events can be configured as a first-class client surface with event parsing, event-flow modeling, and reconnection.
+    This is useful for APIs such as streamed model responses where the OpenAPI document declares or is overlaid with
+    <code>text/event-stream</code> behavior.
+  </p>
+  <p>
+    Streaming code is opt-in because not every <code>text/event-stream</code> response shares the same event framing or lifecycle.
+    Define the operation, stream parameter, event union, and reconnection behavior in the generator configuration.
+  </p>
+
+  <h2 id="limits">Know what the generator does not do</h2>
+  <ul>
+    <li>It does not accept Swagger/OpenAPI 2.0 documents; convert them to OpenAPI 3 first.</li>
+    <li>Schema constraints are emitted as documentation, not runtime validation.</li>
+    <li>Modeled security schemes do not imply runtime credential support for every scheme; mutual TLS is one example.</li>
+    <li>Experimental OpenAPI 3.2 parsing does not mean every 3.2 behavior affects generated code.</li>
+  </ul>
+  <p>See the <a href="/compatibility">compatibility page</a> for the current corpus, CI evidence, and feature boundaries.</p>
+</DocsLayout>

@@ -24,3 +24,9 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Astro documentation site dependencies and output.
+/website/node_modules/
+/website/dist/
+/website/.astro/
+/website/.vercel/

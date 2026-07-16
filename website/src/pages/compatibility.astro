@@ -1,0 +1,126 @@
+---
+import DocsLayout from "../layouts/DocsLayout.astro";
+import CodeBlock from "../components/CodeBlock.astro";
+
+const toc = [
+  { id: "headline", label: "What is tested" },
+  { id: "ci", label: "CI tiers" },
+  { id: "features", label: "Feature status" },
+  { id: "corpus", label: "Real-world corpus" },
+  { id: "conformance", label: "Conformance limits" },
+  { id: "verify", label: "Verify your API" },
+];
+---
+
+<DocsLayout
+  title="Rust OpenAPI Compatibility | Tested on 54 Real-World Specs"
+  description="See how openapi-to-rust is tested against 54 real-world OpenAPI documents, which outputs compile in pull requests, and where support remains partial."
+  h1="Compatibility tested against real-world OpenAPI specs"
+  lead="Compatibility claims should be reproducible. This page documents the project’s 55-document corpus, the 54 OpenAPI specs it supports, the CI tiers that exercise them, and the boundaries those checks do not prove."
+  canonicalPath="/compatibility"
+  category="Evidence"
+  {toc}
+>
+  <h2 id="headline">What the repository tests today</h2>
+  <p>
+    The checked-in <code>specs/</code> directory contains 55 documents from real services. Fifty-four are OpenAPI documents supported by
+    the current generator. One Gitea document uses Swagger 2.0 and is intentionally skipped because openapi-to-rust accepts OpenAPI 3.x.
+  </p>
+  <div class="evidence-numbers" role="group" aria-label="Compatibility summary">
+    <div><strong>55</strong><span>documents in the corpus</span></div>
+    <div><strong>54</strong><span>supported OpenAPI specs</span></div>
+    <div><strong>2</strong><span>compile-checked on every PR</span></div>
+    <div><strong>54</strong><span>compiled by scheduled CI</span></div>
+  </div>
+  <p>
+    The corpus includes large and irregular documents from OpenAI, Anthropic, Cloudflare, Stripe, Microsoft Graph, Discord, Datadog,
+    Spotify, Sentry, PagerDuty, and many others. It exists to expose failures that small Petstore-style fixtures do not.
+  </p>
+
+  <h2 id="ci">Two CI tiers balance speed and coverage</h2>
+  <div class="table-wrap">
+    <table>
+      <caption>Real-world specification CI</caption>
+      <thead><tr><th scope="col">CI tier</th><th scope="col">Frequency</th><th scope="col">Evidence</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Pull request / main</th><td>Every change</td><td>Generate all 54 supported specs; compile-check OpenAI and Anthropic.</td></tr>
+        <tr><th scope="row">Full corpus</th><td>Weekly and manual</td><td>Generate and compile-check all 54 supported specs.</td></tr>
+        <tr><th scope="row">Focused fixtures</th><td>Every test run</td><td>Snapshot and behavior checks for specific schema and operation shapes.</td></tr>
+        <tr><th scope="row">JSON Schema corpus</th><td>Conformance test runs</td><td>No-regression ceilings for parse failures and lossless round trips.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    A successful generation check proves the document can be parsed, analyzed, and emitted. A successful compile check additionally proves
+    that the emitted Rust compiles in the generated harness. Neither alone proves every runtime request serializes exactly as the live API expects.
+  </p>
+
+  <h2 id="features">Feature status at a glance</h2>
+  <div class="table-wrap">
+    <table>
+      <caption>Selected generation capabilities</caption>
+      <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Notes</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">OpenAPI 3.0</th><td><span class="status">Supported</span></td><td>Models and operations generate from YAML or JSON.</td></tr>
+        <tr><th scope="row">OpenAPI 3.1</th><td><span class="status">Supported</span></td><td>Includes nullable type arrays and modeled JSON Schema 2020-12 fields.</td></tr>
+        <tr><th scope="row">OpenAPI 3.2</th><td><span class="status status-experimental">Experimental</span></td><td>Parses with a warning; selected deltas affect generated methods.</td></tr>
+        <tr><th scope="row">oneOf / anyOf / allOf</th><td><span class="status">Tested patterns</span></td><td>Includes discriminated, untagged, scalar/object, and nested fixtures.</td></tr>
+        <tr><th scope="row">Reqwest client</th><td><span class="status">Supported</span></td><td>Async methods, auth, retries, tracing, typed errors, and builders.</td></tr>
+        <tr><th scope="row">Axum server</th><td><span class="status">Opt-in</span></td><td>Selected-operation traits, routes, typed responses, and SSE variants.</td></tr>
+        <tr><th scope="row">Webhooks</th><td><span class="status status-partial">Partial</span></td><td>Ingested as operations; verify the exact server or client behavior you need.</td></tr>
+        <tr><th scope="row">Runtime schema validation</th><td>Not generated</td><td>Constraints are documented but not enforced by a validator crate.</td></tr>
+        <tr><th scope="row">OpenAPI 2.0</th><td>Not supported</td><td>Convert Swagger documents to OpenAPI 3 first.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="corpus">Inspect the real-world corpus</h2>
+  <p>
+    The specs are source-controlled so a compatibility claim can be tied to a commit. Run the same generation tier locally from the repository root:
+  </p>
+  <CodeBlock label="Terminal" code={`# Generate every supported document without full compilation
+SPEC_COMPILE_PARSE_ONLY=1 scripts/spec-compile.sh
+
+# Compile the two fast-tier production targets
+scripts/spec-compile.sh anthropic openai
+
+# Compile the complete supported corpus
+scripts/spec-compile.sh`} />
+  <p>
+    Browse the <a href="https://github.com/gpu-cli/openapi-to-rust/tree/main/specs">versioned specification corpus</a> and the
+    <a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/.github/workflows/ci.yml">workflow that defines both tiers</a>.
+  </p>
+
+  <h2 id="conformance">What the conformance reports do not claim</h2>
+  <p>
+    The fixture harness tracks multiple conceptual layers, but later semantic and code-generation thresholds remain deferred.
+    The vendored JSON Schema Test Suite runner enforces no-regression ceilings for parsing and lossless round trips; it does not yet assert full semantic JSON Schema conformance.
+  </p>
+  <ul>
+    <li>Unknown or newly modeled fields may be retained without influencing generated code.</li>
+    <li>Dynamic-reference anchor-scope resolution is incomplete.</li>
+    <li>OpenAPI 3.2 behavior is explicitly experimental.</li>
+    <li>Runtime constraint validation is intentionally absent.</li>
+    <li>A compile check cannot verify behavior against a live service.</li>
+  </ul>
+
+  <h2 id="verify">Add evidence for the API you depend on</h2>
+  <p>
+    Generate your exact versioned document, compile it, and add request serialization tests for the operations your application calls.
+    If an uncommon schema shape fails, minimize it into a focused fixture and open an issue with the generated output or error.
+  </p>
+  <CodeBlock label="Project check" code={`openapi-to-rust generate openapi.yaml --check
+cargo test
+cargo check`} />
+  <p>Start with the <a href="/docs/getting-started">step-by-step Rust client guide</a> or review <a href="/guides/openapi-3-1-rust">OpenAPI 3.1 schema behavior</a>.</p>
+</DocsLayout>
+
+<style>
+  .evidence-numbers { display: grid; grid-template-columns: repeat(4, 1fr); margin-block: 2rem; border-block: 1px solid var(--ink); }
+  .evidence-numbers div { min-height: 125px; border-right: 1px solid var(--line); padding: 1rem; }
+  .evidence-numbers div:first-child { border-left: 1px solid var(--line); }
+  .evidence-numbers strong { display: block; color: var(--rust-dark); font-size: 2rem; line-height: 1; }
+  .evidence-numbers strong { font-variant-numeric: tabular-nums; }
+  .evidence-numbers span { display: block; margin-top: 0.7rem; color: var(--muted); font-size: 0.75rem; line-height: 1.35; }
+  @media (max-width: 660px) { .evidence-numbers { grid-template-columns: 1fr 1fr; } .evidence-numbers div:nth-child(3) { border-left: 1px solid var(--line); border-top: 1px solid var(--line); } .evidence-numbers div:nth-child(4) { border-top: 1px solid var(--line); } }
+</style>

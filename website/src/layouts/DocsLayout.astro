@@ -1,0 +1,116 @@
+---
+import BaseLayout from "./BaseLayout.astro";
+import Breadcrumbs from "../components/Breadcrumbs.astro";
+
+interface TocItem {
+  id: string;
+  label: string;
+}
+
+interface Props {
+  title: string;
+  description: string;
+  h1: string;
+  lead: string;
+  canonicalPath: string;
+  category?: string;
+  toc?: TocItem[];
+  updated?: string;
+}
+
+const {
+  title,
+  description,
+  h1,
+  lead,
+  canonicalPath,
+  category = "Documentation",
+  toc = [],
+  updated = "July 15, 2026",
+} = Astro.props;
+
+const absoluteUrl = new URL(canonicalPath, Astro.site).toString();
+const breadcrumbItems = [
+  { "@type": "ListItem", position: 1, name: "Home", item: "https://openapi-to-rust.dev/" },
+  ...(category === "Documentation"
+    ? [{ "@type": "ListItem", position: 2, name: "Documentation", item: "https://openapi-to-rust.dev/docs" }]
+    : []),
+  { "@type": "ListItem", position: category === "Documentation" ? 3 : 2, name: h1, item: absoluteUrl },
+];
+const schema = [
+  {
+    "@context": "https://schema.org",
+    "@type": "TechArticle",
+    headline: h1,
+    description,
+    dateModified: "2026-07-15",
+    url: absoluteUrl,
+    author: {
+      "@type": "Organization",
+      name: "openapi-to-rust contributors",
+      url: "https://github.com/gpu-cli/openapi-to-rust/graphs/contributors",
+    },
+  },
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: breadcrumbItems,
+  },
+];
+
+const docsOrder = [
+  { href: "/docs", label: "Documentation" },
+  { href: "/docs/getting-started", label: "Getting Started" },
+  { href: "/docs/rust-client-generator", label: "Rust Client Generation" },
+  { href: "/openapi-to-axum", label: "Axum Server Generation" },
+  { href: "/guides/openapi-3-1-rust", label: "OpenAPI 3.1 Support" },
+  { href: "/compatibility", label: "Compatibility Evidence" },
+  { href: "/compare/openapi-generator", label: "Generator Comparison" },
+];
+const currentIndex = docsOrder.findIndex((item) => item.href === canonicalPath);
+const previous = currentIndex > 0 ? docsOrder[currentIndex - 1] : undefined;
+const next = currentIndex >= 0 && currentIndex < docsOrder.length - 1 ? docsOrder[currentIndex + 1] : undefined;
+---
+
+<BaseLayout {title} {description} {canonicalPath} {schema}>
+  <div class="shell">
+    <Breadcrumbs items={[{ href: category === "Documentation" ? "/docs" : undefined, label: category }, { label: h1 }]} />
+  </div>
+  <header class="page-hero shell">
+    <p class="eyebrow">{category}</p>
+    <h1>{h1}</h1>
+    <p class="lead">{lead}</p>
+    <p class="last-updated">Last reviewed {updated}</p>
+  </header>
+  <div class="shell doc-shell">
+    {toc.length > 0 && (
+      <details class="mobile-toc">
+        <summary>On This Page</summary>
+        <ol>
+          {toc.map((item) => <li><a href={`#${item.id}`}>{item.label}</a></li>)}
+        </ol>
+      </details>
+    )}
+    <article class="prose">
+      <slot />
+      {(previous || next) && (
+        <nav class="doc-pagination" aria-label="Documentation pages">
+          {previous ? <a href={previous.href}><span>Previous</span><b>← {previous.label}</b></a> : <span></span>}
+          {next && <a href={next.href}><span>Next</span><b>{next.label} →</b></a>}
+        </nav>
+      )}
+    </article>
+    {toc.length > 0 && (
+      <aside class="on-this-page" aria-label="On this page">
+        <h2>On this page</h2>
+        <ol>
+          {toc.map((item) => <li><a href={`#${item.id}`}>{item.label}</a></li>)}
+        </ol>
+      </aside>
+    )}
+  </div>
+</BaseLayout>
+
+<style>
+  .last-updated { margin-top: 1.5rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.72rem; }
+</style>
