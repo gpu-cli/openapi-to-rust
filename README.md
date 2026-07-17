@@ -16,7 +16,7 @@ hosted fixture:
 
 ```bash
 cargo install --locked openapi-to-rust
-openapi-to-rust generate https://raw.githubusercontent.com/gpu-cli/openapi-to-rust/v0.6.0/tests/fixtures/operation_extraction/simple_get.json
+openapi-to-rust generate https://raw.githubusercontent.com/gpu-cli/openapi-to-rust/v0.7.0/tests/fixtures/operation_extraction/simple_get.json
 ```
 
 This writes `src/generated/{types,client,mod}.rs` and the exact dependencies

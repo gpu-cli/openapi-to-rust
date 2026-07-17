@@ -4,7 +4,7 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
-## [Unreleased]
+## [0.7.0] - 2026-07-17
 
 ### Added
 
@@ -87,7 +87,8 @@ when correcting output that was wrong or incomplete on the wire.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/gpu-cli/openapi-to-rust/releases/tag/v0.6.0
 [0.5.3]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.5.1...v0.5.2
