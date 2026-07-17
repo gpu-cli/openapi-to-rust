@@ -1941,108 +1941,12 @@ impl SchemaAnalyzer {
                             format!("{context_name}{suffix}")
                         };
 
-                        // Resolve a name that either matches an existing same-valued
-                        // enum (dedup) or doesn't collide with a different one.
-                        //
-                        // Two distinct inline enums can land on the same primary
-                        // candidate when a parent schema has a property like
-                        // `type` that recurs at multiple nesting levels — e.g.
-                        // Latitude.sh's `plan_data.type = ["plans"]` (the
-                        // JSON-API resource type) and
-                        // `plan_data.attributes.specs.drives[].type =
-                        // ["SSD","HDD","NVME"]` both want to become
-                        // `PlanDataType`. We must NOT silently overwrite the
-                        // first registration: that breaks deserialization
-                        // because both fields end up referencing whichever
-                        // enum was processed last.
-                        //
-                        // Disambiguation strategy: append the PascalCase first
-                        // enum value (`PlanDataTypeNVME` vs `PlanDataTypePlans`)
-                        // and, if that's also claimed with different values,
-                        // fall back to a numeric `_2`, `_3`, … suffix.
-                        fn matches_values(existing: &AnalyzedSchema, values: &[String]) -> bool {
-                            matches!(
-                                &existing.schema_type,
-                                SchemaType::StringEnum { values: existing_values }
-                                    if existing_values == values
-                            )
-                        }
-
-                        let mut enum_type_name = primary_name.clone();
-                        let mut should_insert = match self.resolved_cache.get(&enum_type_name) {
-                            None => true,
-                            Some(existing) if matches_values(existing, &enum_values) => false,
-                            Some(_) => {
-                                // Collision with different values — try a
-                                // value-suffixed name first.
-                                let suffix = enum_values
-                                    .first()
-                                    .map(|v| self.to_pascal_case(v))
-                                    .unwrap_or_else(|| "Variant".to_string());
-                                let candidate = format!("{primary_name}{suffix}");
-
-                                let resolved = match self.resolved_cache.get(&candidate) {
-                                    None => Some((candidate.clone(), true)),
-                                    Some(existing) if matches_values(existing, &enum_values) => {
-                                        Some((candidate.clone(), false))
-                                    }
-                                    Some(_) => {
-                                        // Walk a numeric suffix until we find
-                                        // a slot that's free or matches.
-                                        let mut found = None;
-                                        for n in 2..1000 {
-                                            let numbered = format!("{candidate}_{n}");
-                                            match self.resolved_cache.get(&numbered) {
-                                                None => {
-                                                    found = Some((numbered, true));
-                                                    break;
-                                                }
-                                                Some(existing)
-                                                    if matches_values(existing, &enum_values) =>
-                                                {
-                                                    found = Some((numbered, false));
-                                                    break;
-                                                }
-                                                Some(_) => continue,
-                                            }
-                                        }
-                                        found
-                                    }
-                                };
-
-                                let (resolved_name, insert) = resolved.unwrap_or((candidate, true));
-                                enum_type_name = resolved_name;
-                                insert
-                            }
-                        };
-
-                        // Store the enum as a named schema if this is the
-                        // first time we've seen this exact (name, values) pair.
-                        if should_insert {
-                            self.resolved_cache.insert(
-                                enum_type_name.clone(),
-                                AnalyzedSchema {
-                                    name: enum_type_name.clone(),
-                                    original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                                    schema_type: SchemaType::StringEnum {
-                                        values: enum_values,
-                                    },
-                                    dependencies: HashSet::new(),
-                                    nullable: false,
-                                    description: schema.details().description.clone(),
-                                    default: schema.details().default.clone(),
-                                },
-                            );
-                            // Silence unused-write warnings when the value
-                            // is not consulted again on this path.
-                            let _ = &mut should_insert;
-                        }
-
-                        // Return a reference to the named enum type
-                        dependencies.insert(enum_type_name.clone());
-                        return Ok(SchemaType::Reference {
-                            target: enum_type_name,
-                        });
+                        return Ok(self.hoist_inline_string_enum(
+                            schema,
+                            enum_values,
+                            primary_name,
+                            dependencies,
+                        ));
                     } else {
                         // Property-level string with no enum values:
                         // route through TypeMapper so `format: date-time`
@@ -3484,6 +3388,116 @@ impl SchemaAnalyzer {
         }
     }
 
+    /// Register an inline string enum as a named `StringEnum` schema and
+    /// return a `Reference` to it. Shared by property-level enums
+    /// (`{Schema}{Prop}`) and array-item enums (`{Schema}{Prop}Item`).
+    ///
+    /// Resolves a name that either matches an existing same-valued
+    /// enum (dedup) or doesn't collide with a different one.
+    ///
+    /// Two distinct inline enums can land on the same primary
+    /// candidate when a parent schema has a property like
+    /// `type` that recurs at multiple nesting levels — e.g.
+    /// Latitude.sh's `plan_data.type = ["plans"]` (the
+    /// JSON-API resource type) and
+    /// `plan_data.attributes.specs.drives[].type =
+    /// ["SSD","HDD","NVME"]` both want to become
+    /// `PlanDataType`. We must NOT silently overwrite the
+    /// first registration: that breaks deserialization
+    /// because both fields end up referencing whichever
+    /// enum was processed last.
+    ///
+    /// Disambiguation strategy: append the PascalCase first
+    /// enum value (`PlanDataTypeNVME` vs `PlanDataTypePlans`)
+    /// and, if that's also claimed with different values,
+    /// fall back to a numeric `_2`, `_3`, … suffix.
+    fn hoist_inline_string_enum(
+        &mut self,
+        schema: &Schema,
+        enum_values: Vec<String>,
+        primary_name: String,
+        dependencies: &mut HashSet<String>,
+    ) -> SchemaType {
+        fn matches_values(existing: &AnalyzedSchema, values: &[String]) -> bool {
+            matches!(
+                &existing.schema_type,
+                SchemaType::StringEnum { values: existing_values }
+                    if existing_values == values
+            )
+        }
+
+        let mut enum_type_name = primary_name.clone();
+        let should_insert = match self.resolved_cache.get(&enum_type_name) {
+            None => true,
+            Some(existing) if matches_values(existing, &enum_values) => false,
+            Some(_) => {
+                // Collision with different values — try a
+                // value-suffixed name first.
+                let suffix = enum_values
+                    .first()
+                    .map(|v| self.to_pascal_case(v))
+                    .unwrap_or_else(|| "Variant".to_string());
+                let candidate = format!("{primary_name}{suffix}");
+
+                let resolved = match self.resolved_cache.get(&candidate) {
+                    None => Some((candidate.clone(), true)),
+                    Some(existing) if matches_values(existing, &enum_values) => {
+                        Some((candidate.clone(), false))
+                    }
+                    Some(_) => {
+                        // Walk a numeric suffix until we find
+                        // a slot that's free or matches.
+                        let mut found = None;
+                        for n in 2..1000 {
+                            let numbered = format!("{candidate}_{n}");
+                            match self.resolved_cache.get(&numbered) {
+                                None => {
+                                    found = Some((numbered, true));
+                                    break;
+                                }
+                                Some(existing) if matches_values(existing, &enum_values) => {
+                                    found = Some((numbered, false));
+                                    break;
+                                }
+                                Some(_) => continue,
+                            }
+                        }
+                        found
+                    }
+                };
+
+                let (resolved_name, insert) = resolved.unwrap_or((candidate, true));
+                enum_type_name = resolved_name;
+                insert
+            }
+        };
+
+        // Store the enum as a named schema if this is the
+        // first time we've seen this exact (name, values) pair.
+        if should_insert {
+            self.resolved_cache.insert(
+                enum_type_name.clone(),
+                AnalyzedSchema {
+                    name: enum_type_name.clone(),
+                    original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                    schema_type: SchemaType::StringEnum {
+                        values: enum_values,
+                    },
+                    dependencies: HashSet::new(),
+                    nullable: false,
+                    description: schema.details().description.clone(),
+                    default: schema.details().default.clone(),
+                },
+            );
+        }
+
+        // Return a reference to the named enum type
+        dependencies.insert(enum_type_name.clone());
+        SchemaType::Reference {
+            target: enum_type_name,
+        }
+    }
+
     fn analyze_array_schema(
         &mut self,
         schema: &Schema,
@@ -3526,10 +3540,27 @@ impl SchemaAnalyzer {
                 Schema::Typed { schema_type, .. } => {
                     // Array of primitive types
                     match schema_type {
-                        OpenApiSchemaType::String => SchemaType::Primitive {
-                            rust_type: "String".to_string(),
-                            serde_with: None,
-                        },
+                        OpenApiSchemaType::String => {
+                            // Inline string enum in array items — hoist to a
+                            // named enum (`{Parent}Item`) instead of collapsing
+                            // to `Vec<String>`.
+                            match items_schema
+                                .details()
+                                .string_enum_values()
+                                .filter(|values| !values.is_empty())
+                            {
+                                Some(values) => self.hoist_inline_string_enum(
+                                    items_schema,
+                                    values,
+                                    format!("{parent_schema_name}Item"),
+                                    dependencies,
+                                ),
+                                None => SchemaType::Primitive {
+                                    rust_type: "String".to_string(),
+                                    serde_with: None,
+                                },
+                            }
+                        }
                         OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
                             let details = items_schema.details();
                             let rust_type = self.get_number_rust_type(schema_type.clone(), details);
@@ -3646,10 +3677,26 @@ impl SchemaAnalyzer {
                                     target: object_type_name,
                                 }
                             }
-                            OpenApiSchemaType::String => SchemaType::Primitive {
-                                rust_type: "String".to_string(),
-                                serde_with: None,
-                            },
+                            OpenApiSchemaType::String => {
+                                // Typeless (OpenAPI 3.1) enum in array items —
+                                // same hoisting as the typed-string arm.
+                                match items_schema
+                                    .details()
+                                    .string_enum_values()
+                                    .filter(|values| !values.is_empty())
+                                {
+                                    Some(values) => self.hoist_inline_string_enum(
+                                        items_schema,
+                                        values,
+                                        format!("{parent_schema_name}Item"),
+                                        dependencies,
+                                    ),
+                                    None => SchemaType::Primitive {
+                                        rust_type: "String".to_string(),
+                                        serde_with: None,
+                                    },
+                                }
+                            }
                             OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
                                 let details = items_schema.details();
                                 let rust_type = self.get_number_rust_type(inferred, details);

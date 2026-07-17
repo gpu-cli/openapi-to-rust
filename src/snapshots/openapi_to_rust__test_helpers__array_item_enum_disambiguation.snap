@@ -1,0 +1,77 @@
+---
+source: src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct Outer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nested: Option<OuterNested>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<OuterTagsItemRED>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum OuterTagsItemRED {
+    #[default]
+    #[serde(rename = "RED")]
+    Red,
+    #[serde(rename = "BLUE")]
+    Blue,
+}
+impl OuterTagsItemRED {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Red => "RED",
+            Self::Blue => "BLUE",
+        }
+    }
+}
+impl ::std::fmt::Display for OuterTagsItemRED {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for OuterTagsItemRED {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct OuterNested {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<OuterTagsItem>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum OuterTagsItem {
+    #[default]
+    #[serde(rename = "HOT")]
+    Hot,
+    #[serde(rename = "COLD")]
+    Cold,
+}
+impl OuterTagsItem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hot => "HOT",
+            Self::Cold => "COLD",
+        }
+    }
+}
+impl ::std::fmt::Display for OuterTagsItem {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for OuterTagsItem {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}

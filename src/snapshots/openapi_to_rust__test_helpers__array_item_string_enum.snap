@@ -1,0 +1,44 @@
+---
+source: src/test_helpers.rs
+expression: "&generated_code"
+---
+//! Generated types from OpenAPI specification
+//!
+//! This file contains all the generated types for the API.
+//! Do not edit manually - regenerate using the appropriate script.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::let_unit_value)]
+#![allow(unreachable_patterns)]
+use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct Profile {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub languages: Option<Vec<ProfileLanguagesItem>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum ProfileLanguagesItem {
+    #[default]
+    #[serde(rename = "EN")]
+    En,
+    #[serde(rename = "ES")]
+    Es,
+}
+impl ProfileLanguagesItem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::En => "EN",
+            Self::Es => "ES",
+        }
+    }
+}
+impl ::std::fmt::Display for ProfileLanguagesItem {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for ProfileLanguagesItem {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
