@@ -26,6 +26,9 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- Array items with an inline string enum now generate a named enum
+  (`{Parent}Item`) instead of collapsing to `Vec<String>`, including
+  `anyOf`-nullable arrays and typeless OpenAPI 3.1 enums (#33).
 - README compatibility, corpus, and conformance claims; pull-request and
   scheduled full-corpus CI tiers; and release preflight checks.
 - Canonical `[generator.types]` configuration parsing, strict unknown-field
