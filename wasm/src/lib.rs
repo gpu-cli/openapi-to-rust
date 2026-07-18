@@ -166,7 +166,7 @@ fn crate_files(crate_name: &str, files: &[PlaygroundFile]) -> Vec<PlaygroundFile
             "[package]\n\
              name = \"{crate_name}\"\n\
              version = \"0.1.0\"\n\
-             edition = \"2021\"\n\
+             edition = \"2024\"\n\
              \n\
              {dependencies_section}"
         ),

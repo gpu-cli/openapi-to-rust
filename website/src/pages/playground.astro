@@ -389,16 +389,27 @@ const anthropicSpecUrl =
 
   downloadButton.addEventListener("click", async () => {
     if (!output) return;
-    const tar = buildTar(output.crateName, output.crateFiles);
-    const gzipped = await new Response(
-      tar.stream().pipeThrough(new CompressionStream("gzip")),
-    ).blob();
-    const url = URL.createObjectURL(gzipped);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${output.crateName}.tar.gz`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    downloadButton.disabled = true;
+    downloadButton.textContent = "Preparing…";
+    try {
+      const tar = buildTar(output.crateName, output.crateFiles);
+      const gzipped = await new Response(
+        tar.stream().pipeThrough(new CompressionStream("gzip")),
+      ).blob();
+      const url = URL.createObjectURL(gzipped);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${output.crateName}.tar.gz`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      // Revoking immediately races the browser's fetch of the blob URL and
+      // can stall the download; give it a generous window instead.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } finally {
+      downloadButton.disabled = false;
+      downloadButton.textContent = "Download crate (.tar.gz)";
+    }
   });
 </script>
 
