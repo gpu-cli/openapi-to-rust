@@ -9,14 +9,29 @@ const examples = [
 
 const anthropicSpecUrl =
   "https://raw.githubusercontent.com/gpu-cli/openapi-to-rust/main/tests/fixtures/anthropic.yml";
+
+const description =
+  "Paste an OpenAPI 3.0/3.1 document and instantly see the typed Rust models and clients openapi-to-rust generates — running entirely in your browser via WebAssembly.";
+
+const schema = {
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  name: "openapi-to-rust playground",
+  url: "https://openapi-to-rust.dev/playground",
+  description,
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "Any (browser, WebAssembly)",
+  offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+  isPartOf: { "@type": "WebSite", name: "openapi-to-rust", url: "https://openapi-to-rust.dev/" },
+};
 ---
 
 <BaseLayout
   title="Playground | Generate Rust from OpenAPI in your browser"
-  description="Paste an OpenAPI 3.0/3.1 document and instantly see the typed Rust models and clients openapi-to-rust generates — running entirely in your browser via WebAssembly."
+  {description}
   canonicalPath="/playground"
+  {schema}
 >
-  <main id="main">
     <section class="playground-hero">
       <div class="shell">
         <h1>Playground</h1>
@@ -53,7 +68,7 @@ const anthropicSpecUrl =
           </label>
           <button class="button button-secondary" type="button" data-fetch>Fetch</button>
         </div>
-        <p class="notice notice-error" data-fetch-error hidden></p>
+        <p class="notice notice-error" role="alert" data-fetch-error hidden></p>
         <label class="field editor-field">
           <span>OpenAPI document (YAML or JSON)</span>
           <textarea
@@ -71,14 +86,14 @@ const anthropicSpecUrl =
       </div>
 
       <div class="pane output-pane">
-        <p class="notice notice-error" data-error hidden></p>
-        <p class="notice notice-warning" data-warning hidden></p>
+        <p class="notice notice-error" role="alert" data-error hidden></p>
+        <p class="notice notice-warning" role="status" data-warning hidden></p>
         <div class="output-empty" data-empty>
           <p>Generated files appear here.</p>
           <p>Pick an example on the left to see typed models, an async client, and the dependency fragment the generator produces.</p>
         </div>
         <div class="output-result" data-result hidden>
-          <div class="tab-row" role="tablist" data-tabs></div>
+          <div class="tab-row" role="group" aria-label="Generated files" data-tabs></div>
           <figure class="code-block output-block">
             <figcaption>
               <span data-active-file></span>
@@ -89,7 +104,7 @@ const anthropicSpecUrl =
             <pre><code data-code></code></pre>
           </figure>
           <div class="result-footer">
-            <p class="stats" data-stats></p>
+            <p class="stats" role="status" data-stats></p>
             <button class="button button-secondary download-button" type="button" data-download>
               Download crate (.tar.gz)
             </button>
@@ -98,13 +113,14 @@ const anthropicSpecUrl =
       </div>
     </section>
 
-    <p class="shell playground-footer">
-      Runs <code>openapi-to-rust</code> <span data-version></span> compiled to WebAssembly. Same
-      pipeline as the CLI, minus writing files. The downloaded archive is a complete crate —
-      extract it and run <code>cargo build</code>. Constraint metadata is emitted as doc comments —
-      generated code carries no runtime validation dependencies.
-    </p>
-  </main>
+    <div class="shell">
+      <p class="playground-footer">
+        Runs <code>openapi-to-rust</code> <span data-version></span> compiled to WebAssembly. Same
+        pipeline as the CLI, minus writing files. The downloaded archive is a complete crate —
+        extract it and run <code>cargo build</code>. Constraint metadata is emitted as doc comments —
+        generated code carries no runtime validation dependencies.
+      </p>
+    </div>
 </BaseLayout>
 
 <script>
@@ -166,10 +182,17 @@ const anthropicSpecUrl =
 
   const worker = new Worker("/playground/worker.js", { type: "module" });
   let workerReady = false;
+  let pendingGenerate = false;
   let requestId = 0;
   let output: PlaygroundOutput | null = null;
   let activeFile = 0;
   let sourceLabel = "openapi-to-rust.dev/playground";
+
+  /** types.rs first (the interesting output), dependency fragment last. */
+  const fileOrder = (name: string): number =>
+    name === "types.rs" ? 0 : name === "REQUIRED_DEPS.toml" ? 9 : 1;
+
+  const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
   const setBusy = (busy: boolean): void => {
     generateButton.disabled = busy || !workerReady;
@@ -196,13 +219,13 @@ const anthropicSpecUrl =
     renderCode(file);
     copyLabel.textContent = "Copy";
     tabRow.querySelectorAll<HTMLButtonElement>("button").forEach((tab, index) => {
-      tab.setAttribute("aria-selected", index === activeFile ? "true" : "false");
+      tab.setAttribute("aria-pressed", index === activeFile ? "true" : "false");
     });
   };
 
   const renderResult = (result: PlaygroundOutput): void => {
-    output = result;
-    const files = result.files;
+    const files = [...result.files].sort((a, b) => fileOrder(a.name) - fileOrder(b.name));
+    output = { ...result, files };
     activeFile = Math.max(
       files.findIndex((file) => file.name === "types.rs"),
       0,
@@ -211,7 +234,6 @@ const anthropicSpecUrl =
       ...files.map((file, index) => {
         const tab = document.createElement("button");
         tab.type = "button";
-        tab.role = "tab";
         tab.textContent = file.name;
         tab.addEventListener("click", () => {
           activeFile = index;
@@ -223,29 +245,50 @@ const anthropicSpecUrl =
     const warning = result.warning ?? null;
     warningBox.hidden = warning === null;
     warningBox.textContent = warning ?? "";
-    statsLine.textContent = `${result.schemas} schemas · ${result.operations} operations · ${files.length} files`;
+    statsLine.textContent = `${count(result.schemas, "schema")} · ${count(result.operations, "operation")} · ${count(files.length, "file")}`;
     errorBox.hidden = true;
     emptyState.hidden = true;
     resultBox.hidden = false;
+    resultBox.classList.remove("is-stale");
     renderActiveFile();
+    // In the single-column layout the output pane sits below the fold; without
+    // this, generation appears to do nothing.
+    if (window.matchMedia("(max-width: 900px)").matches) {
+      resultBox.scrollIntoView({
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+        block: "start",
+      });
+    }
   };
 
   const showError = (message: string): void => {
     errorBox.textContent = message;
     errorBox.hidden = false;
     warningBox.hidden = true;
-    resultBox.hidden = true;
-    emptyState.hidden = true;
-    output = null;
+    // Keep the last good result visible (dimmed) instead of destroying it.
+    if (output) {
+      emptyState.hidden = true;
+      resultBox.classList.add("is-stale");
+    } else {
+      resultBox.hidden = true;
+      emptyState.hidden = false;
+    }
   };
 
   const generate = (): void => {
-    if (!workerReady || generateButton.disabled) return;
     const spec = specInput.value;
     if (!spec.trim()) {
       showError("Paste an OpenAPI document first, or pick an example above.");
       return;
     }
+    if (!workerReady) {
+      pendingGenerate = true;
+      warningBox.textContent =
+        "The generator is still loading — your document will run automatically in a moment.";
+      warningBox.hidden = false;
+      return;
+    }
+    if (generateButton.disabled) return;
     setBusy(true);
     requestId += 1;
     worker.postMessage({ id: requestId, spec, sourceLabel });
@@ -257,6 +300,11 @@ const anthropicSpecUrl =
       workerReady = true;
       versionLabel.textContent = `v${message.version}`;
       setBusy(false);
+      if (pendingGenerate) {
+        pendingGenerate = false;
+        warningBox.hidden = true;
+        generate();
+      }
       return;
     }
     if (message.id !== requestId) return;
@@ -330,6 +378,8 @@ const anthropicSpecUrl =
 
   specInput.addEventListener("input", () => {
     sourceLabel = "openapi-to-rust.dev/playground";
+    // The dropdown no longer describes the editor's content.
+    exampleSelect.value = "";
   });
 
   generateButton.addEventListener("click", generate);
@@ -415,10 +465,12 @@ const anthropicSpecUrl =
 
 <style>
   .playground-hero {
-    padding: var(--space-2xl) 0 var(--space-lg);
+    padding: var(--space-xl) 0 var(--space-lg);
   }
   .playground-hero h1 {
     margin: 0 0 var(--space-sm);
+    /* A tool page: the work area matters more than the label above it. */
+    font-size: clamp(2.1rem, 4vw, 3.2rem);
   }
   .playground-hero .lead {
     max-width: var(--reading);
@@ -435,6 +487,7 @@ const anthropicSpecUrl =
   }
 
   .pane {
+    min-width: 0;
     background: var(--white);
     border: 1px solid var(--line);
     border-radius: var(--radius);
@@ -525,22 +578,6 @@ const anthropicSpecUrl =
     flex-wrap: wrap;
     gap: var(--space-2xs);
   }
-  .tab-row button {
-    border: 1px solid var(--line);
-    border-bottom-width: 2px;
-    border-radius: var(--radius) var(--radius) 0 0;
-    background: var(--paper);
-    color: var(--muted);
-    font-family: var(--font-mono);
-    font-size: 0.8rem;
-    padding: 0.35rem 0.7rem;
-    cursor: pointer;
-  }
-  .tab-row button[aria-selected="true"] {
-    background: var(--code);
-    color: var(--code-text);
-    border-color: var(--code);
-  }
 
   .output-block {
     margin: 0;
@@ -567,6 +604,7 @@ const anthropicSpecUrl =
   }
 
   .playground-footer {
+    max-width: var(--reading);
     color: var(--muted);
     font-size: 0.9rem;
     padding-bottom: var(--space-2xl);
@@ -574,12 +612,42 @@ const anthropicSpecUrl =
 
   @media (max-width: 900px) {
     .playground {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
   }
 </style>
 
 <style is:global>
+  /* Tab buttons are created by the script at runtime, so they never receive
+     Astro's scoped style attribute — their rules must live in this global
+     block, namespaced under .playground. */
+  .playground .tab-row button {
+    min-height: 40px;
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: var(--paper);
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    padding: 0.45rem 0.8rem;
+    cursor: pointer;
+  }
+  .playground .tab-row button:hover {
+    color: var(--ink);
+    border-color: var(--line-dark);
+  }
+  .playground .tab-row button[aria-pressed="true"] {
+    background: var(--code);
+    color: var(--code-text);
+    border-color: var(--code);
+  }
+
+  /* A failed generate keeps the previous result visible, dimmed, under the error. */
+  .playground .output-result.is-stale {
+    opacity: 0.55;
+  }
+
   /* Highlighting palette for dynamically injected hljs spans; mirrors the
      site's dark code-block colors. Scoped by .output-block so it cannot leak
      into build-time-highlighted blocks elsewhere. */

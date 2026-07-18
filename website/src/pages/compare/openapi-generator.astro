@@ -22,6 +22,7 @@ const toc = [
   category="Comparison"
   {toc}
 >
+  <span slot="h1"><span class="nowrap">openapi-to-rust</span> vs OpenAPI Generator for Rust</span>
   <div class="callout">
     <strong>Independent project</strong>
     <p>openapi-to-rust is not affiliated with OpenAPI Generator, OpenAPI Tools, or the OpenAPI Initiative. OpenAPI Generator is a trademark or project name of its respective maintainers.</p>
@@ -152,12 +153,12 @@ openapi-generator-cli generate \\
   .comparison-table table { min-width: 920px; }
   .comparison-table th:first-child { position: sticky; z-index: 1; left: 0; box-shadow: 1px 0 0 var(--line); }
   .comparison-table thead th:first-child { z-index: 2; }
-  .scroll-hint { margin-bottom: -1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.74rem; }
+  .scroll-hint { margin-bottom: -1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; }
   .comparison-commands { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-block: 2rem; }
   .decision-grid > div { border: 1px solid var(--ink); border-radius: 5px; background: var(--white); padding: 1.3rem; }
   .decision-grid h3 { margin-top: 0; font-size: 1.25rem; }
   .decision-grid ul { margin-top: 1rem; }
-  .verification-note { border-top: 1px solid var(--line); padding-top: 1rem; font-family: var(--font-mono); font-size: 0.76rem; }
+  .verification-note { max-width: var(--reading); border-top: 1px solid var(--line); padding-top: 1rem; font-family: var(--font-mono); font-size: 0.76rem; }
   @media (max-width: 720px) { .comparison-commands, .decision-grid { grid-template-columns: 1fr; } }
 </style>

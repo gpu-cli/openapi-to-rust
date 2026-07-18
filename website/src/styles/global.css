@@ -287,7 +287,7 @@
     color: var(--code-muted);
     padding: 0.75rem 1rem;
     font-family: var(--font-mono);
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     letter-spacing: 0.04em;
   }
 
@@ -306,7 +306,7 @@
     color: var(--code-text);
     cursor: pointer;
     font-family: var(--font-mono);
-    font-size: 0.68rem;
+    font-size: 0.72rem;
     font-weight: 800;
   }
 
@@ -335,7 +335,7 @@
   .breadcrumbs li { display: flex; gap: 0.55rem; }
 
   .page-hero { padding: 3rem 0 4rem; }
-  .page-hero h1 { max-width: 1000px; font-size: clamp(2.8rem, 7vw, 5.7rem); }
+  .page-hero h1 { max-width: 1000px; font-size: clamp(2.4rem, 5vw, 4.2rem); overflow-wrap: break-word; }
   .page-hero .lead { max-width: 780px; margin-top: 1.5rem; color: var(--muted); font-size: clamp(1.1rem, 2.2vw, 1.35rem); }
 
   .doc-shell {
@@ -407,7 +407,7 @@
 
   .doc-pagination a:last-child { align-items: flex-end; text-align: right; }
   .doc-pagination a:hover { border-color: var(--ink); box-shadow: 3px 3px 0 var(--ink); }
-  .doc-pagination span { color: var(--muted); font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; }
+  .doc-pagination span { color: var(--muted); font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; }
   .doc-pagination b { margin-top: 0.2rem; color: var(--ink); font-size: 0.85rem; }
 
   .callout {
@@ -447,7 +447,7 @@
 
   .footer-brand { color: var(--white); }
   .footer-grid > div:first-child p { max-width: 360px; margin-top: 1.2rem; color: var(--code-muted); }
-  .footer-grid h2 { margin-bottom: 1rem; color: var(--code-muted); font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.09em; text-transform: uppercase; }
+  .footer-grid h2 { margin-bottom: 1rem; color: var(--code-muted); font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.09em; text-transform: uppercase; }
   .footer-grid > div:not(:first-child) { display: flex; flex-direction: column; align-items: flex-start; gap: 0.65rem; }
   .footer-grid a { display: inline-flex; min-height: 32px; align-items: center; color: var(--code-text); font-size: 0.86rem; text-decoration: none; }
   .footer-grid a:hover { color: var(--lime); }
@@ -461,11 +461,13 @@
     padding-top: 1.25rem;
     color: var(--code-muted);
     font-family: var(--font-mono);
-    font-size: 0.7rem;
+    font-size: 0.75rem;
   }
 }
 
 @layer utilities {
+  .nowrap { white-space: nowrap; }
+
   .sr-only {
     position: absolute;
     width: 1px;
@@ -505,7 +507,7 @@
   .mobile-nav nav a { min-height: 44px; padding: 0.7rem; font-weight: 750; text-decoration: none; }
   .mobile-nav nav a:hover,
   .mobile-nav nav a[aria-current="page"] { background: var(--paper-deep); color: var(--rust-dark); }
-  .doc-shell { grid-template-columns: 1fr; }
+  .doc-shell { grid-template-columns: minmax(0, 1fr); }
   .on-this-page { display: none; }
   .mobile-toc {
     display: block;
