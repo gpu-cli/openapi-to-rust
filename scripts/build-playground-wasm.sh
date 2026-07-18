@@ -15,6 +15,10 @@ CARGO_PROFILE_RELEASE_LTO=true \
 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
   wasm-pack build wasm --release --target web --out-dir "../$DEST"
 
+# Mark the bundle as a local build so fetch-playground-wasm.mjs never
+# clobbers it with the lock-pinned release asset.
+echo "local" > "$DEST/.source-tag"
+
 echo
 echo "Playground WASM staged in $DEST:"
 ls -lh "$DEST" | awk 'NR>1 {print "  " $9 " (" $5 ")"}'
