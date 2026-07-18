@@ -1,0 +1,602 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+const examples = [
+  { value: "simple_get.json", label: "Simple GET (JSON)" },
+  { value: "path_params.json", label: "Path parameters (JSON)" },
+  { value: "multiple_operations.json", label: "Multiple operations (JSON)" },
+];
+
+const anthropicSpecUrl =
+  "https://raw.githubusercontent.com/gpu-cli/openapi-to-rust/main/tests/fixtures/anthropic.yml";
+---
+
+<BaseLayout
+  title="Playground | Generate Rust from OpenAPI in your browser"
+  description="Paste an OpenAPI 3.0/3.1 document and instantly see the typed Rust models and clients openapi-to-rust generates — running entirely in your browser via WebAssembly."
+  canonicalPath="/playground"
+>
+  <main id="main">
+    <section class="playground-hero">
+      <div class="shell">
+        <h1>Playground</h1>
+        <p class="lead">
+          Paste an OpenAPI document — or fetch one by URL — and see the exact Rust the generator
+          emits. The real generator runs in your browser as WebAssembly; nothing is uploaded.
+        </p>
+      </div>
+    </section>
+
+    <section class="shell playground" data-anthropic-url={anthropicSpecUrl}>
+      <div class="pane input-pane">
+        <div class="pane-toolbar">
+          <label class="field">
+            <span>Example</span>
+            <select data-example>
+              <option value="">Choose an example…</option>
+              {examples.map((example) => (
+                <option value={example.value}>{example.label}</option>
+              ))}
+              <option value="__anthropic__">Anthropic API (real spec, fetched from GitHub)</option>
+            </select>
+          </label>
+        </div>
+        <div class="pane-toolbar url-row">
+          <label class="field grow">
+            <span>Fetch from URL</span>
+            <input
+              data-url
+              type="url"
+              placeholder="https://raw.githubusercontent.com/…/openapi.yaml"
+              spellcheck="false"
+            />
+          </label>
+          <button class="button button-secondary" type="button" data-fetch>Fetch</button>
+        </div>
+        <p class="notice notice-error" data-fetch-error hidden></p>
+        <label class="field editor-field">
+          <span>OpenAPI document (YAML or JSON)</span>
+          <textarea
+            data-spec
+            spellcheck="false"
+            placeholder={'openapi: "3.1.0"\ninfo:\n  title: My API\n  version: "1.0.0"\npaths: {}'}
+          ></textarea>
+        </label>
+        <div class="pane-toolbar">
+          <button class="button button-primary" type="button" data-generate disabled>
+            Loading generator…
+          </button>
+          <span class="hint">or press Ctrl/Cmd + Enter</span>
+        </div>
+      </div>
+
+      <div class="pane output-pane">
+        <p class="notice notice-error" data-error hidden></p>
+        <p class="notice notice-warning" data-warning hidden></p>
+        <div class="output-empty" data-empty>
+          <p>Generated files appear here.</p>
+          <p>Pick an example on the left to see typed models, an async client, and the dependency fragment the generator produces.</p>
+        </div>
+        <div class="output-result" data-result hidden>
+          <div class="tab-row" role="tablist" data-tabs></div>
+          <figure class="code-block output-block">
+            <figcaption>
+              <span data-active-file></span>
+              <button class="copy-button" type="button" data-copy>
+                <span data-copy-label>Copy</span>
+              </button>
+            </figcaption>
+            <pre><code data-code></code></pre>
+          </figure>
+          <div class="result-footer">
+            <p class="stats" data-stats></p>
+            <button class="button button-secondary download-button" type="button" data-download>
+              Download crate (.tar.gz)
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <p class="shell playground-footer">
+      Runs <code>openapi-to-rust</code> <span data-version></span> compiled to WebAssembly. Same
+      pipeline as the CLI, minus writing files. The downloaded archive is a complete crate —
+      extract it and run <code>cargo build</code>. Constraint metadata is emitted as doc comments —
+      generated code carries no runtime validation dependencies.
+    </p>
+  </main>
+</BaseLayout>
+
+<script>
+  import hljs from "highlight.js/lib/core";
+  import rust from "highlight.js/lib/languages/rust";
+  import ini from "highlight.js/lib/languages/ini";
+
+  hljs.registerLanguage("rust", rust);
+  hljs.registerLanguage("toml", ini);
+
+  /** Above this size, skip highlighting to keep tab switches instant. */
+  const HIGHLIGHT_LIMIT = 400_000;
+
+  interface PlaygroundFile {
+    name: string;
+    content: string;
+  }
+
+  interface PlaygroundOutput {
+    files: PlaygroundFile[];
+    crateFiles: PlaygroundFile[];
+    crateName: string;
+    /** Missing entirely when there is no warning (serde skips None). */
+    warning?: string | null;
+    schemas: number;
+    operations: number;
+  }
+
+  type WorkerMessage =
+    | { type: "ready"; version: string }
+    | { type: "result"; id: number; ok: true; result: PlaygroundOutput }
+    | { type: "result"; id: number; ok: false; error: string };
+
+  const query = <T extends Element>(selector: string): T => {
+    const element = document.querySelector<T>(selector);
+    if (!element) throw new Error(`playground: missing element ${selector}`);
+    return element;
+  };
+
+  const container = query<HTMLElement>(".playground");
+  const exampleSelect = query<HTMLSelectElement>("[data-example]");
+  const urlInput = query<HTMLInputElement>("[data-url]");
+  const fetchButton = query<HTMLButtonElement>("[data-fetch]");
+  const fetchError = query<HTMLElement>("[data-fetch-error]");
+  const specInput = query<HTMLTextAreaElement>("[data-spec]");
+  const generateButton = query<HTMLButtonElement>("[data-generate]");
+  const errorBox = query<HTMLElement>("[data-error]");
+  const warningBox = query<HTMLElement>("[data-warning]");
+  const emptyState = query<HTMLElement>("[data-empty]");
+  const resultBox = query<HTMLElement>("[data-result]");
+  const tabRow = query<HTMLElement>("[data-tabs]");
+  const activeFileLabel = query<HTMLElement>("[data-active-file]");
+  const codeBox = query<HTMLElement>("[data-code]");
+  const copyButton = query<HTMLButtonElement>("[data-copy]");
+  const copyLabel = query<HTMLElement>("[data-copy-label]");
+  const statsLine = query<HTMLElement>("[data-stats]");
+  const downloadButton = query<HTMLButtonElement>("[data-download]");
+  const versionLabel = query<HTMLElement>("[data-version]");
+
+  const worker = new Worker("/playground/worker.js", { type: "module" });
+  let workerReady = false;
+  let requestId = 0;
+  let output: PlaygroundOutput | null = null;
+  let activeFile = 0;
+  let sourceLabel = "openapi-to-rust.dev/playground";
+
+  const setBusy = (busy: boolean): void => {
+    generateButton.disabled = busy || !workerReady;
+    generateButton.textContent = busy
+      ? "Generating…"
+      : workerReady
+        ? "Generate Rust"
+        : "Loading generator…";
+  };
+
+  const renderCode = (file: PlaygroundFile): void => {
+    if (file.content.length > HIGHLIGHT_LIMIT) {
+      codeBox.textContent = file.content;
+      return;
+    }
+    const language = file.name.endsWith(".toml") ? "toml" : "rust";
+    codeBox.innerHTML = hljs.highlight(file.content, { language }).value;
+  };
+
+  const renderActiveFile = (): void => {
+    const file = output?.files[activeFile];
+    if (!file) return;
+    activeFileLabel.textContent = file.name;
+    renderCode(file);
+    copyLabel.textContent = "Copy";
+    tabRow.querySelectorAll<HTMLButtonElement>("button").forEach((tab, index) => {
+      tab.setAttribute("aria-selected", index === activeFile ? "true" : "false");
+    });
+  };
+
+  const renderResult = (result: PlaygroundOutput): void => {
+    output = result;
+    const files = result.files;
+    activeFile = Math.max(
+      files.findIndex((file) => file.name === "types.rs"),
+      0,
+    );
+    tabRow.replaceChildren(
+      ...files.map((file, index) => {
+        const tab = document.createElement("button");
+        tab.type = "button";
+        tab.role = "tab";
+        tab.textContent = file.name;
+        tab.addEventListener("click", () => {
+          activeFile = index;
+          renderActiveFile();
+        });
+        return tab;
+      }),
+    );
+    const warning = result.warning ?? null;
+    warningBox.hidden = warning === null;
+    warningBox.textContent = warning ?? "";
+    statsLine.textContent = `${result.schemas} schemas · ${result.operations} operations · ${files.length} files`;
+    errorBox.hidden = true;
+    emptyState.hidden = true;
+    resultBox.hidden = false;
+    renderActiveFile();
+  };
+
+  const showError = (message: string): void => {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+    warningBox.hidden = true;
+    resultBox.hidden = true;
+    emptyState.hidden = true;
+    output = null;
+  };
+
+  const generate = (): void => {
+    if (!workerReady || generateButton.disabled) return;
+    const spec = specInput.value;
+    if (!spec.trim()) {
+      showError("Paste an OpenAPI document first, or pick an example above.");
+      return;
+    }
+    setBusy(true);
+    requestId += 1;
+    worker.postMessage({ id: requestId, spec, sourceLabel });
+  };
+
+  worker.addEventListener("message", (event: MessageEvent<WorkerMessage>) => {
+    const message = event.data;
+    if (message.type === "ready") {
+      workerReady = true;
+      versionLabel.textContent = `v${message.version}`;
+      setBusy(false);
+      return;
+    }
+    if (message.id !== requestId) return;
+    setBusy(false);
+    if (message.ok) {
+      renderResult(message.result);
+    } else {
+      showError(message.error);
+    }
+  });
+
+  worker.addEventListener("error", () => {
+    showError("The generator failed to load. Reload the page to try again.");
+  });
+
+  const fetchSpec = async (url: string, label: string): Promise<void> => {
+    fetchError.hidden = true;
+    fetchButton.disabled = true;
+    fetchButton.textContent = "Fetching…";
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`the server responded with HTTP ${response.status}`);
+      }
+      specInput.value = await response.text();
+      sourceLabel = label;
+      generate();
+    } catch (error) {
+      const detail = error instanceof TypeError
+        ? "That server doesn't allow browser fetches (CORS). Download the file and paste it here instead."
+        : `Fetch failed: ${error instanceof Error ? error.message : String(error)}.`;
+      fetchError.textContent = detail;
+      fetchError.hidden = false;
+    } finally {
+      fetchButton.disabled = false;
+      fetchButton.textContent = "Fetch";
+    }
+  };
+
+  exampleSelect.addEventListener("change", () => {
+    const choice = exampleSelect.value;
+    if (!choice) return;
+    if (choice === "__anthropic__") {
+      const url = container.dataset.anthropicUrl ?? "";
+      urlInput.value = url;
+      void fetchSpec(url, url);
+      return;
+    }
+    void fetchSpec(
+      `/playground/examples/${choice}`,
+      `openapi-to-rust.dev/playground/examples/${choice}`,
+    );
+  });
+
+  fetchButton.addEventListener("click", () => {
+    const url = urlInput.value.trim();
+    if (!url) {
+      fetchError.textContent = "Enter a URL to fetch.";
+      fetchError.hidden = false;
+      return;
+    }
+    void fetchSpec(url, url);
+  });
+
+  urlInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      fetchButton.click();
+    }
+  });
+
+  specInput.addEventListener("input", () => {
+    sourceLabel = "openapi-to-rust.dev/playground";
+  });
+
+  generateButton.addEventListener("click", generate);
+  document.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      generate();
+    }
+  });
+
+  copyButton.addEventListener("click", async () => {
+    const file = output?.files[activeFile];
+    if (!file) return;
+    try {
+      await navigator.clipboard.writeText(file.content);
+      copyLabel.textContent = "Copied";
+    } catch {
+      copyLabel.textContent = "Copy failed";
+    }
+  });
+
+  // --- crate download: ustar tar + native gzip ---
+
+  const encoder = new TextEncoder();
+
+  const octal = (value: number, width: number): string =>
+    `${value.toString(8).padStart(width - 1, "0")}\0`;
+
+  const tarEntry = (path: string, data: Uint8Array): Uint8Array => {
+    const header = new Uint8Array(512);
+    const write = (text: string, offset: number): void => {
+      header.set(encoder.encode(text), offset);
+    };
+    write(path, 0);
+    write(octal(0o644, 8), 100);
+    write(octal(0, 8), 108);
+    write(octal(0, 8), 116);
+    write(octal(data.length, 12), 124);
+    write(octal(Math.floor(Date.now() / 1000), 12), 136);
+    write("        ", 148); // checksum placeholder: spaces while summing
+    write("0", 156);
+    write("ustar\0" + "00", 257);
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148);
+    const padded = new Uint8Array(512 + Math.ceil(data.length / 512) * 512);
+    padded.set(header, 0);
+    padded.set(data, 512);
+    return padded;
+  };
+
+  const buildTar = (root: string, files: PlaygroundFile[]): Blob => {
+    const parts = files.map((file) => tarEntry(`${root}/${file.name}`, encoder.encode(file.content)));
+    parts.push(new Uint8Array(1024)); // end-of-archive marker
+    return new Blob(parts as BlobPart[], { type: "application/x-tar" });
+  };
+
+  downloadButton.addEventListener("click", async () => {
+    if (!output) return;
+    const tar = buildTar(output.crateName, output.crateFiles);
+    const gzipped = await new Response(
+      tar.stream().pipeThrough(new CompressionStream("gzip")),
+    ).blob();
+    const url = URL.createObjectURL(gzipped);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${output.crateName}.tar.gz`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  });
+</script>
+
+<style>
+  .playground-hero {
+    padding: var(--space-2xl) 0 var(--space-lg);
+  }
+  .playground-hero h1 {
+    margin: 0 0 var(--space-sm);
+  }
+  .playground-hero .lead {
+    max-width: var(--reading);
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .playground {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: var(--space-lg);
+    align-items: start;
+    padding-bottom: var(--space-xl);
+  }
+
+  .pane {
+    background: var(--white);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: var(--space-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+  }
+
+  .pane-toolbar {
+    display: flex;
+    align-items: end;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .field.grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .field select,
+  .field input,
+  .field textarea {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.65rem;
+    background: var(--paper);
+    color: var(--ink);
+  }
+  .url-row {
+    align-items: end;
+  }
+
+  .editor-field {
+    flex: 1;
+  }
+  .editor-field textarea {
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.5;
+    min-height: 22rem;
+    resize: vertical;
+    white-space: pre;
+  }
+
+  .hint {
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+
+  .notice {
+    margin: 0;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius);
+    font-size: 0.9rem;
+  }
+  .notice-error {
+    background: #fbeae4;
+    border: 1px solid var(--rust);
+    color: var(--rust-dark);
+    white-space: pre-wrap;
+  }
+  .notice-warning {
+    background: #fdf6dd;
+    border: 1px solid #d3b93c;
+    color: #6b5c14;
+  }
+
+  .output-pane {
+    min-height: 30rem;
+  }
+  .output-empty {
+    margin: auto;
+    text-align: center;
+    color: var(--muted);
+    max-width: 34ch;
+  }
+
+  .tab-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2xs);
+  }
+  .tab-row button {
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: var(--radius) var(--radius) 0 0;
+    background: var(--paper);
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    padding: 0.35rem 0.7rem;
+    cursor: pointer;
+  }
+  .tab-row button[aria-selected="true"] {
+    background: var(--code);
+    color: var(--code-text);
+    border-color: var(--code);
+  }
+
+  .output-block {
+    margin: 0;
+  }
+  .output-block pre {
+    max-height: 34rem;
+    overflow: auto;
+  }
+
+  .result-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+  }
+  .stats {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .download-button {
+    font-size: 0.85rem;
+  }
+
+  .playground-footer {
+    color: var(--muted);
+    font-size: 0.9rem;
+    padding-bottom: var(--space-2xl);
+  }
+
+  @media (max-width: 900px) {
+    .playground {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<style is:global>
+  /* Highlighting palette for dynamically injected hljs spans; mirrors the
+     site's dark code-block colors. Scoped by .output-block so it cannot leak
+     into build-time-highlighted blocks elsewhere. */
+  .output-block .hljs-keyword,
+  .output-block .hljs-meta {
+    color: #e8a87c;
+  }
+  .output-block .hljs-title,
+  .output-block .hljs-section {
+    color: #d9fb68;
+  }
+  .output-block .hljs-type,
+  .output-block .hljs-built_in,
+  .output-block .hljs-attr {
+    color: #9ecfb5;
+  }
+  .output-block .hljs-string {
+    color: #c4e3a2;
+  }
+  .output-block .hljs-number,
+  .output-block .hljs-literal {
+    color: #e5c890;
+  }
+  .output-block .hljs-comment,
+  .output-block .hljs-doctag {
+    color: var(--code-muted);
+  }
+  .output-block .hljs-punctuation {
+    color: var(--code-text);
+  }
+</style>

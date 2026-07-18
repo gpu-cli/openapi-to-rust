@@ -648,12 +648,12 @@ impl ConfigFile {
         let mut errors = Vec::new();
 
         let spec_source = self.generator.spec_path.to_string_lossy();
-        if crate::cli::is_remote_spec(&spec_source) {
-            if let Err(error) = crate::cli::validate_remote_spec_url(&spec_source) {
+        if crate::spec_source::is_remote_spec(&spec_source) {
+            if let Err(error) = crate::spec_source::validate_remote_spec_url(&spec_source) {
                 errors.push(format!("generator.spec_path: {error}"));
             }
         } else if spec_source.contains("://") {
-            let error = crate::cli::validate_remote_spec_url(&spec_source)
+            let error = crate::spec_source::validate_remote_spec_url(&spec_source)
                 .err()
                 .unwrap_or_else(|| "unsupported remote OpenAPI URL".to_string());
             errors.push(format!("generator.spec_path: {error}"));
@@ -693,7 +693,7 @@ impl ConfigFile {
 
         if let Some(http) = &self.http_client {
             if let Some(base_url) = &http.base_url
-                && reqwest::Url::parse(base_url).is_err()
+                && url::Url::parse(base_url).is_err()
             {
                 errors.push("http_client.base_url: base_url must be a valid URL".to_string());
             }

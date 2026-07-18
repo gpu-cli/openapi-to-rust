@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/fetch-playground-wasm.mjs",
     "dev": "astro dev",
+    "prebuild": "node scripts/fetch-playground-wasm.mjs",
     "build": "astro check && astro build",
     "check": "astro check",
     "audit:html": "html-validate 'dist/**/*.html'",
@@ -15,6 +17,7 @@
     "@astrojs/check": "0.9.9",
     "@astrojs/sitemap": "3.7.3",
     "astro": "7.0.9",
+    "highlight.js": "^11.11.1",
     "sharp": "0.34.5",
     "typescript": "6.0.3"
   },

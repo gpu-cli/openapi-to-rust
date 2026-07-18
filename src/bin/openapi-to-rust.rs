@@ -1,11 +1,12 @@
 use clap::{Parser, Subcommand};
-use openapi_to_rust::cli::{load_spec, parse_spec, sanitize_source_provenance};
+use openapi_to_rust::cli::load_spec;
 use openapi_to_rust::server::{
     OperationIndex, Selector,
     edit::Editor as ServerEditor,
     list::{ListFilter, ListOutput, render as render_list},
     resolve as resolve_selectors,
 };
+use openapi_to_rust::spec_source::{parse_spec, sanitize_source_provenance};
 use openapi_to_rust::{CodeGenerator, ConfigFile, GeneratorConfig, SchemaAnalyzer};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -342,7 +343,7 @@ fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     let spec_content = load_spec(&load_source)?;
     let spec_value = parse_spec(&spec_content, &load_source)?;
-    let warning = validate_oas_document(&spec_value)?;
+    let warning = openapi_to_rust::spec_source::validate_oas_document(&spec_value)?;
     let mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
     let mut analyzer = if generator_config.schema_extensions.is_empty() {
         SchemaAnalyzer::with_type_mapper(spec_value, mapper)?
@@ -429,33 +430,6 @@ fn raw_config_spec_source(path: &std::path::Path) -> Result<String, Box<dyn std:
         .and_then(toml::Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "configuration is missing generator.spec_path".into())
-}
-
-fn validate_oas_document(
-    value: &serde_json::Value,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let version = value
-        .get("openapi")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    match openapi_to_rust::cli::parse_oas_version(version) {
-        Some((3, 0 | 1)) => Ok(None),
-        Some((3, 2)) => Ok(Some(format!(
-            "OpenAPI {version} support is experimental; some 3.2-only features are not generated"
-        ))),
-        Some((major, minor)) => Err(format!(
-            "unsupported OpenAPI version {major}.{minor} ({version:?}); expected 3.0, 3.1, or experimental 3.2"
-        )
-        .into()),
-        None => {
-            let hint = if value.get("swagger").is_some() {
-                " (the document appears to be Swagger 2.0)"
-            } else {
-                ""
-            };
-            Err(format!("missing or unrecognized `openapi` version{hint}").into())
-        }
-    }
 }
 
 fn write_artifacts(
@@ -547,7 +521,7 @@ fn run_init(args: InitArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
     let content = load_spec(&args.source)?;
     let value = parse_spec(&content, &args.source)?;
-    let warning = validate_oas_document(&value)?;
+    let warning = openapi_to_rust::spec_source::validate_oas_document(&value)?;
 
     let spec_path = starter_spec_source(&args.source, &args.config)?;
     let starter = StarterConfig {
@@ -606,7 +580,7 @@ fn starter_spec_source(
     source: &str,
     config: &std::path::Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    if openapi_to_rust::cli::is_remote_spec(source) {
+    if openapi_to_rust::spec_source::is_remote_spec(source) {
         return Ok(source.to_string());
     }
     let source_path = PathBuf::from(source);

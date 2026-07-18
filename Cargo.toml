@@ -1,3 +1,6 @@
+[workspace]
+members = ["wasm"]
+
 [package]
 name = "openapi-to-rust"
 version = "0.7.0"
@@ -26,12 +29,13 @@ include = [
 ]
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 once_cell = "1.19"
 prettyplease = "0.2"
 proc-macro2 = "1.0"
 quote = "1.0"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+url = "2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
@@ -50,7 +54,9 @@ insta = { version = "1.41", features = ["yaml"] }
 tempfile = "3.0"
 
 [features]
-default = []
+default = ["cli"]
+cli = ["dep:clap", "dep:reqwest", "http-error"]
+http-error = ["dep:reqwest"]
 internal-tools = []
 specta = ["dep:specta"]
 test-helpers = ["dep:insta", "dep:tempfile"]
@@ -58,6 +64,7 @@ test-helpers = ["dep:insta", "dep:tempfile"]
 [[bin]]
 name = "openapi-to-rust"
 path = "src/bin/openapi-to-rust.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "catalog-gen"

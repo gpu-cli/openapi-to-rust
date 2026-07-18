@@ -30,3 +30,8 @@
 /website/dist/
 /website/.astro/
 /website/.vercel/
+
+# Playground WASM bundle: built by scripts/build-playground-wasm.sh locally,
+# published as a GitHub release asset by .github/workflows/playground-wasm.yml
+# and fetched by website/scripts/fetch-playground-wasm.mjs on Vercel.
+/website/public/playground/pkg/
