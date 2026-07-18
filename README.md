@@ -9,6 +9,12 @@
 
 Read the [guides and documentation](https://openapi-to-rust.dev/) for the quickest path from an OpenAPI document to compiling Rust.
 
+## 5-second trial
+
+Paste your spec into the **[browser playground](https://openapi-to-rust.dev/playground)** —
+the real generator compiled to WebAssembly. See the generated Rust instantly and
+download it as a complete, compilable crate. Nothing is uploaded.
+
 ## 30-second trial
 
 Install the CLI from crates.io, then generate a tiny client from a stable,
