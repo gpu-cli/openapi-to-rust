@@ -1,5 +1,8 @@
 [workspace]
 members = ["wasm"]
+# Scratch crates (spec-compile.sh, ad-hoc generator runs) live under tmp/;
+# they must never be adopted into this workspace.
+exclude = ["tmp"]
 
 [package]
 name = "openapi-to-rust"
