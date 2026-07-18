@@ -4,6 +4,13 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
+## [Unreleased]
+
+### Fixed
+
+- `ApiError` display output now bounds large response-body previews and includes
+  typed error details or typed-body parse failures when available (#29).
+
 ## [0.7.0] - 2026-07-17
 
 ### Added
