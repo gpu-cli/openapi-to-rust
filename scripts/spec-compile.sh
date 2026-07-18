@@ -138,6 +138,10 @@ EOF
     continue
   fi
   {
+    # Empty [workspace] keeps the scratch crate out of the repo's workspace;
+    # without it cargo walks up, finds the root manifest, and refuses.
+    echo "[workspace]"
+    echo
     echo "[package]"
     echo "name = \"spec-compile-$name\""
     echo "version = \"0.0.0\""

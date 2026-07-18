@@ -45,6 +45,7 @@
 //! with [`CodeGenerator::write_files`].
 
 pub mod analysis;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod client_generator;
 pub mod config;
@@ -52,11 +53,13 @@ pub mod error;
 pub mod extensions;
 pub mod generator;
 pub mod http_config;
+#[cfg(feature = "http-error")]
 pub mod http_error;
 pub mod openapi;
 pub mod patterns;
 pub mod registry_generator;
 pub mod server;
+pub mod spec_source;
 pub mod streaming;
 pub mod type_mapping;
 
@@ -68,11 +71,16 @@ pub mod type_mapping;
 #[cfg(feature = "test-helpers")]
 pub mod test_helpers;
 
+/// Crate version, exposed so embedders (e.g. the WASM playground) can report
+/// which generator produced their output.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use analysis::{SchemaAnalysis, SchemaAnalyzer, merge_schema_extensions};
 pub use config::ConfigFile;
 pub use error::GeneratorError;
 pub use generator::{CodeGenerator, GeneratedFile, GenerationResult, GeneratorConfig};
 pub use http_config::{AuthConfig, HttpClientConfig, RetryConfig};
+#[cfg(feature = "http-error")]
 pub use http_error::{ApiError, ApiOpError, HttpError, HttpResult};
 pub use openapi::{OpenApiSpec, Schema, SchemaType};
 pub use type_mapping::{

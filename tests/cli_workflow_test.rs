@@ -1,5 +1,6 @@
 use openapi_to_rust::ConfigFile;
-use openapi_to_rust::cli::{MAX_REMOTE_SPEC_BYTES, load_spec, validate_remote_spec_url};
+use openapi_to_rust::cli::{MAX_REMOTE_SPEC_BYTES, load_spec};
+use openapi_to_rust::spec_source::validate_remote_spec_url;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};

@@ -31,9 +31,9 @@ fn load_index(spec_path: &std::path::Path) -> OperationIndex {
     let value: serde_json::Value = if spec_path.extension().and_then(|e| e.to_str()) == Some("yaml")
         || spec_path.extension().and_then(|e| e.to_str()) == Some("yml")
     {
-        openapi_to_rust::cli::yaml_to_json_value(&body).unwrap()
+        openapi_to_rust::spec_source::yaml_to_json_value(&body).unwrap()
     } else {
-        openapi_to_rust::cli::json_from_str_lossy(&body).unwrap()
+        openapi_to_rust::spec_source::json_from_str_lossy(&body).unwrap()
     };
     let mut analyzer = SchemaAnalyzer::new(value).unwrap();
     let analysis = analyzer.analyze().unwrap();

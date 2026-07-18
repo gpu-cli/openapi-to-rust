@@ -15,6 +15,7 @@ interface Props {
   canonicalPath: string;
   category?: string;
   toc?: TocItem[];
+  /** ISO date (YYYY-MM-DD) of the last substantive review; omit when unknown. */
   updated?: string;
 }
 
@@ -26,7 +27,7 @@ const {
   canonicalPath,
   category = "Documentation",
   toc = [],
-  updated = "July 15, 2026",
+  updated,
 } = Astro.props;
 
 const absoluteUrl = new URL(canonicalPath, Astro.site).toString();
@@ -37,13 +38,21 @@ const breadcrumbItems = [
     : []),
   { "@type": "ListItem", position: category === "Documentation" ? 3 : 2, name: h1, item: absoluteUrl },
 ];
+const updatedDisplay = updated
+  ? new Date(`${updated}T00:00:00Z`).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: "UTC",
+    })
+  : undefined;
 const schema = [
   {
     "@context": "https://schema.org",
     "@type": "TechArticle",
     headline: h1,
     description,
-    dateModified: "2026-07-15",
+    ...(updated ? { dateModified: updated } : {}),
     url: absoluteUrl,
     author: {
       "@type": "Organization",
@@ -78,9 +87,9 @@ const next = currentIndex >= 0 && currentIndex < docsOrder.length - 1 ? docsOrde
   </div>
   <header class="page-hero shell">
     <p class="eyebrow">{category}</p>
-    <h1>{h1}</h1>
+    <h1><slot name="h1">{h1}</slot></h1>
     <p class="lead">{lead}</p>
-    <p class="last-updated">Last reviewed {updated}</p>
+    {updatedDisplay && <p class="last-updated">Last reviewed {updatedDisplay}</p>}
   </header>
   <div class="shell doc-shell">
     {toc.length > 0 && (
@@ -112,5 +121,5 @@ const next = currentIndex >= 0 && currentIndex < docsOrder.length - 1 ? docsOrde
 </BaseLayout>
 
 <style>
-  .last-updated { margin-top: 1.5rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.72rem; }
+  .last-updated { margin-top: 1.5rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.75rem; }
 </style>
