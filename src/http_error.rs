@@ -212,6 +212,8 @@ pub type HttpResult<T> = Result<T, HttpError>;
 /// inspect what the server actually sent without having to hack the generated
 /// client. `typed` is `Some(_)` when the raw body was successfully parsed into a
 /// per-operation error type; `parse_error` records why parsing failed when not.
+/// Formatting the error limits only the displayed body preview; the public
+/// fields retain the complete response and parsing details.
 #[derive(Debug, Clone)]
 pub struct ApiError<E> {
     pub status: u16,
@@ -219,6 +221,20 @@ pub struct ApiError<E> {
     pub body: String,
     pub typed: Option<E>,
     pub parse_error: Option<String>,
+}
+
+const API_ERROR_BODY_DISPLAY_LIMIT: usize = 500;
+const API_ERROR_BODY_TRUNCATION_MARKER: &str = "... [truncated]";
+
+fn display_api_error_body(body: &str) -> std::borrow::Cow<'_, str> {
+    let Some((end, _)) = body.char_indices().nth(API_ERROR_BODY_DISPLAY_LIMIT) else {
+        return std::borrow::Cow::Borrowed(body);
+    };
+
+    let mut displayed = String::with_capacity(end + API_ERROR_BODY_TRUNCATION_MARKER.len());
+    displayed.push_str(&body[..end]);
+    displayed.push_str(API_ERROR_BODY_TRUNCATION_MARKER);
+    std::borrow::Cow::Owned(displayed)
 }
 
 impl<E> ApiError<E> {
@@ -233,7 +249,22 @@ impl<E> ApiError<E> {
 
 impl<E: std::fmt::Debug> std::fmt::Display for ApiError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "API error {}: {}", self.status, self.body)
+        write!(
+            f,
+            "API error {}: {}",
+            self.status,
+            display_api_error_body(&self.body)
+        )?;
+
+        if let Some(typed) = &self.typed {
+            write!(f, "; typed: {typed:?}")?;
+        }
+
+        if let Some(parse_error) = &self.parse_error {
+            write!(f, "; parse error: {parse_error}")?;
+        }
+
+        Ok(())
     }
 }
 
