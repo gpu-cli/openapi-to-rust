@@ -20,7 +20,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify tag matches crate version
         run: |
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "openapi-to-rust") | .version')"
           test "${GITHUB_REF_NAME}" = "v${package_version}"
       - run: cargo fmt --check
       - run: cargo clippy --all-features -- -D warnings
