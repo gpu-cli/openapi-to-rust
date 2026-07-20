@@ -4,7 +4,18 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
-## [Unreleased]
+## [0.8.0] - 2026-07-19
+
+### Added
+
+- An in-browser WASM playground at
+  [openapi-to-rust.dev/playground](https://openapi-to-rust.dev/playground):
+  paste a spec or fetch one by URL and get the exact generated file set —
+  byte-identical to `openapi-to-rust generate <SOURCE>` — with a downloadable
+  runnable crate.
+- A default-on `cli` feature gating clap and reqwest. With
+  `--no-default-features` the library compiles on `wasm32-unknown-unknown`;
+  URL policy and spec parsing moved into the shared `spec_source` module.
 
 ### Fixed
 
@@ -94,7 +105,8 @@ when correcting output that was wrong or incomplete on the wire.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/gpu-cli/openapi-to-rust/releases/tag/v0.6.0
 [0.5.3]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.5.2...v0.5.3
