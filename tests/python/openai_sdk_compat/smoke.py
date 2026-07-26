@@ -25,6 +25,7 @@ def main() -> None:
         api_key="test",
         admin_api_key="test-admin",
         max_retries=0,
+        timeout=30.0,
     )
 
     unary = client.responses.create(model="gpt-4.1-mini", input="sdk unary")

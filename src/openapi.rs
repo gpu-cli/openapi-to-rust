@@ -1034,6 +1034,19 @@ pub fn is_form_urlencoded_media_type(ct: &str) -> bool {
     essence == "application/x-www-form-urlencoded"
 }
 
+/// Returns true only for the `text/event-stream` media type essence.
+///
+/// Media type names are ASCII-case-insensitive and parameters do not change
+/// the essence, so values such as `Text/Event-Stream; charset=utf-8` match,
+/// while similarly prefixed subtypes such as `text/event-streaming` do not.
+pub fn is_event_stream_media_type(ct: &str) -> bool {
+    ct.split(';')
+        .next()
+        .unwrap_or(ct)
+        .trim()
+        .eq_ignore_ascii_case("text/event-stream")
+}
+
 fn find_json_content(content: &BTreeMap<String, MediaType>) -> Option<(&str, &MediaType)> {
     if let Some(mt) = content.get("application/json") {
         return Some(("application/json", mt));
@@ -1109,6 +1122,19 @@ impl Response {
             .as_ref()
             .and_then(find_json_content)
             .and_then(|(_, media_type)| media_type.schema.as_ref())
+    }
+
+    /// Get the preferred JSON-compatible media type and its schema.
+    pub fn json_content(&self) -> Option<(&str, &Schema)> {
+        self.content
+            .as_ref()
+            .and_then(find_json_content)
+            .and_then(|(content_type, media_type)| {
+                media_type
+                    .schema
+                    .as_ref()
+                    .map(|schema| (content_type, schema))
+            })
     }
 }
 

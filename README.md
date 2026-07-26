@@ -245,7 +245,7 @@ Two complete examples are in the repo:
 | `streaming.rs` | SSE streaming **client** with event parsing (when configured) |
 | `server/mod.rs` | Module re-exports for the server (when `[server]` is set) |
 | `server/api.rs` | `trait <Tag>Api { async fn <op>(&self, …) -> <Op>Response; }` per tag |
-| `server/errors.rs` | `enum <Op>Response { Ok(T), BadRequest(E), …, OkStream(Sse<…>) }` with `IntoResponse` |
+| `server/errors.rs` | Status-typed response enums with JSON, bodyless, wildcard/default, and status-correct SSE variants plus `IntoResponse` |
 | `server/router.rs` | Per-tag `Router` factory; combined `build_router<…>(…)` for multi-tag selections |
 | `server/validation.rs` | Offline JSON Schema validators and sanitized Problem Details rejections |
 | `mod.rs` | Module declarations + re-exports |
@@ -665,10 +665,11 @@ The compile tiers are intentionally different:
   OpenAPI specs. The bundled Gitea Swagger 2.0 document is reported as skipped.
 - Local `scripts/spec-compile.sh` runs the same full tier; pass spec names as
   arguments for a smaller targeted run.
-- Every pull request also starts the generated OpenAI Responses Axum example
-  on loopback and exercises it through the pinned official OpenAI Python SDK.
-  The compatibility gate covers unary and streaming Responses, input-item
-  path/query parameters, and the organization costs query.
+- Every pull request also starts the generated OpenAI Responses and Anthropic
+  Messages Axum examples on loopback and exercises them through pinned official
+  Python SDKs. The compatibility gates cover unary and streaming responses,
+  with the OpenAI row also covering input-item path/query parameters and the
+  organization costs query.
 
 ## Examples
 

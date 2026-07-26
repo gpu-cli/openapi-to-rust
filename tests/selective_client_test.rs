@@ -479,11 +479,11 @@ mod tests {
     #[async_trait::async_trait]
     impl ThingsApi for Api {
         async fn query_things(&self) -> QueryThingsResponse {
-            QueryThingsResponse::Empty
+            QueryThingsResponse::NoContent
         }
 
         async fn purge_things(&self) -> PurgeThingsResponse {
-            PurgeThingsResponse::Empty
+            PurgeThingsResponse::NoContent
         }
     }
 

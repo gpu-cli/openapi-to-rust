@@ -231,7 +231,7 @@ mod tests {
                     "scores": scores,
                 }))
                 .unwrap();
-            QueryRoundTripResponse::Empty
+            QueryRoundTripResponse::NoContent
         }
     }
 

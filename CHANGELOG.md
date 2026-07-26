@@ -4,6 +4,36 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
+## [0.10.0] - 2026-07-26
+
+### Added
+
+- Every-PR compatibility coverage for the generated Anthropic Messages server
+  through the pinned official Python SDK, including unary and SSE responses.
+
+### Changed
+
+- Regenerated server response enums now use the declared status in bodyless and
+  SSE variant names and require a runtime status for wildcard/default variants.
+  This is a source-breaking correction for existing server trait implementations.
+
+### Fixed
+
+- Config-driven `server list` and `server add` now apply
+  `generator.schema_extensions`, so overlay-provided operations and SSE media
+  types match generation.
+- Schema extensions accept the documented JSON, YAML, and YML formats with
+  path-rich parse errors.
+- Generated server response enums retain reusable Response Object references,
+  including structurally compatible local refs stored outside
+  `components.responses`, plus bodyless status codes, vendor/problem JSON media
+  types, SSE status codes, and runtime status values for wildcard/default
+  responses.
+- Server generation rejects response sets that contain only unsupported media
+  types and reports normalized Rust identifier collisions between distinct tags.
+- Server example tests use Cargo's current integration-test binary instead of
+  a potentially stale hard-coded `target/debug` executable.
+
 ## [0.9.1] - 2026-07-26
 
 ### Fixed
@@ -152,7 +182,8 @@ when correcting output that was wrong or incomplete on the wire.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.7.0...v0.8.0

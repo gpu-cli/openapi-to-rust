@@ -14,14 +14,18 @@ cargo run --manifest-path examples/server-anthropic-messages/Cargo.toml
 curl -s http://127.0.0.1:3001/v1/messages \
   -H 'content-type: application/json' \
   -d '{"model":"claude-x","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+
+# Stream the response as server-sent events:
+curl -N -s http://127.0.0.1:3001/v1/messages \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude-x","max_tokens":50,"stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-**Streaming caveat.** Anthropic's published OpenAPI spec doesn't
-declare `text/event-stream` on the 200 response, so the generator
-can't emit an `OkStream` variant. Tracked as `openapi-generator-in6`
-— the planned fix is a schema-extension overlay that adds the
-streaming content type, after which this example will gain a
-streaming branch with no manual changes.
+Anthropic's published OpenAPI spec does not declare `text/event-stream` on the
+200 response. The example config applies `sse-overlay.json` through
+`generator.schema_extensions`, adding that response media type before analysis
+so generation emits both `Ok(Message)` and `OkStream` response variants.
 
-The integration test in `tests/server_examples_test.rs` guarantees
-the example keeps building.
+The integration test in `tests/server_examples_test.rs` regenerates and tests
+the example. PR CI additionally calls the generated server with the pinned
+official Anthropic Python SDK, covering both unary and streaming responses.

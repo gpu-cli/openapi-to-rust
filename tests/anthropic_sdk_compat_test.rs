@@ -1,8 +1,8 @@
-//! Official OpenAI Python SDK compatibility smoke test.
+//! Official Anthropic Python SDK compatibility smoke test.
 //!
 //! This is ignored for normal local `cargo test` because it requires the
-//! dependencies in `tests/python/openai_sdk_compat/requirements.txt`. CI runs
-//! it on every pull request with the SDK pinned to the version in that file.
+//! dependencies in `tests/python/anthropic_sdk_compat/requirements.txt`. CI
+//! runs it on every pull request with the SDK pinned to that file's version.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ fn regenerate(example_dir: &Path) {
         .expect("failed to run openapi-to-rust generate");
     assert!(
         output.status.success(),
-        "OpenAI example generation failed:\nstdout: {}\nstderr: {}",
+        "Anthropic example generation failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
@@ -43,7 +43,7 @@ fn build_and_test_example(example_dir: &Path) {
             .unwrap_or_else(|error| panic!("failed to run cargo {action}: {error}"));
         assert!(
             output.status.success(),
-            "OpenAI server example cargo {action} failed:\nstdout: {}\nstderr: {}",
+            "Anthropic server example cargo {action} failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
@@ -61,7 +61,7 @@ impl Drop for Server {
 
 fn start_server(example_dir: &Path) -> (Server, String) {
     let binary = example_dir.join("target").join("debug").join(format!(
-        "server-openai-responses{}",
+        "server-anthropic-messages{}",
         std::env::consts::EXE_SUFFIX
     ));
     let mut child = Command::new(&binary)
@@ -92,23 +92,23 @@ fn start_server(example_dir: &Path) -> (Server, String) {
 }
 
 #[test]
-#[ignore = "requires the pinned Python dependencies in tests/python/openai_sdk_compat"]
-fn official_openai_python_sdk_matches_generated_axum_server() {
-    let example_dir = repo_root().join("examples/server-openai-responses");
+#[ignore = "requires the pinned Python dependencies in tests/python/anthropic_sdk_compat"]
+fn official_anthropic_python_sdk_matches_generated_axum_server() {
+    let example_dir = repo_root().join("examples/server-anthropic-messages");
     regenerate(&example_dir);
     build_and_test_example(&example_dir);
     let (_server, base_url) = start_server(&example_dir);
 
-    let python = std::env::var_os("OPENAI_COMPAT_PYTHON").unwrap_or_else(|| "python3".into());
+    let python = std::env::var_os("ANTHROPIC_COMPAT_PYTHON").unwrap_or_else(|| "python3".into());
     let output = Command::new(python)
         .current_dir(repo_root())
-        .arg("tests/python/openai_sdk_compat/smoke.py")
+        .arg("tests/python/anthropic_sdk_compat/smoke.py")
         .arg(base_url)
         .output()
-        .expect("failed to run official OpenAI Python SDK smoke script");
+        .expect("failed to run official Anthropic Python SDK smoke script");
     assert!(
         output.status.success(),
-        "official OpenAI Python SDK compatibility smoke failed:\nstdout: {}\nstderr: {}",
+        "official Anthropic Python SDK compatibility smoke failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
