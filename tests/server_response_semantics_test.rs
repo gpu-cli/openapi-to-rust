@@ -78,6 +78,120 @@ fn analysis_retains_resolved_bodyless_media_and_exact_sse_responses() {
 }
 
 #[test]
+fn analysis_resolves_structurally_valid_response_from_any_local_pointer() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "misplaced response", "version": "1.0.0" },
+        "paths": { "/things": { "get": {
+            "operationId": "getThing",
+            "responses": {
+                "200": { "$ref": "#/components/responses/MisplacedAlias" }
+            }
+        }}},
+        "components": {
+            "schemas": {
+                "Thing": { "type": "string" }
+            },
+            "responses": {
+                "MisplacedAlias": {
+                    "$ref": "#/components/requestBodies/MisplacedResponse"
+                }
+            },
+            "requestBodies": {
+                "MisplacedResponse": {
+                    "description": "stored under the wrong component map",
+                    "content": {
+                        "application/vnd.example+json": {
+                            "schema": { "$ref": "#/components/schemas/Thing" }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let response = &analysis.operation_responses["getThing"]["200"];
+    assert_eq!(response.schema_name.as_deref(), Some("Thing"));
+    assert_eq!(
+        response.media_type.as_deref(),
+        Some("application/vnd.example+json")
+    );
+}
+
+#[test]
+fn invalid_response_references_fail_with_actionable_errors() {
+    let cases = [
+        (
+            "missing",
+            "#/components/responses/Missing",
+            json!({}),
+            "does not exist",
+        ),
+        (
+            "external",
+            "https://example.invalid/responses.json#/Success",
+            json!({}),
+            "external response reference",
+        ),
+        (
+            "incompatible",
+            "#/components/schemas/NotAResponse",
+            json!({
+                "schemas": {
+                    "NotAResponse": { "type": "string" }
+                }
+            }),
+            "structurally compatible OpenAPI Response Object",
+        ),
+    ];
+
+    for (name, reference, components, expected) in cases {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": name, "version": "1.0.0" },
+            "paths": { "/things": { "get": {
+                "operationId": "getThing",
+                "responses": { "200": { "$ref": reference } }
+            }}},
+            "components": components
+        });
+        let error = SchemaAnalyzer::new(spec)
+            .unwrap()
+            .analyze()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+}
+
+#[test]
+fn cyclic_response_reference_chain_is_rejected() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "cyclic responses", "version": "1.0.0" },
+        "paths": { "/things": { "get": {
+            "operationId": "getThing",
+            "responses": {
+                "200": { "$ref": "#/components/responses/A" }
+            }
+        }}},
+        "components": { "responses": {
+            "A": { "$ref": "#/components/responses/B" },
+            "B": { "$ref": "#/components/responses/A" }
+        }}
+    });
+
+    let error = SchemaAnalyzer::new(spec)
+        .unwrap()
+        .analyze()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Circular dependency"), "{error}");
+    assert!(error.contains("response reference"), "{error}");
+}
+
+#[test]
 fn generated_responses_preserve_status_ranges_media_and_sse_status() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::TempDir::new().unwrap();

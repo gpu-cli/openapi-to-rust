@@ -912,7 +912,6 @@ pub struct SchemaAnalyzer {
     openapi_spec: Value,
     current_schema_name: Option<String>,
     component_parameters: BTreeMap<String, crate::openapi::Parameter>,
-    component_responses: BTreeMap<String, crate::openapi::Response>,
     /// Single chokepoint for `(openapi_type, format)` → Rust-type
     /// decisions (Q2.0). Defaulted when the analyzer is built without a
     /// config; threaded from `GeneratorConfig.types` via
@@ -942,20 +941,12 @@ impl SchemaAnalyzer {
             .and_then(|c| c.parameters.as_ref())
             .cloned()
             .unwrap_or_default();
-        let component_responses = spec
-            .components
-            .as_ref()
-            .and_then(|c| c.responses.as_ref())
-            .cloned()
-            .unwrap_or_default();
-
         Ok(Self {
             schemas,
             resolved_cache: BTreeMap::new(),
             openapi_spec,
             current_schema_name: None,
             component_parameters,
-            component_responses,
             type_mapper,
         })
     }
@@ -4770,29 +4761,60 @@ impl SchemaAnalyzer {
         Ok((op_info, operation_responses))
     }
 
-    /// Resolve a local reusable Response Object, following chains and
-    /// rejecting missing, external, or cyclic references explicitly.
+    /// Resolve a local reusable Response Object through its JSON Pointer.
+    ///
+    /// Real-world documents occasionally store a structurally valid Response
+    /// Object under the wrong Components map. Resolving the pointer itself
+    /// preserves compatibility with those documents while still validating
+    /// that the target can be interpreted as a Response Object.
     fn resolve_response(
         &self,
         response: &crate::openapi::Response,
     ) -> Result<crate::openapi::Response> {
-        let mut current = response;
+        let mut current = response.clone();
         let mut visited = HashSet::new();
-        while let Some(reference) = current.reference.as_deref() {
-            let token = reference
-                .strip_prefix("#/components/responses/")
-                .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?;
-            let name = token.replace("~1", "/").replace("~0", "~");
-            if !visited.insert(name.clone()) {
+        while let Some(reference) = current.reference.clone() {
+            if !visited.insert(reference.clone()) {
                 return Err(GeneratorError::CircularDependency(format!(
                     "response reference {reference}"
                 )));
             }
-            current = self.component_responses.get(&name).ok_or_else(|| {
-                GeneratorError::UnresolvedReference(format!("response {reference}"))
+
+            let pointer = reference.strip_prefix('#').ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "external response reference `{reference}` is not supported"
+                ))
+            })?;
+            if !pointer.is_empty() && !pointer.starts_with('/') {
+                return Err(GeneratorError::UnresolvedReference(format!(
+                    "response reference `{reference}` is not a local JSON Pointer"
+                )));
+            }
+            let value = self.openapi_spec.pointer(pointer).ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "response reference `{reference}` does not exist"
+                ))
+            })?;
+            let object = value.as_object().ok_or_else(|| {
+                GeneratorError::InvalidSchema(format!(
+                    "response reference `{reference}` must target an object"
+                ))
+            })?;
+            if !["$ref", "description", "headers", "content", "links"]
+                .iter()
+                .any(|field| object.contains_key(*field))
+            {
+                return Err(GeneratorError::InvalidSchema(format!(
+                    "response reference `{reference}` does not target a structurally compatible OpenAPI Response Object"
+                )));
+            }
+            current = serde_json::from_value(value.clone()).map_err(|error| {
+                GeneratorError::InvalidSchema(format!(
+                    "response reference `{reference}` is not a valid OpenAPI Response Object: {error}"
+                ))
             })?;
         }
-        Ok(current.clone())
+        Ok(current)
     }
 
     /// Generate a type name for an inline response schema.

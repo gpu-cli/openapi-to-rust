@@ -25,8 +25,10 @@ when correcting output that was wrong or incomplete on the wire.
 - Schema extensions accept the documented JSON, YAML, and YML formats with
   path-rich parse errors.
 - Generated server response enums retain reusable Response Object references,
-  bodyless status codes, vendor/problem JSON media types, SSE status codes,
-  and runtime status values for wildcard/default responses.
+  including structurally compatible local refs stored outside
+  `components.responses`, plus bodyless status codes, vendor/problem JSON media
+  types, SSE status codes, and runtime status values for wildcard/default
+  responses.
 - Server generation rejects response sets that contain only unsupported media
   types and reports normalized Rust identifier collisions between distinct tags.
 - Server example tests use Cargo's current integration-test binary instead of
