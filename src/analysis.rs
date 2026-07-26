@@ -352,6 +352,12 @@ pub enum RequestBodyContent {
     Multipart,
     OctetStream,
     TextPlain,
+    /// A declared request media type without a schema. Client generation
+    /// preserves its historical no-body signature, while server generation
+    /// rejects the operation because there is no contract to validate.
+    SchemaLess {
+        media_type: String,
+    },
     Unsupported {
         media_types: Vec<String>,
     },
@@ -364,9 +370,11 @@ impl RequestBodyContent {
             Self::Json { schema_name, .. } | Self::FormUrlEncoded { schema_name, .. } => {
                 Some(schema_name)
             }
-            Self::Multipart | Self::OctetStream | Self::TextPlain | Self::Unsupported { .. } => {
-                None
-            }
+            Self::Multipart
+            | Self::OctetStream
+            | Self::TextPlain
+            | Self::SchemaLess { .. }
+            | Self::Unsupported { .. } => None,
         }
     }
 }
@@ -4434,51 +4442,47 @@ impl SchemaAnalyzer {
             use crate::openapi::{is_form_urlencoded_media_type, is_json_media_type};
             if let Some((content_type, maybe_schema)) = request_body.best_content() {
                 op_info.request_body = if is_json_media_type(content_type) {
-                    Some(
-                        maybe_schema
-                            .ok_or_else(|| {
-                                GeneratorError::CodeGenError(format!(
-                                    "operation `{operation_id}` selects `{content_type}` request content without a schema"
-                                ))
-                            })
-                            .and_then(|s| {
-                                let validation_schema = self
-                                    .raw_request_body_schema(raw_operation.as_ref(), content_type)
-                                    .unwrap_or(
-                                        serde_json::to_value(s)
-                                            .map_err(GeneratorError::ParseError)?,
-                                    );
+                    match maybe_schema {
+                        Some(s) => {
+                            let validation_schema = self
+                                .raw_request_body_schema(raw_operation.as_ref(), content_type)
+                                .unwrap_or(
+                                    serde_json::to_value(s).map_err(GeneratorError::ParseError)?,
+                                );
+                            Some(
                                 self.resolve_or_inline_schema(s, operation_id, "Request")
                                     .map(|name| RequestBodyContent::Json {
                                         schema_name: name,
                                         media_type: content_type.to_string(),
                                         validation_schema,
-                                    })
-                            })?,
-                    )
+                                    })?,
+                            )
+                        }
+                        None => Some(RequestBodyContent::SchemaLess {
+                            media_type: content_type.to_string(),
+                        }),
+                    }
                 } else if is_form_urlencoded_media_type(content_type) {
-                    Some(
-                        maybe_schema
-                            .ok_or_else(|| {
-                                GeneratorError::CodeGenError(format!(
-                                    "operation `{operation_id}` selects `{content_type}` request content without a schema"
-                                ))
-                            })
-                            .and_then(|s| {
-                                let validation_schema = self
-                                    .raw_request_body_schema(raw_operation.as_ref(), content_type)
-                                    .unwrap_or(
-                                        serde_json::to_value(s)
-                                            .map_err(GeneratorError::ParseError)?,
-                                    );
+                    match maybe_schema {
+                        Some(s) => {
+                            let validation_schema = self
+                                .raw_request_body_schema(raw_operation.as_ref(), content_type)
+                                .unwrap_or(
+                                    serde_json::to_value(s).map_err(GeneratorError::ParseError)?,
+                                );
+                            Some(
                                 self.resolve_or_inline_schema(s, operation_id, "Request")
                                     .map(|name| RequestBodyContent::FormUrlEncoded {
                                         schema_name: name,
                                         media_type: content_type.to_string(),
                                         validation_schema,
-                                    })
-                            })?,
-                    )
+                                    })?,
+                            )
+                        }
+                        None => Some(RequestBodyContent::SchemaLess {
+                            media_type: content_type.to_string(),
+                        }),
+                    }
                 } else {
                     match content_type {
                         "multipart/form-data" => Some(RequestBodyContent::Multipart),

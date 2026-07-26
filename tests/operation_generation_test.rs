@@ -118,6 +118,36 @@ fn test_generate_post_operation() {
 }
 
 #[test]
+fn schema_less_request_content_preserves_client_operation_without_a_body() {
+    let config = create_test_config();
+    let generator = CodeGenerator::new(config);
+    let operation = OperationInfo {
+        operation_id: "triggerAction".to_string(),
+        method: "POST".to_string(),
+        path: "/actions".to_string(),
+        summary: None,
+        description: None,
+        request_body: Some(RequestBodyContent::SchemaLess {
+            media_type: "application/json".to_string(),
+        }),
+        response_schemas: BTreeMap::new(),
+        parameters: vec![],
+        request_body_required: true,
+        supports_streaming: false,
+        stream_parameter: None,
+        tags: Vec::new(),
+    };
+
+    let analysis = create_test_analysis_with_operations(vec![operation]);
+    let result = generator.generate_operation_methods(&analysis).to_string();
+
+    assert!(result.contains("trigger_action (& self"), "{result}");
+    assert!(result.contains(". post (request_url)"), "{result}");
+    assert!(!result.contains("request :"), "{result}");
+    assert!(!result.contains(". body ("), "{result}");
+}
+
+#[test]
 fn test_generate_put_operation() {
     let config = create_test_config();
     let generator = CodeGenerator::new(config);

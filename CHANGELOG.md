@@ -4,6 +4,15 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
+## [0.9.1] - 2026-07-26
+
+### Fixed
+
+- Restored client generation for operations whose selected JSON or form request
+  content declares no schema. These operations keep their historical no-body
+  client signature, while server generation fails with an actionable error
+  because there is no request contract to validate.
+
 ## [0.9.0] - 2026-07-26
 
 ### Added
@@ -143,7 +152,8 @@ when correcting output that was wrong or incomplete on the wire.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.6.0...v0.7.0

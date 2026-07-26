@@ -295,6 +295,7 @@ impl CodeGenerator {
                         RequestBodyContent::Unsupported { .. } => {
                             (quote! { BodyContentType::OctetStream }, quote! { None })
                         }
+                        RequestBodyContent::SchemaLess { .. } => continue,
                     };
                     quote! {
                         Some(BodyDef {
