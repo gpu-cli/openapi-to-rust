@@ -92,6 +92,17 @@ pub struct SchemaAnalysis {
     /// comments. Indexed by analyzed-schema name. Side-channel so we
     /// don't have to touch every StringEnum constructor.
     pub enum_extensions: BTreeMap<String, EnumExtensions>,
+    /// Raw, unpruned schema material used to build offline server validators.
+    /// This is deliberately independent of `schemas`, which model pruning may
+    /// mutate before server artifacts are emitted.
+    pub validation_context: ValidationContext,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ValidationContext {
+    pub openapi_version: String,
+    pub json_schema_dialect: Option<String>,
+    pub component_schemas: BTreeMap<String, Value>,
 }
 
 /// Q2.6 — vendor extensions describing a string enum's variant
@@ -326,19 +337,36 @@ pub struct OperationInfo {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind")]
 pub enum RequestBodyContent {
-    Json { schema_name: String },
-    FormUrlEncoded { schema_name: String },
+    Json {
+        schema_name: String,
+        media_type: String,
+        #[serde(skip)]
+        validation_schema: Value,
+    },
+    FormUrlEncoded {
+        schema_name: String,
+        media_type: String,
+        #[serde(skip)]
+        validation_schema: Value,
+    },
     Multipart,
     OctetStream,
     TextPlain,
+    Unsupported {
+        media_types: Vec<String>,
+    },
 }
 
 impl RequestBodyContent {
     /// Get the schema name if this content type has one
     pub fn schema_name(&self) -> Option<&str> {
         match self {
-            Self::Json { schema_name } | Self::FormUrlEncoded { schema_name } => Some(schema_name),
-            _ => None,
+            Self::Json { schema_name, .. } | Self::FormUrlEncoded { schema_name, .. } => {
+                Some(schema_name)
+            }
+            Self::Multipart | Self::OctetStream | Self::TextPlain | Self::Unsupported { .. } => {
+                None
+            }
         }
     }
 }
@@ -361,6 +389,11 @@ fn base_param_ident(name: &str) -> String {
     };
     let stripped = name.trim_end_matches(['<', '>', '=']);
     let mut snake = stripped.to_snake_case();
+    if snake.is_empty() {
+        snake.push_str("parameter");
+    } else if snake.starts_with(|character: char| character.is_ascii_digit()) {
+        snake.insert(0, '_');
+    }
     snake.push_str(suffix);
     snake
 }
@@ -406,6 +439,10 @@ pub struct ParameterInfo {
     /// generated/resolved for the object schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_serialization: Option<QuerySerialization>,
+    /// Original parameter schema retained for request validation. This is not
+    /// exposed by serialized operation listings.
+    #[serde(skip)]
+    pub validation_schema: Option<Value>,
 }
 
 /// How generated clients serialize and generated servers extract an object-
@@ -972,6 +1009,30 @@ impl SchemaAnalyzer {
     }
 
     pub fn analyze(&mut self) -> Result<SchemaAnalysis> {
+        let validation_context = ValidationContext {
+            openapi_version: self
+                .openapi_spec
+                .get("openapi")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            json_schema_dialect: self
+                .openapi_spec
+                .get("jsonSchemaDialect")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            component_schemas: self
+                .openapi_spec
+                .pointer("/components/schemas")
+                .and_then(Value::as_object)
+                .map(|schemas| {
+                    schemas
+                        .iter()
+                        .map(|(name, schema)| (name.clone(), schema.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
         let mut analysis = SchemaAnalysis {
             schemas: BTreeMap::new(),
             dependencies: DependencyGraph::new(),
@@ -984,6 +1045,7 @@ impl SchemaAnalyzer {
             operation_id_aliases: BTreeMap::new(),
             used_type_features: crate::type_mapping::UsedFeatures::default(),
             enum_extensions: BTreeMap::new(),
+            validation_context,
         };
 
         // First pass: detect patterns
@@ -4338,6 +4400,15 @@ impl SchemaAnalyzer {
         path_item_parameters: Option<&Vec<crate::openapi::Parameter>>,
         _analysis: &mut SchemaAnalysis,
     ) -> Result<OperationInfo> {
+        let raw_path_item = self
+            .openapi_spec
+            .get("paths")
+            .and_then(|paths| paths.get(path))
+            .cloned();
+        let raw_operation = raw_path_item
+            .as_ref()
+            .and_then(|path_item| path_item.get(method.to_ascii_lowercase()))
+            .cloned();
         let mut op_info = OperationInfo {
             operation_id: operation_id.to_string(),
             method: method.to_uppercase(),
@@ -4359,32 +4430,75 @@ impl SchemaAnalyzer {
         };
 
         // Extract request body schema with content-type awareness
-        if let Some(request_body) = &operation.request_body
-            && let Some((content_type, maybe_schema)) = request_body.best_content()
-        {
+        if let Some(request_body) = &operation.request_body {
             use crate::openapi::{is_form_urlencoded_media_type, is_json_media_type};
-            op_info.request_body = if is_json_media_type(content_type) {
-                maybe_schema
-                    .map(|s| {
-                        self.resolve_or_inline_schema(s, operation_id, "Request")
-                            .map(|name| RequestBodyContent::Json { schema_name: name })
-                    })
-                    .transpose()?
-            } else if is_form_urlencoded_media_type(content_type) {
-                maybe_schema
-                    .map(|s| {
-                        self.resolve_or_inline_schema(s, operation_id, "Request")
-                            .map(|name| RequestBodyContent::FormUrlEncoded { schema_name: name })
-                    })
-                    .transpose()?
-            } else {
-                match content_type {
-                    "multipart/form-data" => Some(RequestBodyContent::Multipart),
-                    "application/octet-stream" => Some(RequestBodyContent::OctetStream),
-                    "text/plain" => Some(RequestBodyContent::TextPlain),
-                    _ => None,
+            if let Some((content_type, maybe_schema)) = request_body.best_content() {
+                op_info.request_body = if is_json_media_type(content_type) {
+                    Some(
+                        maybe_schema
+                            .ok_or_else(|| {
+                                GeneratorError::CodeGenError(format!(
+                                    "operation `{operation_id}` selects `{content_type}` request content without a schema"
+                                ))
+                            })
+                            .and_then(|s| {
+                                let validation_schema = self
+                                    .raw_request_body_schema(raw_operation.as_ref(), content_type)
+                                    .unwrap_or(
+                                        serde_json::to_value(s)
+                                            .map_err(GeneratorError::ParseError)?,
+                                    );
+                                self.resolve_or_inline_schema(s, operation_id, "Request")
+                                    .map(|name| RequestBodyContent::Json {
+                                        schema_name: name,
+                                        media_type: content_type.to_string(),
+                                        validation_schema,
+                                    })
+                            })?,
+                    )
+                } else if is_form_urlencoded_media_type(content_type) {
+                    Some(
+                        maybe_schema
+                            .ok_or_else(|| {
+                                GeneratorError::CodeGenError(format!(
+                                    "operation `{operation_id}` selects `{content_type}` request content without a schema"
+                                ))
+                            })
+                            .and_then(|s| {
+                                let validation_schema = self
+                                    .raw_request_body_schema(raw_operation.as_ref(), content_type)
+                                    .unwrap_or(
+                                        serde_json::to_value(s)
+                                            .map_err(GeneratorError::ParseError)?,
+                                    );
+                                self.resolve_or_inline_schema(s, operation_id, "Request")
+                                    .map(|name| RequestBodyContent::FormUrlEncoded {
+                                        schema_name: name,
+                                        media_type: content_type.to_string(),
+                                        validation_schema,
+                                    })
+                            })?,
+                    )
+                } else {
+                    match content_type {
+                        "multipart/form-data" => Some(RequestBodyContent::Multipart),
+                        "application/octet-stream" => Some(RequestBodyContent::OctetStream),
+                        "text/plain" => Some(RequestBodyContent::TextPlain),
+                        _ => None,
+                    }
+                };
+            }
+            if op_info.request_body.is_none() {
+                let mut media_types = request_body
+                    .content
+                    .as_ref()
+                    .map(|content| content.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                media_types.sort();
+                if !media_types.is_empty() {
+                    op_info.request_body = Some(RequestBodyContent::Unsupported { media_types });
                 }
-            };
+            }
         }
 
         // Extract response schemas
@@ -4443,12 +4557,20 @@ impl SchemaAnalyzer {
 
         // Extract parameters (operation-level first, then merge path-item-level)
         if let Some(parameters) = &operation.parameters {
-            for param in parameters {
+            for (index, param) in parameters.iter().enumerate() {
                 // into_owned: analyze_parameter needs `&mut self` (it may
                 // register an inline object schema for form-exploded query
                 // params), which can't coexist with the Cow's `&self` borrow.
                 let resolved = self.resolve_parameter(param).into_owned();
-                if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
+                let validation_schema = raw_operation
+                    .as_ref()
+                    .and_then(|operation| operation.get("parameters"))
+                    .and_then(Value::as_array)
+                    .and_then(|parameters| parameters.get(index))
+                    .and_then(|parameter| self.raw_parameter_schema(parameter));
+                if let Some(param_info) =
+                    self.analyze_parameter(&resolved, operation_id, validation_schema)?
+                {
                     op_info.parameters.push(param_info);
                 }
             }
@@ -4461,9 +4583,17 @@ impl SchemaAnalyzer {
                 .iter()
                 .map(|p| (p.name.clone(), p.location.clone()))
                 .collect();
-            for param in path_params {
+            for (index, param) in path_params.iter().enumerate() {
                 let resolved = self.resolve_parameter(param).into_owned();
-                if let Some(param_info) = self.analyze_parameter(&resolved, operation_id)? {
+                let validation_schema = raw_path_item
+                    .as_ref()
+                    .and_then(|path_item| path_item.get("parameters"))
+                    .and_then(Value::as_array)
+                    .and_then(|parameters| parameters.get(index))
+                    .and_then(|parameter| self.raw_parameter_schema(parameter));
+                if let Some(param_info) =
+                    self.analyze_parameter(&resolved, operation_id, validation_schema)?
+                {
                     if !existing_keys
                         .contains(&(param_info.name.clone(), param_info.location.clone()))
                     {
@@ -4522,6 +4652,7 @@ impl SchemaAnalyzer {
                 enum_values: None,
                 rust_ident: None,
                 query_serialization: None,
+                validation_schema: None,
             });
         }
 
@@ -4664,16 +4795,53 @@ impl SchemaAnalyzer {
         is_string_type && has_enum_or_const
     }
 
+    fn resolve_raw_local_reference(&self, value: &Value) -> Option<Value> {
+        let Some(reference) = value.get("$ref").and_then(Value::as_str) else {
+            return Some(value.clone());
+        };
+        let pointer = reference.strip_prefix('#')?;
+        self.openapi_spec.pointer(pointer).cloned()
+    }
+
+    fn raw_request_body_schema(
+        &self,
+        operation: Option<&Value>,
+        content_type: &str,
+    ) -> Option<Value> {
+        let request_body = operation?.get("requestBody")?;
+        self.resolve_raw_local_reference(request_body)?
+            .get("content")?
+            .get(content_type)?
+            .get("schema")
+            .cloned()
+    }
+
+    fn raw_parameter_schema(&self, parameter: &Value) -> Option<Value> {
+        self.resolve_raw_local_reference(parameter)?
+            .get("schema")
+            .cloned()
+    }
+
     fn analyze_parameter(
         &mut self,
         param: &crate::openapi::Parameter,
         operation_id: &str,
+        raw_validation_schema: Option<Value>,
     ) -> Result<Option<ParameterInfo>> {
         use heck::ToPascalCase;
 
         let name = param.name.as_deref().unwrap_or("");
         let location = param.location.as_deref().unwrap_or("");
         let required = param.required.unwrap_or(false);
+        let validation_schema = match raw_validation_schema {
+            Some(schema) => Some(schema),
+            None => param
+                .schema
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(GeneratorError::ParseError)?,
+        };
 
         let mut rust_type = "String".to_string();
         let mut schema_ref = None;
@@ -4861,6 +5029,7 @@ impl SchemaAnalyzer {
             enum_values,
             rust_ident: None,
             query_serialization,
+            validation_schema,
         }))
     }
 

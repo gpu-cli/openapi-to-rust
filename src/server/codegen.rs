@@ -190,9 +190,11 @@ pub enum ServerCodegenError {
     #[error("internal: {0}")]
     Internal(String),
     #[error(
-        "cannot generate exact Axum routes for custom HTTP methods on `{path}` across multiple primary tags ({tags}); Axum 0.7 cannot merge multiple fallback dispatchers for one path. Put those operations under the same first tag or select only one custom method for this server"
+        "cannot generate exact Axum routes for custom HTTP methods on `{path}` across multiple primary tags ({tags}); Axum cannot merge multiple fallback dispatchers for one path. Put those operations under the same first tag or select only one custom method for this server"
     )]
     CrossTagCustomMethods { path: String, tags: String },
+    #[error("cannot generate Axum route for `{path}`: {reason}")]
+    InvalidRoutePath { path: String, reason: String },
     #[error(
         "cannot generate Axum query extraction for `{operation_id}` parameter `{parameter}`: {reason}"
     )]
@@ -209,6 +211,24 @@ pub enum ServerCodegenError {
         wire_key: String,
         first_parameter: String,
         second_parameter: String,
+    },
+    #[error("request validation: {0}")]
+    Validation(String),
+    #[error(
+        "cannot generate Axum extraction for `{operation_id}` {location} parameter `{parameter}`: only scalar schema serialization is currently supported"
+    )]
+    UnsupportedParameterSerialization {
+        operation_id: String,
+        location: String,
+        parameter: String,
+    },
+    #[error(
+        "cannot generate Axum request body for `{operation_id}` media type `{media_type}`: {reason}"
+    )]
+    UnsupportedRequestBody {
+        operation_id: String,
+        media_type: String,
+        reason: String,
     },
 }
 
@@ -257,6 +277,16 @@ impl<'a> ServerCodegen<'a> {
         if self.server.operations.is_empty() {
             return Ok(Vec::new());
         }
+        if !(1..=100).contains(&self.server.validation.max_errors) {
+            return Err(ServerCodegenError::Validation(
+                "max_errors must be between 1 and 100".to_string(),
+            ));
+        }
+        if !(1..=67_108_864).contains(&self.server.validation.max_body_bytes) {
+            return Err(ServerCodegenError::Validation(
+                "max_body_bytes must be between 1 and 67108864".to_string(),
+            ));
+        }
 
         let index = OperationIndex::from_analysis(self.analysis);
         let selectors: Vec<Selector> = self
@@ -287,16 +317,49 @@ impl<'a> ServerCodegen<'a> {
             .collect::<Result<_, _>>()?;
         validate_custom_method_route_groups(&ops)?;
         self.validate_query_parameters(&ops)?;
+        self.validate_supported_server_inputs(&ops)?;
+        if !self.server.validation.enabled
+            && ops.iter().any(|operation| {
+                operation
+                    .parameters
+                    .iter()
+                    .any(|parameter| matches!(parameter.location.as_str(), "header" | "cookie"))
+                    || matches!(
+                        &operation.request_body,
+                        Some(RequestBodyContent::FormUrlEncoded { .. })
+                    )
+            })
+        {
+            return Err(ServerCodegenError::Validation(
+                "typed header/cookie and form extraction requires server.validation.enabled=true"
+                    .to_string(),
+            ));
+        }
 
         // Group by primary tag (first tag wins; untagged → "Server").
         let groups = group_by_tag(&ops);
 
-        let api_rs = self.emit_api(&groups);
-        let errors_rs = self.emit_errors(&ops);
-        let router_rs = self.emit_router(&groups);
-        let mod_rs = self.emit_mod();
+        let validation_bundle = if self.server.validation.enabled {
+            Some(
+                super::validation::prepare_validation_bundle(
+                    &self.analysis.validation_context,
+                    &ops,
+                )
+                .map_err(|error| ServerCodegenError::Validation(error.to_string()))?,
+            )
+        } else {
+            eprintln!(
+                "⚠️  server.validation.enabled=false: generated handlers will not enforce the OpenAPI request contract"
+            );
+            None
+        };
 
-        Ok(vec![
+        let api_rs = self.emit_api(&groups);
+        let errors_rs = self.emit_errors(&ops, validation_bundle.is_some());
+        let router_rs = self.emit_router(&groups, validation_bundle.as_ref())?;
+        let mod_rs = self.emit_mod(validation_bundle.is_some());
+
+        let mut files = vec![
             GeneratedFile {
                 path: PathBuf::from("server").join("mod.rs"),
                 content: format_or_raw(mod_rs),
@@ -313,16 +376,217 @@ impl<'a> ServerCodegen<'a> {
                 path: PathBuf::from("server").join("router.rs"),
                 content: format_or_raw(router_rs),
             },
-        ])
+        ];
+        if let Some(bundle) = &validation_bundle {
+            files.push(GeneratedFile {
+                path: PathBuf::from("server").join("validation.rs"),
+                content: format_or_raw(super::validation::emit_validation_module(
+                    bundle,
+                    self.server.validation.max_errors,
+                )),
+            });
+        }
+        Ok(files)
     }
 
     fn query_parameter_type(&self, parameter: &ParameterInfo) -> TokenStream {
         CodeGenerator::new(self.config.clone()).get_param_owned_rust_type(parameter)
     }
 
+    fn parameter_schema_is_scalar(&self, schema: &serde_json::Value) -> bool {
+        self.parameter_schema_is_scalar_inner(schema, &mut std::collections::BTreeSet::new())
+    }
+
+    fn parameter_schema_is_string(&self, parameter: &ParameterInfo) -> bool {
+        if parameter.enum_values.is_some() || parameter.rust_type == "String" {
+            return true;
+        }
+        let Some(schema) = parameter.validation_schema.as_ref() else {
+            return false;
+        };
+        self.parameter_schema_is_string_inner(schema, &mut std::collections::BTreeSet::new())
+    }
+
+    fn parameter_schema_is_string_inner(
+        &self,
+        schema: &serde_json::Value,
+        visited: &mut std::collections::BTreeSet<String>,
+    ) -> bool {
+        if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
+            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                return self
+                    .analysis
+                    .validation_context
+                    .component_schemas
+                    .get(name)
+                    .is_some_and(|component| {
+                        visited.insert(name.to_string())
+                            && self.parameter_schema_is_string_inner(component, visited)
+                    });
+            }
+        }
+        schema.get("type").and_then(serde_json::Value::as_str) == Some("string")
+    }
+
+    fn parameter_schema_is_scalar_inner(
+        &self,
+        schema: &serde_json::Value,
+        visited: &mut std::collections::BTreeSet<String>,
+    ) -> bool {
+        if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str)
+            && let Some(name) = reference.strip_prefix("#/components/schemas/")
+            && let Some(component) = self.analysis.validation_context.component_schemas.get(name)
+        {
+            return visited.insert(name.to_string())
+                && self.parameter_schema_is_scalar_inner(component, visited);
+        }
+        !matches!(
+            schema.get("type").and_then(serde_json::Value::as_str),
+            Some("array" | "object")
+        ) && !schema.get("oneOf").is_some()
+            && !schema.get("anyOf").is_some()
+            && !schema.get("allOf").is_some()
+    }
+
+    fn form_field_names(
+        &self,
+        operation: &OperationInfo,
+    ) -> Result<Vec<String>, ServerCodegenError> {
+        let Some(RequestBodyContent::FormUrlEncoded { schema_name, .. }) = &operation.request_body
+        else {
+            return Ok(Vec::new());
+        };
+        let schema = self.resolve_query_schema(schema_name).ok_or_else(|| {
+            ServerCodegenError::UnsupportedRequestBody {
+                operation_id: operation.operation_id.clone(),
+                media_type: "application/x-www-form-urlencoded".to_string(),
+                reason: format!("schema `{schema_name}` cannot be resolved"),
+            }
+        })?;
+        let SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } = &schema.schema_type
+        else {
+            return Err(ServerCodegenError::UnsupportedRequestBody {
+                operation_id: operation.operation_id.clone(),
+                media_type: "application/x-www-form-urlencoded".to_string(),
+                reason: "only flat object schemas are supported".to_string(),
+            });
+        };
+        if !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
+            || properties.values().any(|property| {
+                !self.query_property_is_scalar(
+                    &property.schema_type,
+                    &mut std::collections::HashSet::new(),
+                )
+            })
+        {
+            return Err(ServerCodegenError::UnsupportedRequestBody {
+                operation_id: operation.operation_id.clone(),
+                media_type: "application/x-www-form-urlencoded".to_string(),
+                reason: "only flat scalar fields with additionalProperties forbidden are supported"
+                    .to_string(),
+            });
+        }
+        Ok(properties.keys().cloned().collect())
+    }
+
+    fn validate_supported_server_inputs(
+        &self,
+        operations: &[&OperationInfo],
+    ) -> Result<(), ServerCodegenError> {
+        for operation in operations {
+            for parameter in &operation.parameters {
+                if !matches!(
+                    parameter.location.as_str(),
+                    "path" | "query" | "header" | "cookie"
+                ) {
+                    return Err(ServerCodegenError::UnsupportedParameterSerialization {
+                        operation_id: operation.operation_id.clone(),
+                        location: parameter.location.clone(),
+                        parameter: parameter.name.clone(),
+                    });
+                }
+                if matches!(parameter.location.as_str(), "path" | "header" | "cookie")
+                    && parameter
+                        .validation_schema
+                        .as_ref()
+                        .is_none_or(|schema| !self.parameter_schema_is_scalar(schema))
+                {
+                    return Err(ServerCodegenError::UnsupportedParameterSerialization {
+                        operation_id: operation.operation_id.clone(),
+                        location: parameter.location.clone(),
+                        parameter: parameter.name.clone(),
+                    });
+                }
+            }
+            match &operation.request_body {
+                Some(RequestBodyContent::FormUrlEncoded { .. }) => {
+                    self.form_field_names(operation)?;
+                }
+                Some(RequestBodyContent::Multipart) => {
+                    return Err(ServerCodegenError::UnsupportedRequestBody {
+                        operation_id: operation.operation_id.clone(),
+                        media_type: "multipart/form-data".to_string(),
+                        reason: "typed multipart server extraction is not implemented".to_string(),
+                    });
+                }
+                Some(RequestBodyContent::OctetStream) => {
+                    return Err(ServerCodegenError::UnsupportedRequestBody {
+                        operation_id: operation.operation_id.clone(),
+                        media_type: "application/octet-stream".to_string(),
+                        reason: "binary server extraction is not implemented".to_string(),
+                    });
+                }
+                Some(RequestBodyContent::TextPlain) => {
+                    return Err(ServerCodegenError::UnsupportedRequestBody {
+                        operation_id: operation.operation_id.clone(),
+                        media_type: "text/plain".to_string(),
+                        reason: "text server extraction is not implemented".to_string(),
+                    });
+                }
+                Some(RequestBodyContent::Unsupported { media_types }) => {
+                    return Err(ServerCodegenError::UnsupportedRequestBody {
+                        operation_id: operation.operation_id.clone(),
+                        media_type: media_types.join(", "),
+                        reason: "the selected request body uses unsupported media content"
+                            .to_string(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn parameter_ident(&self, parameter: &ParameterInfo) -> syn::Ident {
         let generator = CodeGenerator::new(self.config.clone());
         CodeGenerator::to_field_ident(&generator.param_ident_str(parameter))
+    }
+
+    fn validation_target(
+        &self,
+        bundle: Option<&super::validation::ValidationBundle>,
+        operation: &OperationInfo,
+        location: &str,
+        parameter_name: Option<&str>,
+    ) -> Result<Option<TokenStream>, ServerCodegenError> {
+        let Some(bundle) = bundle else {
+            return Ok(None);
+        };
+        let target = bundle
+            .target_for(&operation.operation_id, location, parameter_name)
+            .ok_or_else(|| {
+                ServerCodegenError::Validation(format!(
+                    "missing generated validator target for operation `{}` {location} `{}`",
+                    operation.operation_id,
+                    parameter_name.unwrap_or("body")
+                ))
+            })?;
+        let ident = format_ident!("{}", target.constant);
+        Ok(Some(quote! { super::validation::#ident }))
     }
 
     fn resolve_query_schema(&self, schema_name: &str) -> Option<&crate::analysis::AnalyzedSchema> {
@@ -350,6 +614,45 @@ impl<'a> ServerCodegen<'a> {
             SchemaType::Object { properties, .. } => Some(properties),
             _ => None,
         }
+    }
+
+    fn query_object_required_properties(&self, parameter: &ParameterInfo) -> Vec<String> {
+        let Some(schema) = parameter
+            .schema_ref
+            .as_deref()
+            .and_then(|name| self.resolve_query_schema(name))
+        else {
+            return Vec::new();
+        };
+        let mut names = match &schema.schema_type {
+            SchemaType::Object { required, .. } => required.iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        names.sort();
+        names
+    }
+
+    fn form_required_field_names(
+        &self,
+        operation: &OperationInfo,
+    ) -> Result<Vec<String>, ServerCodegenError> {
+        let Some(RequestBodyContent::FormUrlEncoded { schema_name, .. }) = &operation.request_body
+        else {
+            return Ok(Vec::new());
+        };
+        let schema = self.resolve_query_schema(schema_name).ok_or_else(|| {
+            ServerCodegenError::UnsupportedRequestBody {
+                operation_id: operation.operation_id.clone(),
+                media_type: "application/x-www-form-urlencoded".to_string(),
+                reason: format!("schema `{schema_name}` cannot be resolved"),
+            }
+        })?;
+        let mut names = match &schema.schema_type {
+            SchemaType::Object { required, .. } => required.iter().cloned().collect(),
+            _ => Vec::new(),
+        };
+        names.sort();
+        Ok(names)
     }
 
     fn query_property_is_scalar(
@@ -496,8 +799,9 @@ impl<'a> ServerCodegen<'a> {
         Ok(())
     }
 
-    fn emit_mod(&self) -> TokenStream {
+    fn emit_mod(&self, validation_enabled: bool) -> TokenStream {
         let provenance_attribute = self.provenance_attribute();
+        let validation_module = validation_enabled.then(|| quote! { pub(crate) mod validation; });
         quote! {
             //! Server scaffolding emitted by openapi-to-rust.
             //!
@@ -509,6 +813,7 @@ impl<'a> ServerCodegen<'a> {
             pub mod api;
             pub mod errors;
             pub mod router;
+            #validation_module
 
             pub use api::*;
             pub use errors::*;
@@ -516,12 +821,16 @@ impl<'a> ServerCodegen<'a> {
         }
     }
 
-    fn emit_router(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
+    fn emit_router(
+        &self,
+        groups: &BTreeMap<String, Vec<&OperationInfo>>,
+        validation_bundle: Option<&super::validation::ValidationBundle>,
+    ) -> Result<TokenStream, ServerCodegenError> {
         let provenance_attribute = self.provenance_attribute();
         let factories: Vec<TokenStream> = groups
             .iter()
-            .map(|(tag, ops)| self.emit_router_for_trait(tag, ops))
-            .collect();
+            .map(|(tag, ops)| self.emit_router_for_trait(tag, ops, validation_bundle))
+            .collect::<Result<_, _>>()?;
 
         // Per-op Query structs — one per op that has any query params.
         let query_structs: Vec<TokenStream> = groups
@@ -544,6 +853,25 @@ impl<'a> ServerCodegen<'a> {
                             .collect()
                     })
                     .unwrap_or_default()
+                }
+
+                fn __validate_urlencoded(raw: &str) -> ::std::result::Result<(), String> {
+                    let bytes = raw.as_bytes();
+                    let mut index = 0;
+                    while index < bytes.len() {
+                        if bytes[index] == b'%' {
+                            if index + 2 >= bytes.len()
+                                || !bytes[index + 1].is_ascii_hexdigit()
+                                || !bytes[index + 2].is_ascii_hexdigit()
+                            {
+                                return Err("malformed percent encoding".to_string());
+                            }
+                            index += 3;
+                        } else {
+                            index += 1;
+                        }
+                    }
+                    Ok(())
                 }
 
                 fn __query_one(
@@ -616,7 +944,7 @@ impl<'a> ServerCodegen<'a> {
             None
         };
 
-        quote! {
+        Ok(quote! {
             //! Router factories — one per trait. Each takes any
             //! `T: <TraitName> + Clone + Send + Sync + 'static` and
             //! returns an `axum::Router` with state pre-attached.
@@ -639,7 +967,7 @@ impl<'a> ServerCodegen<'a> {
             #(#factories)*
 
             #combined
-        }
+        })
     }
 
     fn emit_combined_router(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
@@ -705,7 +1033,12 @@ impl<'a> ServerCodegen<'a> {
         }
     }
 
-    fn emit_router_for_trait(&self, tag: &str, ops: &[&OperationInfo]) -> TokenStream {
+    fn emit_router_for_trait(
+        &self,
+        tag: &str,
+        ops: &[&OperationInfo],
+        validation_bundle: Option<&super::validation::ValidationBundle>,
+    ) -> Result<TokenStream, ServerCodegenError> {
         let trait_ident = trait_ident_for_tag(tag);
         let fn_ident = format_ident!("{}_router", trait_ident.to_string().to_snake_case());
 
@@ -713,7 +1046,7 @@ impl<'a> ServerCodegen<'a> {
         let mut custom_by_path: BTreeMap<String, Vec<(String, syn::Ident)>> = BTreeMap::new();
         for op in ops {
             let handler = format_ident!("{}_handler", op.operation_id.to_snake_case());
-            let path = openapi_to_axum_path(&op.path);
+            let path = openapi_to_axum_path(&op.path)?;
             if let Some(method_call) = axum_method_call(&op.method) {
                 routes.push(quote! { .route(#path, ::axum::routing::#method_call(#handler::<T>)) });
             } else {
@@ -735,12 +1068,12 @@ impl<'a> ServerCodegen<'a> {
 
         let handlers: Vec<TokenStream> = ops
             .iter()
-            .map(|op| self.emit_axum_handler(&trait_ident, op))
-            .collect();
+            .map(|op| self.emit_axum_handler(&trait_ident, op, validation_bundle))
+            .collect::<Result<_, _>>()?;
 
         let doc = format!(" Build an axum::Router for the `{trait_ident}` trait.");
 
-        quote! {
+        Ok(quote! {
             #[doc = #doc]
             pub fn #fn_ident<T>(api: T) -> ::axum::Router
             where
@@ -754,10 +1087,15 @@ impl<'a> ServerCodegen<'a> {
             #(#custom_dispatchers)*
 
             #(#handlers)*
-        }
+        })
     }
 
-    fn emit_axum_handler(&self, trait_ident: &syn::Ident, op: &OperationInfo) -> TokenStream {
+    fn emit_axum_handler(
+        &self,
+        trait_ident: &syn::Ident,
+        op: &OperationInfo,
+        validation_bundle: Option<&super::validation::ValidationBundle>,
+    ) -> Result<TokenStream, ServerCodegenError> {
         let handler_ident = format_ident!("{}_handler", op.operation_id.to_snake_case());
         let trait_method = format_ident!("{}", op.operation_id.to_snake_case());
 
@@ -766,13 +1104,62 @@ impl<'a> ServerCodegen<'a> {
             vec![quote! { ::axum::extract::State(api): ::axum::extract::State<T> }];
         let mut call_args: Vec<TokenStream> = Vec::new();
 
-        // Path parameters → axum::extract::Path tuple
+        // Path parameters. With validation enabled, extract by wire name so
+        // declaration order cannot drift from the route template and all
+        // malformed values use the public rejection profile.
         let path_params: Vec<&_> = op
             .parameters
             .iter()
             .filter(|p| p.location == "path")
             .collect();
-        if !path_params.is_empty() {
+        let mut path_decode = TokenStream::new();
+        if !path_params.is_empty() && validation_bundle.is_some() {
+            extractors.push(quote! {
+                __path_result: ::std::result::Result<
+                    ::axum::extract::Path<::std::collections::HashMap<String, String>>,
+                    ::axum::extract::rejection::PathRejection,
+                >
+            });
+            let mut decoders = Vec::new();
+            for parameter in &path_params {
+                let ident = self.parameter_ident(parameter);
+                let ty = self.query_parameter_type(parameter);
+                let wire = parameter.name.as_str();
+                let location = parameter_location("path", wire);
+                let target = self
+                    .validation_target(validation_bundle, op, "path", Some(wire))?
+                    .ok_or_else(|| {
+                        ServerCodegenError::Validation(format!(
+                            "validation target unexpectedly disabled for operation `{}` path `{wire}`",
+                            op.operation_id
+                        ))
+                    })?;
+                let string_wire = self.parameter_schema_is_string(parameter);
+                decoders.push(quote! {
+                    let #ident: #ty = match __path_values.remove(#wire) {
+                        Some(raw) => match super::validation::decode_parameter(
+                            &raw, #target, #location, #string_wire,
+                        ) {
+                            Ok(value) => value,
+                            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                        },
+                        None => return ::axum::response::IntoResponse::into_response(
+                            super::validation::generated_contract_error()
+                        ),
+                    };
+                });
+                call_args.push(quote! { #ident });
+            }
+            path_decode = quote! {
+                let ::axum::extract::Path(mut __path_values) = match __path_result {
+                    Ok(path) => path,
+                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                        super::validation::malformed_parameter("/path")
+                    ),
+                };
+                #(#decoders)*
+            };
+        } else if !path_params.is_empty() {
             let idents: Vec<syn::Ident> = path_params
                 .iter()
                 .map(|p| self.parameter_ident(p))
@@ -803,6 +1190,8 @@ impl<'a> ServerCodegen<'a> {
             .filter(|p| p.location == "query")
             .collect();
         let mut required_query_checks: Vec<TokenStream> = Vec::new();
+        let mut query_validation_checks: Vec<TokenStream> = Vec::new();
+        let mut raw_query_validation_checks: Vec<TokenStream> = Vec::new();
         let mut query_decode = TokenStream::new();
         if !query_params.is_empty() {
             let query_ident = format_ident!("{}Query", op.operation_id.to_pascal_case());
@@ -810,92 +1199,347 @@ impl<'a> ServerCodegen<'a> {
             extractors.push(quote! {
                 ::axum::extract::RawQuery(__raw_query): ::axum::extract::RawQuery
             });
-            query_decode = quote! {
-                let __q: #query_ident = match #decode_ident(__raw_query.as_deref()) {
-                    Ok(query) => query,
-                    Err(message) => return ::axum::response::IntoResponse::into_response(
-                        (
-                            ::axum::http::StatusCode::BAD_REQUEST,
-                            ::axum::Json(::serde_json::json!({ "error": message })),
-                        )
-                    ),
-                };
+            query_decode = if validation_bundle.is_some() {
+                quote! {
+                    let __q: #query_ident = match #decode_ident(__raw_query.as_deref()) {
+                        Ok(query) => query,
+                        Err(_) => return ::axum::response::IntoResponse::into_response(
+                            super::validation::malformed_parameter("/query")
+                        ),
+                    };
+                }
+            } else {
+                quote! {
+                    let __q: #query_ident = match #decode_ident(__raw_query.as_deref()) {
+                        Ok(query) => query,
+                        Err(message) => return ::axum::response::IntoResponse::into_response(
+                            (
+                                ::axum::http::StatusCode::BAD_REQUEST,
+                                ::axum::Json(::serde_json::json!({ "error": message })),
+                            )
+                        ),
+                    };
+                }
             };
             for p in &query_params {
                 let f = self.parameter_ident(p);
                 let wire = p.name.as_str();
+                let location = parameter_location("query", wire);
+                let target = self.validation_target(validation_bundle, op, "query", Some(wire))?;
+                if p.query_serialization.is_none() && self.parameter_schema_is_string(p) {
+                    if let Some(target) = target.as_ref() {
+                        raw_query_validation_checks.push(quote! {
+                            if let Ok(Some(raw)) = __query_one(&__raw_query_pairs, #wire) {
+                                if let Err(rejection) = super::validation::validate_string_parameter(
+                                    #target, #location, &raw,
+                                ) {
+                                    return ::axum::response::IntoResponse::into_response(rejection);
+                                }
+                            }
+                        });
+                    }
+                }
                 if p.required {
-                    let missing_msg = format!("missing required query parameter `{wire}`");
-                    required_query_checks.push(quote! {
-                        let #f = match __q.#f {
-                            Some(v) => v,
-                            None => return ::axum::response::IntoResponse::into_response(
-                                (
-                                    ::axum::http::StatusCode::BAD_REQUEST,
-                                    ::axum::Json(::serde_json::json!({
-                                        "error": #missing_msg
-                                    })),
-                                )
-                            ),
-                        };
+                    required_query_checks.push(if validation_bundle.is_some() {
+                        quote! {
+                            let #f = match __q.#f {
+                                Some(v) => v,
+                                None => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::missing_parameter(#location)
+                                ),
+                            };
+                        }
+                    } else {
+                        let missing_msg = format!("missing required query parameter `{wire}`");
+                        quote! {
+                            let #f = match __q.#f {
+                                Some(v) => v,
+                                None => return ::axum::response::IntoResponse::into_response(
+                                    (
+                                        ::axum::http::StatusCode::BAD_REQUEST,
+                                        ::axum::Json(::serde_json::json!({
+                                            "error": #missing_msg
+                                        })),
+                                    )
+                                ),
+                            };
+                        }
                     });
+                    if let Some(target) = target {
+                        query_validation_checks.push(quote! {
+                            if let Err(rejection) = super::validation::validate_parameter(
+                                #target, #location, &#f,
+                            ) {
+                                return ::axum::response::IntoResponse::into_response(rejection);
+                            }
+                        });
+                    }
                     call_args.push(quote! { #f });
                 } else {
+                    if let Some(target) = target {
+                        query_validation_checks.push(quote! {
+                            if let Some(value) = &__q.#f {
+                                if let Err(rejection) = super::validation::validate_parameter(
+                                    #target, #location, value,
+                                ) {
+                                    return ::axum::response::IntoResponse::into_response(rejection);
+                                }
+                            }
+                        });
+                    }
                     call_args.push(quote! { __q.#f });
                 }
             }
         }
 
-        // Header parameters — extract via HeaderMap and read each
-        // header by name. Required headers short-circuit with 400 if
-        // missing or non-UTF-8.
+        // Scalar header and cookie parameters are decoded to their generated
+        // Rust types before schema validation. Raw transport/parser errors are
+        // deliberately discarded at the public boundary.
         let header_params: Vec<&_> = op
             .parameters
             .iter()
             .filter(|p| p.location == "header")
             .collect();
-        let mut required_header_checks: Vec<TokenStream> = Vec::new();
-        if !header_params.is_empty() {
+        let cookie_params: Vec<&_> = op
+            .parameters
+            .iter()
+            .filter(|p| p.location == "cookie")
+            .collect();
+        let mut parameter_decode_checks: Vec<TokenStream> = Vec::new();
+        if !header_params.is_empty() || !cookie_params.is_empty() {
             extractors.push(quote! { __headers: ::axum::http::HeaderMap });
+        }
+        if !header_params.is_empty() {
             for p in &header_params {
                 let wire = p.name.as_str();
-                let ident = format_ident!("{}", header_param_ident(&p.name));
+                let ident = self.parameter_ident(p);
+                let ty = self.query_parameter_type(p);
+                let location = parameter_location("header", wire);
+                let target = self.validation_target(validation_bundle, op, "header", Some(wire))?;
+                let string_wire = self.parameter_schema_is_string(p);
                 if p.required {
-                    let missing_msg = format!("missing required header `{wire}`");
-                    required_header_checks.push(quote! {
-                        let #ident = match __headers
-                            .get(#wire)
-                            .and_then(|v| v.to_str().ok())
-                            .map(::std::string::String::from)
-                        {
-                            Some(v) => v,
+                    if let Some(target) = target {
+                        parameter_decode_checks.push(quote! {
+                            let mut __values = __headers.get_all(#wire).iter();
+                            let #ident: #ty = match (__values.next(), __values.next()) {
+                                (Some(value), None) => match value.to_str() {
+                                    Ok(raw) => match super::validation::decode_parameter(
+                                        raw, #target, #location, #string_wire,
+                                    ) {
+                                        Ok(value) => value,
+                                        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                                    },
+                                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                                        super::validation::malformed_parameter(#location)
+                                    ),
+                                },
+                                (None, _) => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::missing_parameter(#location)
+                                ),
+                                _ => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::malformed_parameter(#location)
+                                ),
+                            };
+                        });
+                    } else {
+                        parameter_decode_checks.push(quote! {
+                            let #ident: #ty = match __headers.get(#wire).and_then(|v| v.to_str().ok()) {
+                                Some(raw) => match __decode_query_scalar(raw, #wire) {
+                                    Ok(value) => value,
+                                    Err(_) => return ::axum::http::StatusCode::BAD_REQUEST.into_response(),
+                                },
+                                None => return ::axum::http::StatusCode::BAD_REQUEST.into_response(),
+                            };
+                        });
+                    }
+                    call_args.push(quote! { #ident });
+                } else {
+                    if let Some(target) = target {
+                        parameter_decode_checks.push(quote! {
+                            let mut __values = __headers.get_all(#wire).iter();
+                            let #ident: ::std::option::Option<#ty> = match (__values.next(), __values.next()) {
+                                (Some(value), None) => match value.to_str() {
+                                    Ok(raw) => match super::validation::decode_parameter(raw, #target, #location, #string_wire) {
+                                        Ok(value) => Some(value),
+                                        Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                                    },
+                                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                                        super::validation::malformed_parameter(#location)
+                                    ),
+                                },
+                                (None, _) => None,
+                                _ => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::malformed_parameter(#location)
+                                ),
+                            };
+                        });
+                    } else {
+                        parameter_decode_checks.push(quote! {
+                            let #ident: ::std::option::Option<#ty> = __headers.get(#wire)
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|raw| __decode_query_scalar(raw, #wire).ok());
+                        });
+                    }
+                    call_args.push(quote! { #ident });
+                }
+            }
+        }
+        if !cookie_params.is_empty() {
+            parameter_decode_checks.push(quote! {
+                let mut __cookies = match super::validation::parse_cookies(&__headers) {
+                    Ok(cookies) => cookies,
+                    Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                };
+            });
+            for p in &cookie_params {
+                let wire = p.name.as_str();
+                let ident = self.parameter_ident(p);
+                let ty = self.query_parameter_type(p);
+                let location = parameter_location("cookie", wire);
+                let target = self
+                    .validation_target(validation_bundle, op, "cookie", Some(wire))?
+                    .ok_or_else(|| {
+                        ServerCodegenError::Validation(format!(
+                            "cookie extraction requires validation for operation `{}`",
+                            op.operation_id
+                        ))
+                    })?;
+                let string_wire = self.parameter_schema_is_string(p);
+                if p.required {
+                    parameter_decode_checks.push(quote! {
+                        let #ident: #ty = match __cookies.remove(#wire) {
+                            Some(raw) => match super::validation::decode_parameter(&raw, #target, #location, #string_wire) {
+                                Ok(value) => value,
+                                Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                            },
                             None => return ::axum::response::IntoResponse::into_response(
-                                (
-                                    ::axum::http::StatusCode::BAD_REQUEST,
-                                    ::axum::Json(::serde_json::json!({
-                                        "error": #missing_msg
-                                    })),
-                                )
+                                super::validation::missing_parameter(#location)
                             ),
                         };
                     });
                     call_args.push(quote! { #ident });
                 } else {
-                    call_args.push(quote! {
-                        __headers
-                            .get(#wire)
-                            .and_then(|v| v.to_str().ok())
-                            .map(::std::string::String::from)
+                    parameter_decode_checks.push(quote! {
+                        let #ident: ::std::option::Option<#ty> = match __cookies.remove(#wire) {
+                            Some(raw) => match super::validation::decode_parameter(&raw, #target, #location, #string_wire) {
+                                Ok(value) => Some(value),
+                                Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                            },
+                            None => None,
+                        };
                     });
+                    call_args.push(quote! { #ident });
                 }
             }
         }
 
         // Body
+        let mut body_decode = TokenStream::new();
         let body_ty_opt = body_type(op);
         if let Some(body_ty) = &body_ty_opt {
             let body_ty_tokens = parse_type(body_ty);
-            if op.request_body_required {
+            let validated_json = matches!(&op.request_body, Some(RequestBodyContent::Json { .. }))
+                && validation_bundle.is_some();
+            let validated_form = matches!(
+                &op.request_body,
+                Some(RequestBodyContent::FormUrlEncoded { .. })
+            ) && validation_bundle.is_some();
+            if validated_json {
+                extractors.push(quote! { __request: ::axum::extract::Request });
+                let Some(RequestBodyContent::Json { media_type, .. }) = &op.request_body else {
+                    return Err(ServerCodegenError::Internal(
+                        "validated JSON body lost its media type".to_string(),
+                    ));
+                };
+                let target = self
+                    .validation_target(validation_bundle, op, "body", None)?
+                    .ok_or_else(|| {
+                        ServerCodegenError::Validation(format!(
+                            "validation target unexpectedly disabled for operation `{}` body",
+                            op.operation_id
+                        ))
+                    })?;
+                let required = op.request_body_required;
+                let max_body_bytes = self.server.validation.max_body_bytes;
+                body_decode = if required {
+                    quote! {
+                        let body: #body_ty_tokens = match super::validation::decode_json_body::<#body_ty_tokens>(
+                            __request,
+                            #target,
+                            #media_type,
+                            true,
+                            #max_body_bytes,
+                        ).await {
+                            Ok(Some(body)) => body,
+                            Ok(None) => return ::axum::response::IntoResponse::into_response(
+                                super::validation::generated_contract_error()
+                            ),
+                            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                        };
+                    }
+                } else {
+                    quote! {
+                        let body: ::std::option::Option<#body_ty_tokens> =
+                            match super::validation::decode_json_body::<#body_ty_tokens>(
+                                __request,
+                                #target,
+                                #media_type,
+                                false,
+                                #max_body_bytes,
+                            ).await {
+                                Ok(body) => body,
+                                Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                            };
+                    }
+                };
+                call_args.push(quote! { body });
+            } else if validated_form {
+                extractors.push(quote! { __request: ::axum::extract::Request });
+                let Some(RequestBodyContent::FormUrlEncoded { media_type, .. }) = &op.request_body
+                else {
+                    return Err(ServerCodegenError::Internal(
+                        "validated form body lost its media type".to_string(),
+                    ));
+                };
+                let target = self
+                    .validation_target(validation_bundle, op, "body", None)?
+                    .ok_or_else(|| {
+                        ServerCodegenError::Validation(format!(
+                            "validation target unexpectedly disabled for operation `{}` body",
+                            op.operation_id
+                        ))
+                    })?;
+                let allowed_fields = self.form_field_names(op)?;
+                let required_fields = self.form_required_field_names(op)?;
+                let required = op.request_body_required;
+                let max_body_bytes = self.server.validation.max_body_bytes;
+                body_decode = quote! {
+                    let body: ::std::option::Option<#body_ty_tokens> =
+                        match super::validation::decode_form_body::<#body_ty_tokens>(
+                            __request,
+                            #target,
+                            #media_type,
+                            #required,
+                            #max_body_bytes,
+                            &[#(#allowed_fields),*],
+                            &[#(#required_fields),*],
+                        ).await {
+                            Ok(body) => body,
+                            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                        };
+                };
+                if required {
+                    body_decode.extend(quote! {
+                        let body = match body {
+                            Some(body) => body,
+                            None => return ::axum::response::IntoResponse::into_response(
+                                super::validation::generated_contract_error()
+                            ),
+                        };
+                    });
+                }
+                call_args.push(quote! { body });
+            } else if op.request_body_required {
                 extractors.push(quote! {
                     ::axum::Json(body): ::axum::Json<#body_ty_tokens>
                 });
@@ -913,26 +1557,43 @@ impl<'a> ServerCodegen<'a> {
         // visible to downstream readers — clippy would otherwise flag
         // it as unused in some configurations.
         let _ = trait_ident;
+        let raw_query_validation = (!raw_query_validation_checks.is_empty()).then(|| {
+            quote! {
+                if let Some(raw) = __raw_query.as_deref() {
+                    if __validate_urlencoded(raw).is_err() {
+                        return ::axum::response::IntoResponse::into_response(
+                            super::validation::malformed_parameter("/query")
+                        );
+                    }
+                }
+                let __raw_query_pairs = __query_pairs(__raw_query.as_deref());
+                #(#raw_query_validation_checks)*
+            }
+        });
 
         // Handler returns `axum::response::Response` so the required-
         // param short-circuit (400 BadRequest) and the trait method's
         // typed response enum (via IntoResponse) can both flow out
         // through the same return type.
-        quote! {
+        Ok(quote! {
             async fn #handler_ident<T>(
                 #(#extractors),*
             ) -> ::axum::response::Response
             where
                 T: super::api::#trait_ident + Clone + Send + Sync + 'static,
             {
+                #path_decode
+                #raw_query_validation
                 #query_decode
                 #(#required_query_checks)*
-                #(#required_header_checks)*
+                #(#query_validation_checks)*
+                #(#parameter_decode_checks)*
+                #body_decode
                 ::axum::response::IntoResponse::into_response(
                     api.#trait_method(#(#call_args),*).await,
                 )
             }
-        }
+        })
     }
 
     fn emit_api(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
@@ -987,7 +1648,7 @@ impl<'a> ServerCodegen<'a> {
         let doc = format!(" Operations under the `{tag}` tag.");
         quote! {
             #[doc = #doc]
-            #[axum::async_trait]
+            #[async_trait::async_trait]
             pub trait #trait_ident: Send + Sync + 'static {
                 #(#methods)*
             }
@@ -1027,11 +1688,23 @@ impl<'a> ServerCodegen<'a> {
         }
         for p in &op.parameters {
             if p.location == "header" {
-                let ident = format_ident!("{}", header_param_ident(&p.name));
+                let ident = self.parameter_ident(p);
+                let ty = self.query_parameter_type(p);
                 if p.required {
-                    params.push(quote! { #ident: String });
+                    params.push(quote! { #ident: #ty });
                 } else {
-                    params.push(quote! { #ident: ::std::option::Option<String> });
+                    params.push(quote! { #ident: ::std::option::Option<#ty> });
+                }
+            }
+        }
+        for p in &op.parameters {
+            if p.location == "cookie" {
+                let ident = self.parameter_ident(p);
+                let ty = self.query_parameter_type(p);
+                if p.required {
+                    params.push(quote! { #ident: #ty });
+                } else {
+                    params.push(quote! { #ident: ::std::option::Option<#ty> });
                 }
             }
         }
@@ -1138,6 +1811,7 @@ impl<'a> ServerCodegen<'a> {
                         .query_object_properties(parameter)
                         .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
                         .unwrap_or_default();
+                    let required_names = self.query_object_required_properties(parameter);
                     quote! {
                         let #field_ident = {
                             let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
@@ -1156,43 +1830,75 @@ impl<'a> ServerCodegen<'a> {
                             if object_fields.is_empty() && !empty_marker {
                                 None
                             } else {
+                                let required_properties: &[&str] = &[#(#required_names),*];
+                                for required in required_properties {
+                                    if !object_fields.iter().any(|(key, _)| key == required) {
+                                        return Err(format!("query object `{}` is missing a required property", #wire_name));
+                                    }
+                                }
                                 Some(__decode_query_object(&object_fields, #wire_name)?)
                             }
                         };
                     }
                 }
-                Some(QuerySerialization::FormObject) => quote! {
-                    let #field_ident = match (
-                        __query_one(&__pairs, #wire_name)?,
-                        __query_empty_marker(&__pairs, #wire_name)?,
-                    ) {
-                        (Some(_), true) => return Err(format!(
-                            "query object `{}` cannot combine a value with its empty marker",
-                            #wire_name,
-                        )),
-                        (Some(raw), false) => {
-                            let parts: Vec<&str> = raw.split(',').collect();
-                            if parts.len() % 2 != 0 {
-                                return Err(format!(
-                                    "query object `{}` must contain alternating key,value entries",
-                                    #wire_name,
-                                ));
+                Some(QuerySerialization::FormObject) => {
+                    let property_names = self
+                        .query_object_properties(parameter)
+                        .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    let required_names = self.query_object_required_properties(parameter);
+                    let has_required_names = !required_names.is_empty();
+                    quote! {
+                        let #field_ident = match (
+                            __query_one(&__pairs, #wire_name)?,
+                            __query_empty_marker(&__pairs, #wire_name)?,
+                        ) {
+                            (Some(_), true) => return Err(format!(
+                                "query object `{}` cannot combine a value with its empty marker",
+                                #wire_name,
+                            )),
+                            (Some(raw), false) => {
+                                let parts: Vec<&str> = raw.split(',').collect();
+                                if parts.len() % 2 != 0 {
+                                    return Err(format!(
+                                        "query object `{}` must contain alternating key,value entries",
+                                        #wire_name,
+                                    ));
+                                }
+                                let allowed = [#(#property_names),*];
+                                let mut seen = ::std::collections::BTreeSet::new();
+                                let object_fields: Vec<(String, String)> = parts
+                                    .chunks_exact(2)
+                                    .map(|pair| (pair[0].to_string(), pair[1].to_string()))
+                                    .collect();
+                                for (key, _) in &object_fields {
+                                    if !allowed.contains(&key.as_str()) || !seen.insert(key.as_str()) {
+                                        return Err(format!("query object `{}` has invalid properties", #wire_name));
+                                    }
+                                }
+                                let required_properties: &[&str] = &[#(#required_names),*];
+                                for required in required_properties {
+                                    if !seen.contains(required) {
+                                        return Err(format!("query object `{}` is missing a required property", #wire_name));
+                                    }
+                                }
+                                Some(__decode_query_object(&object_fields, #wire_name)?)
                             }
-                            let object_fields: Vec<(String, String)> = parts
-                                .chunks_exact(2)
-                                .map(|pair| (pair[0].to_string(), pair[1].to_string()))
-                                .collect();
-                            Some(__decode_query_object(&object_fields, #wire_name)?)
-                        }
-                        (None, true) => Some(__decode_query_object(&[], #wire_name)?),
-                        (None, false) => None,
-                    };
-                },
+                            (None, true) if #has_required_names => return Err(format!(
+                                "query object `{}` is missing a required property",
+                                #wire_name,
+                            )),
+                            (None, true) => Some(__decode_query_object(&[], #wire_name)?),
+                            (None, false) => None,
+                        };
+                    }
+                }
                 Some(QuerySerialization::DeepObject) => {
                     let property_names = self
                         .query_object_properties(parameter)
                         .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
                         .unwrap_or_default();
+                    let required_names = self.query_object_required_properties(parameter);
                     quote! {
                         let #field_ident = {
                             let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
@@ -1226,6 +1932,12 @@ impl<'a> ServerCodegen<'a> {
                             if object_fields.is_empty() && !empty_marker {
                                 None
                             } else {
+                                let required_properties: &[&str] = &[#(#required_names),*];
+                                for required in required_properties {
+                                    if !object_fields.iter().any(|(key, _)| key == required) {
+                                        return Err(format!("query object `{}` is missing a required property", #wire_name));
+                                    }
+                                }
                                 Some(__decode_query_object(&object_fields, #wire_name)?)
                             }
                         };
@@ -1253,6 +1965,9 @@ impl<'a> ServerCodegen<'a> {
             fn #decode_ident(
                 raw: ::std::option::Option<&str>,
             ) -> ::std::result::Result<#ident, String> {
+                if let Some(raw) = raw {
+                    __validate_urlencoded(raw)?;
+                }
                 let __pairs = __query_pairs(raw);
                 #(#decoders)*
                 Ok(#ident {
@@ -1262,10 +1977,50 @@ impl<'a> ServerCodegen<'a> {
         })
     }
 
-    fn emit_errors(&self, ops: &[&OperationInfo]) -> TokenStream {
+    fn emit_errors(&self, ops: &[&OperationInfo], validation_enabled: bool) -> TokenStream {
         let provenance_attribute = self.provenance_attribute();
         let any_streaming = ops.iter().any(|op| op.supports_streaming);
         let enums: Vec<TokenStream> = ops.iter().map(|op| self.emit_response_enum(op)).collect();
+        let problem_types = validation_enabled.then(|| {
+            quote! {
+                /// RFC 9457 Problem Details profile used for rejected requests.
+                #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+                pub struct ProblemDetails {
+                    #[serde(rename = "type")]
+                    pub r#type: String,
+                    pub title: String,
+                    pub status: u16,
+                    pub code: String,
+                    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+                    pub errors: Vec<InvalidParameter>,
+                }
+
+                /// One sanitized request-contract violation.
+                #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+                pub struct InvalidParameter {
+                    pub code: String,
+                    pub location: String,
+                    pub message: String,
+                }
+
+                /// Axum rejection wrapper which always uses `application/problem+json`.
+                #[derive(Debug, Clone)]
+                pub struct RequestValidationRejection(pub ProblemDetails);
+
+                impl IntoResponse for RequestValidationRejection {
+                    fn into_response(self) -> ::axum::response::Response {
+                        let status = StatusCode::from_u16(self.0.status)
+                            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                        let mut response = (status, Json(self.0)).into_response();
+                        response.headers_mut().insert(
+                            ::axum::http::header::CONTENT_TYPE,
+                            ::axum::http::HeaderValue::from_static("application/problem+json"),
+                        );
+                        response
+                    }
+                }
+            }
+        });
 
         // The SSE type alias is emitted exactly when at least one
         // picked op streams. Bringing it in unconditionally would force
@@ -1335,6 +2090,8 @@ impl<'a> ServerCodegen<'a> {
             #[allow(unused_imports)]
             use super::super::types::*;
 
+            #problem_types
+
             #stream_alias
 
             #(#enums)*
@@ -1403,11 +2160,8 @@ impl<'a> ServerCodegen<'a> {
     }
 }
 
-/// Convert a wire-level header name (e.g. `anthropic-version`,
-/// `X-Request-Id`) to a Rust identifier (`anthropic_version`,
-/// `x_request_id`). Snake_case lowercases + replaces hyphens.
-fn header_param_ident(name: &str) -> String {
-    name.replace('-', "_").to_snake_case()
+fn parameter_location(location: &str, name: &str) -> String {
+    format!("/{location}/{}", name.replace('~', "~0").replace('/', "~1"))
 }
 
 /// Emit a string-enum type for a parameter whose inline schema
@@ -1510,18 +2264,57 @@ fn axum_custom_route(
     (route, dispatcher_fn)
 }
 
-/// OpenAPI uses `{param}` placeholders; axum 0.7 accepts the same
-/// `{param}` syntax for typed extraction, so this is currently a
-/// pass-through. The helper exists so future syntax shifts (e.g.
-/// nested wildcards) live in one place.
-fn openapi_to_axum_path(p: &str) -> String {
-    p.to_string()
+/// Validate and convert an OpenAPI path template into Axum 0.8 route syntax.
+///
+/// Both formats use `{parameter}` for a dynamic segment. Axum only supports a
+/// capture as a complete segment, so OpenAPI templates embedded in a literal
+/// segment are rejected during generation instead of panicking when the
+/// generated router is constructed.
+fn openapi_to_axum_path(path: &str) -> Result<String, ServerCodegenError> {
+    let invalid = |reason: &str| ServerCodegenError::InvalidRoutePath {
+        path: path.to_string(),
+        reason: reason.to_string(),
+    };
+
+    if !path.starts_with('/') {
+        return Err(invalid("paths must start with `/`"));
+    }
+    for segment in path.split('/').skip(1) {
+        if segment.is_empty() {
+            continue;
+        }
+        if segment.starts_with(':') || segment.starts_with('*') {
+            return Err(invalid(
+                "segments beginning with `:` or `*` conflict with Axum route syntax",
+            ));
+        }
+
+        let has_open = segment.contains('{');
+        let has_close = segment.contains('}');
+        if has_open || has_close {
+            let Some(name) = segment
+                .strip_prefix('{')
+                .and_then(|value| value.strip_suffix('}'))
+            else {
+                return Err(invalid(
+                    "path parameters must occupy a complete segment such as `{pet_id}`",
+                ));
+            };
+            if name.is_empty() || name.contains(['{', '}']) {
+                return Err(invalid(
+                    "path parameter names must be non-empty and cannot contain braces",
+                ));
+            }
+        }
+    }
+
+    Ok(path.to_string())
 }
 
 fn body_type(op: &OperationInfo) -> Option<String> {
     match &op.request_body {
-        Some(RequestBodyContent::Json { schema_name })
-        | Some(RequestBodyContent::FormUrlEncoded { schema_name }) => Some(schema_name.clone()),
+        Some(RequestBodyContent::Json { schema_name, .. })
+        | Some(RequestBodyContent::FormUrlEncoded { schema_name, .. }) => Some(schema_name.clone()),
         _ => None,
     }
 }
@@ -1708,5 +2501,32 @@ mod tests {
     fn standard_methods_use_axum_method_routes_without_guards() {
         assert!(axum_method_call("TRACE").is_some());
         assert!(axum_method_call("QUERY").is_none());
+    }
+
+    #[test]
+    fn openapi_parameterized_paths_are_axum_08_paths() {
+        assert_eq!(
+            openapi_to_axum_path("/pets/{pet_id}").unwrap(),
+            "/pets/{pet_id}"
+        );
+        assert_eq!(openapi_to_axum_path("/").unwrap(), "/");
+    }
+
+    #[test]
+    fn malformed_or_unsupported_route_templates_are_rejected() {
+        for path in [
+            "pets/{pet_id}",
+            "/pets/{pet_id}.json",
+            "/pets/{}",
+            "/pets/:id",
+        ] {
+            assert!(
+                matches!(
+                    openapi_to_axum_path(path),
+                    Err(ServerCodegenError::InvalidRoutePath { .. })
+                ),
+                "{path} should be rejected"
+            );
+        }
     }
 }

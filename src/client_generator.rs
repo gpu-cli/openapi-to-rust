@@ -815,7 +815,7 @@ impl CodeGenerator {
             "body".to_string(),
         ]);
         let mut allocated = Vec::new();
-        for location in ["path", "query", "header"] {
+        for location in ["path", "query", "header", "cookie"] {
             for parameter in &operation.parameters {
                 if parameter.location != location {
                     continue;
@@ -861,8 +861,8 @@ impl CodeGenerator {
 
         let request_body = operation.request_body.as_ref()?;
         let (body_name, body_ident) = match request_body {
-            RequestBodyContent::Json { schema_name }
-            | RequestBodyContent::FormUrlEncoded { schema_name } => {
+            RequestBodyContent::Json { schema_name, .. }
+            | RequestBodyContent::FormUrlEncoded { schema_name, .. } => {
                 (schema_name.as_str(), format_ident!("request"))
             }
             RequestBodyContent::Multipart => {
@@ -873,7 +873,7 @@ impl CodeGenerator {
                     optional_fields: Vec::new(),
                 });
             }
-            RequestBodyContent::OctetStream => {
+            RequestBodyContent::OctetStream | RequestBodyContent::Unsupported { .. } => {
                 return Some(BodyModelPlan {
                     body_ident: format_ident!("body"),
                     body_type: quote! { Vec<u8> },
@@ -1251,6 +1251,7 @@ impl CodeGenerator {
         let request_body = self.generate_request_body(op);
         let query_params = self.generate_query_params(op);
         let header_params = self.generate_header_params(op);
+        let cookie_params = self.generate_cookie_params(op);
         let auth_application = self.generate_auth_application();
         let response_type = self.get_response_type(op);
         let has_response_body = self.get_success_response_schema(op).is_some();
@@ -1272,6 +1273,7 @@ impl CodeGenerator {
 
                 #query_params
                 #header_params
+                #cookie_params
 
                 // Apply configured authentication (T3). Was previously
                 // hardcoded to bearer_auth regardless of GeneratorConfig.
@@ -1387,6 +1389,40 @@ impl CodeGenerator {
         }
         quote! {
             #(#emit)*
+        }
+    }
+
+    fn generate_cookie_params(&self, op: &OperationInfo) -> TokenStream {
+        let cookie_params: Vec<_> = op
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.location == "cookie")
+            .collect();
+        if cookie_params.is_empty() {
+            return quote! {};
+        }
+        let mut emit = Vec::new();
+        for parameter in cookie_params {
+            let ident = Self::to_field_ident(&self.param_ident_str(parameter));
+            let wire_name = parameter.name.as_str();
+            if parameter.required {
+                emit.push(quote! {
+                    __cookie_fields.push(format!("{}={}", #wire_name, #ident));
+                });
+            } else {
+                emit.push(quote! {
+                    if let Some(value) = #ident {
+                        __cookie_fields.push(format!("{}={}", #wire_name, value));
+                    }
+                });
+            }
+        }
+        quote! {
+            let mut __cookie_fields = Vec::new();
+            #(#emit)*
+            if !__cookie_fields.is_empty() {
+                req = req.header(::reqwest::header::COOKIE, __cookie_fields.join("; "));
+            }
         }
     }
 
@@ -1841,14 +1877,27 @@ impl CodeGenerator {
             }
         }
 
+        for param in &op.parameters {
+            if param.location == "cookie" {
+                let param_name_snake = self.param_ident_str(param);
+                let param_name = unique_param_ident(param_name_snake);
+                let param_type = self.get_param_rust_type(param);
+                if param.required {
+                    params.push(quote! { #param_name: #param_type });
+                } else {
+                    params.push(quote! { #param_name: Option<#param_type> });
+                }
+            }
+        }
+
         // Add request body parameter based on content type. Optional bodies
         // (`requestBody.required` is false or absent) become `Option<T>` per T11.
         if let Some(ref rb) = op.request_body {
             use crate::analysis::RequestBodyContent;
             let required = op.request_body_required;
             let body_type = match rb {
-                RequestBodyContent::Json { schema_name }
-                | RequestBodyContent::FormUrlEncoded { schema_name } => {
+                RequestBodyContent::Json { schema_name, .. }
+                | RequestBodyContent::FormUrlEncoded { schema_name, .. } => {
                     let rust_type_name = self.to_rust_type_name(schema_name);
                     let request_ident =
                         syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
@@ -1857,10 +1906,13 @@ impl CodeGenerator {
                 RequestBodyContent::Multipart => quote! { reqwest::multipart::Form },
                 RequestBodyContent::OctetStream => quote! { Vec<u8> },
                 RequestBodyContent::TextPlain => quote! { String },
+                RequestBodyContent::Unsupported { .. } => quote! { Vec<u8> },
             };
             let body_ident = match rb {
                 RequestBodyContent::Multipart => quote! { form },
-                RequestBodyContent::OctetStream | RequestBodyContent::TextPlain => quote! { body },
+                RequestBodyContent::OctetStream
+                | RequestBodyContent::TextPlain
+                | RequestBodyContent::Unsupported { .. } => quote! { body },
                 _ => quote! { request },
             };
             if required {
@@ -1951,20 +2003,20 @@ impl CodeGenerator {
         use crate::analysis::RequestBodyContent;
         let required = op.request_body_required;
         let (ident, apply): (TokenStream, TokenStream) = match rb {
-            RequestBodyContent::Json { .. } => (
+            RequestBodyContent::Json { media_type, .. } => (
                 quote! { request },
                 quote! {
                     req = req
                         .body(serde_json::to_vec(&request).map_err(HttpError::serialization_error)?)
-                        .header("content-type", "application/json");
+                        .header("content-type", #media_type);
                 },
             ),
-            RequestBodyContent::FormUrlEncoded { .. } => (
+            RequestBodyContent::FormUrlEncoded { media_type, .. } => (
                 quote! { request },
                 quote! {
                     req = req
                         .body(serde_urlencoded::to_string(&request).map_err(HttpError::serialization_error)?)
-                        .header("content-type", "application/x-www-form-urlencoded");
+                        .header("content-type", #media_type);
                 },
             ),
             RequestBodyContent::Multipart => (
@@ -1989,6 +2041,20 @@ impl CodeGenerator {
                         .header("content-type", "text/plain");
                 },
             ),
+            RequestBodyContent::Unsupported { media_types } => {
+                let media_type = media_types
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("application/octet-stream");
+                (
+                    quote! { body },
+                    quote! {
+                        req = req
+                            .body(body)
+                            .header("content-type", #media_type);
+                    },
+                )
+            }
         };
         if required {
             apply
@@ -2321,6 +2387,11 @@ impl CodeGenerator {
         };
         let stripped = name.trim_end_matches(['<', '>', '=']);
         let mut snake_case = stripped.to_snake_case();
+        if snake_case.is_empty() {
+            snake_case.push_str("parameter");
+        } else if snake_case.starts_with(|character: char| character.is_ascii_digit()) {
+            snake_case.insert(0, '_');
+        }
         snake_case.push_str(suffix);
 
         if matches!(snake_case.as_str(), "self" | "super" | "crate" | "Self") {

@@ -112,16 +112,18 @@ pub enum Schema {
     OneOf {
         #[serde(rename = "oneOf")]
         one_of: Vec<Schema>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         discriminator: Option<Discriminator>,
         #[serde(flatten)]
         details: SchemaDetails,
     },
     /// AnyOf union (must come before Typed to handle type + anyOf patterns)
     AnyOf {
-        #[serde(rename = "type")]
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
         schema_type: Option<SchemaType>,
         #[serde(rename = "anyOf")]
         any_of: Vec<Schema>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         discriminator: Option<Discriminator>,
         #[serde(flatten)]
         details: SchemaDetails,
@@ -172,127 +174,161 @@ pub enum SchemaType {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct SchemaDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nullable: Option<bool>,
 
     // OpenAPI 3.0 recursive support (obsoleted by JSON Schema 2020-12).
-    #[serde(rename = "$recursiveAnchor")]
+    #[serde(rename = "$recursiveAnchor", skip_serializing_if = "Option::is_none")]
     pub recursive_anchor: Option<bool>,
 
     // JSON Schema 2020-12 dynamic anchors (J1).
-    #[serde(rename = "$dynamicAnchor")]
+    #[serde(rename = "$dynamicAnchor", skip_serializing_if = "Option::is_none")]
     pub dynamic_anchor: Option<String>,
-    #[serde(rename = "$id")]
+    #[serde(rename = "$id", skip_serializing_if = "Option::is_none")]
     pub schema_id: Option<String>,
 
     // String-specific
-    #[serde(rename = "enum")]
+    #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
-    #[serde(rename = "const")]
+    #[serde(
+        rename = "const",
+        default,
+        deserialize_with = "deserialize_present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub const_value: Option<Value>,
 
     // Object-specific
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<BTreeMap<String, Schema>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub required: Option<Vec<String>>,
-    #[serde(rename = "additionalProperties")]
+    #[serde(
+        rename = "additionalProperties",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub additional_properties: Option<AdditionalProperties>,
 
     // Array-specific
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<Schema>>,
 
     // Number-specific
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub maximum: Option<f64>,
 
     // Validation
-    #[serde(rename = "minLength")]
+    #[serde(rename = "minLength", skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u64>,
-    #[serde(rename = "maxLength")]
+    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
     /// In 3.0/Swagger this was a `bool` flag relative to `minimum`; in 3.1
     /// (JSON Schema 2020-12) it's a number. Accept either to round-trip
     /// real-world specs. (Tracked under J3 — proper validation lowering.)
-    #[serde(rename = "exclusiveMinimum")]
+    #[serde(rename = "exclusiveMinimum", skip_serializing_if = "Option::is_none")]
     pub exclusive_minimum: Option<ExclusiveBound>,
-    #[serde(rename = "exclusiveMaximum")]
+    #[serde(rename = "exclusiveMaximum", skip_serializing_if = "Option::is_none")]
     pub exclusive_maximum: Option<ExclusiveBound>,
-    #[serde(rename = "multipleOf")]
+    #[serde(rename = "multipleOf", skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
-    #[serde(rename = "minItems")]
+    #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
     pub min_items: Option<u64>,
-    #[serde(rename = "maxItems")]
+    #[serde(rename = "maxItems", skip_serializing_if = "Option::is_none")]
     pub max_items: Option<u64>,
-    #[serde(rename = "uniqueItems")]
+    #[serde(rename = "uniqueItems", skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
-    #[serde(rename = "minProperties")]
+    #[serde(rename = "minProperties", skip_serializing_if = "Option::is_none")]
     pub min_properties: Option<u64>,
-    #[serde(rename = "maxProperties")]
+    #[serde(rename = "maxProperties", skip_serializing_if = "Option::is_none")]
     pub max_properties: Option<u64>,
 
     // JSON Schema 2020-12 array keywords (J4, J8).
-    #[serde(rename = "prefixItems")]
+    #[serde(rename = "prefixItems", skip_serializing_if = "Option::is_none")]
     pub prefix_items: Option<Vec<Schema>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub contains: Option<Box<Schema>>,
-    #[serde(rename = "minContains")]
+    #[serde(rename = "minContains", skip_serializing_if = "Option::is_none")]
     pub min_contains: Option<u64>,
-    #[serde(rename = "maxContains")]
+    #[serde(rename = "maxContains", skip_serializing_if = "Option::is_none")]
     pub max_contains: Option<u64>,
 
     // JSON Schema 2020-12 object keywords (J5, J6, J7).
-    #[serde(rename = "patternProperties")]
+    #[serde(rename = "patternProperties", skip_serializing_if = "Option::is_none")]
     pub pattern_properties: Option<BTreeMap<String, Schema>>,
-    #[serde(rename = "propertyNames")]
+    #[serde(rename = "propertyNames", skip_serializing_if = "Option::is_none")]
     pub property_names: Option<Box<Schema>>,
-    #[serde(rename = "unevaluatedProperties")]
+    #[serde(
+        rename = "unevaluatedProperties",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub unevaluated_properties: Option<AdditionalProperties>,
-    #[serde(rename = "unevaluatedItems")]
+    #[serde(rename = "unevaluatedItems", skip_serializing_if = "Option::is_none")]
     pub unevaluated_items: Option<AdditionalProperties>,
-    #[serde(rename = "dependentRequired")]
+    #[serde(rename = "dependentRequired", skip_serializing_if = "Option::is_none")]
     pub dependent_required: Option<BTreeMap<String, Vec<String>>>,
-    #[serde(rename = "dependentSchemas")]
+    #[serde(rename = "dependentSchemas", skip_serializing_if = "Option::is_none")]
     pub dependent_schemas: Option<BTreeMap<String, Schema>>,
 
     // JSON Schema 2020-12 content keywords (J8).
-    #[serde(rename = "contentEncoding")]
+    #[serde(rename = "contentEncoding", skip_serializing_if = "Option::is_none")]
     pub content_encoding: Option<String>,
-    #[serde(rename = "contentMediaType")]
+    #[serde(rename = "contentMediaType", skip_serializing_if = "Option::is_none")]
     pub content_media_type: Option<String>,
-    #[serde(rename = "contentSchema")]
+    #[serde(rename = "contentSchema", skip_serializing_if = "Option::is_none")]
     pub content_schema: Option<Box<Schema>>,
 
     // JSON Schema 2020-12 conditional keywords.
-    #[serde(rename = "if")]
+    #[serde(rename = "if", skip_serializing_if = "Option::is_none")]
     pub if_schema: Option<Box<Schema>>,
-    #[serde(rename = "then")]
+    #[serde(rename = "then", skip_serializing_if = "Option::is_none")]
     pub then_schema: Option<Box<Schema>>,
-    #[serde(rename = "else")]
+    #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
     pub else_schema: Option<Box<Schema>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub not: Option<Box<Schema>>,
 
     // 3.0 deprecated annotations now first-class (kept since openai-responses fixture is OAS 3.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deprecated: Option<bool>,
-    #[serde(rename = "readOnly")]
+    #[serde(rename = "readOnly", skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
-    #[serde(rename = "writeOnly")]
+    #[serde(rename = "writeOnly", skip_serializing_if = "Option::is_none")]
     pub write_only: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub examples: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub example: Option<Value>,
     /// JSON Schema annotation `$comment`.
-    #[serde(rename = "$comment")]
+    #[serde(rename = "$comment", skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
-    #[serde(rename = "$schema")]
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema_keyword: Option<String>,
-    #[serde(rename = "$defs")]
+    #[serde(rename = "$defs", skip_serializing_if = "Option::is_none")]
     pub defs: Option<BTreeMap<String, Schema>>,
 
     // Extensions and unknown fields. After J5–J8 above this should be x-*-only
     // for well-formed OAS 3.1+ specs.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// 3.0 used `exclusiveMinimum: true` as a bool flag against `minimum`;

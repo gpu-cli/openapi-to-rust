@@ -12,3 +12,8 @@ enable_async_client = false
 [server]
 framework = "axum"
 operations = ["messages_post"]
+
+[server.validation]
+enabled = true
+max_body_bytes = 2097152
+max_errors = 16

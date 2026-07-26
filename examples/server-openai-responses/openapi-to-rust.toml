@@ -4,7 +4,14 @@ output_dir = "src/gen"
 module_name = "openai"
 
 [features]
-enable_async_client = false
+enable_async_client = true
+
+[client]
+# Compile the generated Rust client from the same selected OpenAI operations.
+# Wire-level Rust client/server round trips live in the generic roundtrip tests;
+# this example is the production-spec compatibility row.
+operations = ["createResponse", "listInputItems", "usage-costs"]
+prune_models = true
 
 [server]
 framework = "axum"
@@ -16,6 +23,11 @@ framework = "axum"
 operations = ["createResponse", "listInputItems", "usage-costs"]
 # Drop schemas not reachable from the picked operations. Cuts the
 # 2154-schema OpenAI spec down to just what these three ops touch.
-# Safe here because we don't generate the HTTP client (those would
-# also lose types).
+# The generated client selects the same operation set, so the shared pruned
+# model closure remains complete for both sides.
 prune_models = true
+
+[server.validation]
+enabled = true
+max_body_bytes = 2097152
+max_errors = 16

@@ -12,6 +12,7 @@ pub mod codegen;
 pub mod edit;
 pub mod list;
 pub mod selector;
+pub(crate) mod validation;
 
 pub use selector::{Resolution, Selector, SelectorParseError, SelectorResolveError, resolve};
 

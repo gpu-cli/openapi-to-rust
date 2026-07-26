@@ -36,7 +36,7 @@ use std::convert::Infallible;
 #[derive(Clone)]
 struct AppState;
 
-#[axum::async_trait]
+#[async_trait::async_trait]
 impl ServerApi for AppState {
     async fn messages_post(
         &self,

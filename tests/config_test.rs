@@ -41,6 +41,48 @@ enable_specta = false"#,
 }
 
 #[test]
+fn server_validation_has_secure_defaults_and_bounded_overrides() {
+    let mut spec_file = NamedTempFile::new().unwrap();
+    writeln!(spec_file, r#"{{"openapi": "3.1.0"}}"#).unwrap();
+    let base = format!(
+        r#"[generator]
+spec_path = "{}"
+output_dir = "src/generated"
+module_name = "types"
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+operations = ["getThing"]
+"#,
+        spec_file.path().display()
+    );
+    let mut default_file = NamedTempFile::new().unwrap();
+    writeln!(default_file, "{base}").unwrap();
+    let config = ConfigFile::load(default_file.path()).unwrap();
+    let validation = &config.server.unwrap().validation;
+    assert!(validation.enabled);
+    assert_eq!(validation.max_body_bytes, 2_097_152);
+    assert_eq!(validation.max_errors, 16);
+
+    for invalid in [
+        "max_body_bytes = 0\nmax_errors = 16",
+        "max_body_bytes = 2097152\nmax_errors = 0",
+        "max_body_bytes = 67108865\nmax_errors = 16",
+        "max_body_bytes = 2097152\nmax_errors = 101",
+    ] {
+        let mut invalid_file = NamedTempFile::new().unwrap();
+        writeln!(invalid_file, "{base}\n[server.validation]\n{invalid}").unwrap();
+        let error = ConfigFile::load(invalid_file.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("server.validation."), "{error}");
+    }
+}
+
+#[test]
 fn test_valid_config_full() {
     let mut spec_file = NamedTempFile::new().unwrap();
     writeln!(spec_file, r#"{{"openapi": "3.0.0"}}"#).unwrap();

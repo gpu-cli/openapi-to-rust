@@ -918,6 +918,32 @@ impl CodeGenerator {
         quote! {
             use thiserror::Error;
 
+            /// The generated validation-problem profile based on RFC 9457.
+            /// The distinctive namespace avoids collisions with user schemas.
+            pub mod openapi_to_rust_problem {
+                #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+                pub struct ProblemDetails {
+                    #[serde(rename = "type")]
+                    pub type_uri: String,
+                    pub title: String,
+                    pub status: u16,
+                    pub code: String,
+                    #[serde(default)]
+                    pub errors: Vec<InvalidParameter>,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    pub detail: Option<String>,
+                    #[serde(default, skip_serializing_if = "Option::is_none")]
+                    pub instance: Option<String>,
+                }
+
+                #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+                pub struct InvalidParameter {
+                    pub code: String,
+                    pub location: String,
+                    pub message: String,
+                }
+            }
+
             /// Transport-level errors: failures where we never received an
             /// inspectable HTTP response from the server.
             ///
@@ -1016,6 +1042,23 @@ impl CodeGenerator {
                 /// HttpError logic for backwards-compatible retry middleware.
                 pub fn is_retryable(&self) -> bool {
                     matches!(self.status, 429 | 500 | 502 | 503 | 504)
+                }
+
+                /// Decode the generated RFC 9457 validation-problem profile
+                /// without replacing a documented per-operation error in `typed`.
+                pub fn problem_details(
+                    &self,
+                ) -> Option<openapi_to_rust_problem::ProblemDetails> {
+                    let content_type = self
+                        .headers
+                        .get(reqwest::header::CONTENT_TYPE)?
+                        .to_str()
+                        .ok()?;
+                    let media_type = content_type.split(';').next()?.trim();
+                    if !media_type.eq_ignore_ascii_case("application/problem+json") {
+                        return None;
+                    }
+                    serde_json::from_str(&self.body).ok()
                 }
             }
 

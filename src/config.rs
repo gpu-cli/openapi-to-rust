@@ -266,6 +266,31 @@ pub struct ServerSection {
     /// the union of both operation sets plus configured streaming event roots.
     #[serde(default)]
     pub prune_models: bool,
+    /// Runtime request validation policy for generated server scaffolding.
+    #[serde(default)]
+    pub validation: ServerValidationSection,
+}
+
+/// Limits and policy for generated request validation.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerValidationSection {
+    /// Validate request inputs against their OpenAPI schemas.
+    pub enabled: bool,
+    /// Maximum request-body bytes accepted before buffering is rejected.
+    pub max_body_bytes: usize,
+    /// Maximum number of normalized violations returned to a client.
+    pub max_errors: usize,
+}
+
+impl Default for ServerValidationSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_body_bytes: 2_097_152,
+            max_errors: 16,
+        }
+    }
 }
 
 /// Optional scope for generated HTTP-client operations.
@@ -684,6 +709,18 @@ impl ConfigFile {
             }
         }
         if let Some(server) = &self.server {
+            if !(1..=67_108_864).contains(&server.validation.max_body_bytes) {
+                errors.push(
+                    "server.validation.max_body_bytes: max_body_bytes must be between 1 and 67108864"
+                        .to_string(),
+                );
+            }
+            if !(1..=100).contains(&server.validation.max_errors) {
+                errors.push(
+                    "server.validation.max_errors: max_errors must be between 1 and 100"
+                        .to_string(),
+                );
+            }
             for (index, selector) in server.operations.iter().enumerate() {
                 if let Err(error) = crate::server::Selector::parse(selector) {
                     errors.push(format!("server.operations[{index}]: {error}"));

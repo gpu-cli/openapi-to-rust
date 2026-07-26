@@ -883,7 +883,7 @@ fn print_server_hint(
     eprintln!("   #[derive(Clone)]");
     eprintln!("   pub struct AppState {{ /* state goes here */ }}");
     eprintln!();
-    eprintln!("   #[axum::async_trait]");
+    eprintln!("   #[async_trait::async_trait]");
     eprintln!("   impl {trait_name} for AppState {{");
     eprintln!("       async fn {method}(&self{body_param}) -> {response_ty} {{");
     eprintln!("           todo!()");

@@ -45,12 +45,12 @@ Release history and breaking changes live in the [changelog](CHANGELOG.md).
 - **Generates clients *and* servers** — pick client calls with `[client]`, hosted operations with `[server]`, or keep the default all-operation client. Both share the same `types.rs`.
 - **Typed scalars** — `format: date-time` → `chrono::DateTime<chrono::Utc>`, `uri` → `url::Url`, `binary` → `bytes::Bytes`, `uuid` → `uuid::Uuid`, `byte` → `Vec<u8>` + base64 codec, unsigned-int formats → `u32`/`u64`. All opt-out per-format in TOML.
 - **Async HTTP client** — typed methods per operation, retry/backoff via `reqwest-retry`, distributed tracing via `reqwest-tracing`, Bearer / API-key / custom auth (honored at runtime), default headers, path-template percent-encoding.
-- **Axum server scaffolding** — trait per tag, status-code-typed response enum, SSE-ready `OkStream` variant, required-param HTTP 400 short-circuit at the handler boundary, combined `build_router(...)` factory for multi-tag selections.
+- **Axum 0.8 server scaffolding** — trait per tag, status-code-typed response enum, SSE-ready `OkStream` variant, OpenAPI request validation, and a combined `build_router(...)` factory for multi-tag selections.
 - **SSE streaming clients** — first-class Server-Sent Events with reconnection.
 - **Smart discriminated unions** — auto-detects implicit discriminators from `const` properties, falls back to `#[serde(untagged)]` when a union mixes scalar and object branches (e.g. `"auto"` *or* a tagged object).
 - **Per-operation typed errors** — each operation gets its own error enum with `Status4xx(...)` typed bodies; you can match on the exact API error shape.
 - **Typed `additionalProperties`** — extra keys become `BTreeMap<String, T>` instead of falling to `serde_json::Value` when the spec gives a value-type schema.
-- **Constraint-as-doc** — `minLength`/`maxLength`/`minimum`/`pattern` etc. are emitted as `/// Constraint: …` doc comments. **No runtime validation is added**, so generated code stays free of validator-crate dependencies.
+- **Constraints at the server boundary** — `minLength`/`maxLength`/`minimum`/`pattern` remain useful model documentation, and selected Axum operations validate their request schemas at runtime with an offline `jsonschema` bundle.
 - **TOML configuration** with overrides for spec quirks (nullable, extensible enums, type aliases).
 - **Snapshot testing** — `insta` snapshots for generated output.
 - **Optional `specta::Type` derives** for cross-language type sharing.
@@ -160,7 +160,24 @@ operations = ["createResponse", "listInputItems"]
 # Drop schemas not reachable from the picked operations. Safe when
 # you're not also generating the HTTP client (the client would lose types).
 prune_models = true
+
+[server.validation]
+enabled = true                 # default
+max_body_bytes = 2097152       # 2 MiB; 1..=64 MiB
+max_errors = 16                # deterministic cap; 1..=100
 ```
+
+Generated handlers validate JSON bodies and supported path, query, header,
+cookie, and form inputs before invoking your trait. Public failures use
+`application/problem+json`: malformed transport is `400`, oversized bodies are
+`413`, undeclared media types are `415`, and schema violations are `422`.
+Messages contain stable codes and JSON Pointer locations, never submitted values,
+Serde/validator text, schema paths, or Rust internals. Generated clients preserve
+documented typed errors and expose this profile lazily through
+`ApiError::problem_details()`.
+
+See [Generated Axum request validation](docs/server-validation.md) for the full
+schema dialect, status, error profile, supported-input, and logging contract.
 
 Discover and scaffold operations from the CLI:
 
@@ -188,7 +205,7 @@ use futures_util::stream;
 #[derive(Clone)]
 struct AppState;
 
-#[axum::async_trait]
+#[async_trait::async_trait]
 impl ResponsesApi for AppState {
     async fn create_response(&self, body: CreateResponse) -> CreateResponseResponse {
         if body.stream == Some(true) {
@@ -230,6 +247,7 @@ Two complete examples are in the repo:
 | `server/api.rs` | `trait <Tag>Api { async fn <op>(&self, …) -> <Op>Response; }` per tag |
 | `server/errors.rs` | `enum <Op>Response { Ok(T), BadRequest(E), …, OkStream(Sse<…>) }` with `IntoResponse` |
 | `server/router.rs` | Per-tag `Router` factory; combined `build_router<…>(…)` for multi-tag selections |
+| `server/validation.rs` | Offline JSON Schema validators and sanitized Problem Details rejections |
 | `mod.rs` | Module declarations + re-exports |
 | `REQUIRED_DEPS.toml` | Complete direct dependencies and crate features for the exact generated modes and selected operations — append or merge into the consuming `Cargo.toml` |
 
@@ -290,7 +308,10 @@ pub custom_id: String,
 pub temperature: Option<f64>,
 ```
 
-> **No runtime validation is generated.** The generator never adds the `validator` crate or `#[validate(...)]` attributes — constraints are documentation only. Validate at boundaries you control.
+> Generated model types do not grow `validator`/`garde` derives or perform
+> validation during construction. When Axum server generation is enabled,
+> request constraints are instead enforced once at the HTTP boundary from the
+> original OpenAPI/JSON Schema source of truth.
 
 ### Discriminated unions (tagged enums)
 
@@ -592,6 +613,11 @@ operations = [                          # selectors: operationId | "METHOD /path
 prune_models = false                    # drop schemas outside the combined selected
                                         # client/server operation closure
 
+[server.validation]
+enabled = true
+max_body_bytes = 2097152
+max_errors = 16
+
 [client]
 operations = [                          # absent or empty means every client operation
   "createResponse",
@@ -639,6 +665,10 @@ The compile tiers are intentionally different:
   OpenAPI specs. The bundled Gitea Swagger 2.0 document is reported as skipped.
 - Local `scripts/spec-compile.sh` runs the same full tier; pass spec names as
   arguments for a smaller targeted run.
+- Every pull request also starts the generated OpenAI Responses Axum example
+  on loopback and exercises it through the pinned official OpenAI Python SDK.
+  The compatibility gate covers unary and streaming Responses, input-item
+  path/query parameters, and the organization costs query.
 
 ## Examples
 

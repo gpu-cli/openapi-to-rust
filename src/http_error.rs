@@ -117,6 +117,36 @@
 
 use thiserror::Error;
 
+/// The generated validation-problem profile based on RFC 9457.
+///
+/// The distinctive module name prevents collisions with OpenAPI schemas named
+/// `ProblemDetails` or `InvalidParameter`.
+pub mod openapi_to_rust_problem {
+    /// A sanitized validation problem emitted by generated servers.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+    pub struct ProblemDetails {
+        #[serde(rename = "type")]
+        pub type_uri: String,
+        pub title: String,
+        pub status: u16,
+        pub code: String,
+        #[serde(default)]
+        pub errors: Vec<InvalidParameter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub instance: Option<String>,
+    }
+
+    /// One safe, machine-readable request validation violation.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+    pub struct InvalidParameter {
+        pub code: String,
+        pub location: String,
+        pub message: String,
+    }
+}
+
 /// HTTP client errors that can occur during API requests
 #[derive(Error, Debug)]
 pub enum HttpError {
@@ -244,6 +274,24 @@ impl<E> ApiError<E> {
 
     pub fn is_server_error(&self) -> bool {
         (500..600).contains(&self.status)
+    }
+
+    /// Decode the generated RFC 9457 validation-problem profile without
+    /// disturbing a documented typed error.
+    ///
+    /// Only the `application/problem+json` media type is accepted. Arbitrary
+    /// JSON error bodies are deliberately not reclassified as Problem Details.
+    pub fn problem_details(&self) -> Option<openapi_to_rust_problem::ProblemDetails> {
+        let content_type = self
+            .headers
+            .get(reqwest::header::CONTENT_TYPE)?
+            .to_str()
+            .ok()?;
+        let media_type = content_type.split(';').next()?.trim();
+        if !media_type.eq_ignore_ascii_case("application/problem+json") {
+            return None;
+        }
+        serde_json::from_str(&self.body).ok()
     }
 }
 

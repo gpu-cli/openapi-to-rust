@@ -11,6 +11,8 @@
 *.swo
 *~
 .DS_Store
+__pycache__/
+*.py[cod]
 
 # Lazy-cloned external corpus (see tests/conformance/external/apis-guru-sync.sh)
 /tests/conformance/external/apis-guru/

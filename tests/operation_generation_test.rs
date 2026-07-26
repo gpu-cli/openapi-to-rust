@@ -30,6 +30,7 @@ fn create_test_analysis_with_operations(operations: Vec<OperationInfo>) -> Schem
         operation_id_aliases: BTreeMap::new(),
         used_type_features: Default::default(),
         enum_extensions: BTreeMap::new(),
+        validation_context: Default::default(),
     }
 }
 
@@ -84,6 +85,8 @@ fn test_generate_post_operation() {
         description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "CreateUserRequest".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -127,6 +130,8 @@ fn test_generate_put_operation() {
         description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "UpdateUserRequest".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -196,6 +201,8 @@ fn test_generate_patch_operation() {
         description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "PatchUserRequest".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -306,6 +313,8 @@ fn test_method_without_response_type() {
         description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "Request".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -467,6 +476,8 @@ fn test_custom_headers_injection() {
         description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "Request".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -517,6 +528,8 @@ fn test_multiple_operations() {
             description: None,
             request_body: Some(RequestBodyContent::Json {
                 schema_name: "CreateUserRequest".to_string(),
+                media_type: "application/json".to_string(),
+                validation_schema: serde_json::Value::Null,
             }),
             response_schemas: {
                 let mut map = BTreeMap::new();
@@ -601,6 +614,8 @@ fn test_generate_form_urlencoded_operation() {
         description: None,
         request_body: Some(RequestBodyContent::FormUrlEncoded {
             schema_name: "TokenRequest".to_string(),
+            media_type: "application/x-www-form-urlencoded".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: {
             let mut map = BTreeMap::new();
@@ -738,6 +753,8 @@ fn test_request_body_schema_name_pascal_cased() {
         description: None,
         request_body: Some(RequestBodyContent::Json {
             schema_name: "update_api_key".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
@@ -755,6 +772,8 @@ fn test_request_body_schema_name_pascal_cased() {
         description: None,
         request_body: Some(RequestBodyContent::FormUrlEncoded {
             schema_name: "create_oauth_token".to_string(),
+            media_type: "application/x-www-form-urlencoded".to_string(),
+            validation_schema: serde_json::Value::Null,
         }),
         response_schemas: BTreeMap::new(),
         parameters: vec![],

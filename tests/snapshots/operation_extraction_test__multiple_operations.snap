@@ -73,6 +73,7 @@ updateItem:
   request_body:
     kind: Json
     schema_name: UpdateItemRequest
+    media_type: application/json
   request_body_required: true
   response_schemas:
     "200": Item

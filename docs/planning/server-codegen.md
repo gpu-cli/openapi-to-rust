@@ -118,7 +118,7 @@ src/
 ## Trait shape
 
 ```rust
-#[axum::async_trait]
+#[async_trait::async_trait]
 pub trait ChatApi: Send + Sync + 'static {
     async fn create_chat_completion(
         &self,
@@ -179,7 +179,7 @@ Reuses the reachability pass that the client generator already has.
 - **Combined router signature noisy at many tags.** Not a real-world concern
   yet; if it becomes one, offer `router_split()` returning a struct of
   sub-routers the user `.merge()`s.
-- **`#[axum::async_trait]` for now**; can swap to native AFIT once MSRV
+- **`#[async_trait::async_trait]` for now**; can swap to native AFIT once MSRV
   permits.
 
 ## Implementation sequence

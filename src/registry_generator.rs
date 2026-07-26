@@ -275,11 +275,11 @@ impl CodeGenerator {
                 Some(rb) => {
                     use crate::analysis::RequestBodyContent;
                     let (content_type, schema_name) = match rb {
-                        RequestBodyContent::Json { schema_name } => (
+                        RequestBodyContent::Json { schema_name, .. } => (
                             quote! { BodyContentType::Json },
                             quote! { Some(#schema_name) },
                         ),
-                        RequestBodyContent::FormUrlEncoded { schema_name } => (
+                        RequestBodyContent::FormUrlEncoded { schema_name, .. } => (
                             quote! { BodyContentType::FormUrlEncoded },
                             quote! { Some(#schema_name) },
                         ),
@@ -291,6 +291,9 @@ impl CodeGenerator {
                         }
                         RequestBodyContent::TextPlain => {
                             (quote! { BodyContentType::TextPlain }, quote! { None })
+                        }
+                        RequestBodyContent::Unsupported { .. } => {
+                            (quote! { BodyContentType::OctetStream }, quote! { None })
                         }
                     };
                     quote! {

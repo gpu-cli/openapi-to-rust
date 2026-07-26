@@ -20,6 +20,52 @@ fn api_error<E>(
     }
 }
 
+fn problem_body() -> String {
+    serde_json::json!({
+        "type": "https://openapi-to-rust.dev/problems/validation",
+        "title": "Request validation failed",
+        "status": 422,
+        "code": "request_validation_failed",
+        "errors": [{
+            "code": "required",
+            "location": "/body/name",
+            "message": "is required"
+        }]
+    })
+    .to_string()
+}
+
+#[test]
+fn api_error_decodes_only_problem_json_media_type() {
+    for content_type in [
+        "application/problem+json",
+        "Application/Problem+Json; charset=utf-8",
+    ] {
+        let mut error = api_error::<TypedApiError>(problem_body(), None, None);
+        error
+            .headers
+            .insert(reqwest::header::CONTENT_TYPE, content_type.parse().unwrap());
+        let problem = error.problem_details().expect("typed problem details");
+        assert_eq!(problem.status, 422);
+        assert_eq!(problem.code, "request_validation_failed");
+        assert_eq!(problem.errors[0].location, "/body/name");
+    }
+
+    let mut ordinary_json = api_error::<TypedApiError>(problem_body(), None, None);
+    ordinary_json.headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/json".parse().unwrap(),
+    );
+    assert!(ordinary_json.problem_details().is_none());
+
+    let mut malformed = api_error::<TypedApiError>("not json", None, None);
+    malformed.headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        "application/problem+json".parse().unwrap(),
+    );
+    assert!(malformed.problem_details().is_none());
+}
+
 #[test]
 fn test_api_error_display_normal_body() {
     let error = api_error::<TypedApiError>("small response", None, None);
@@ -293,6 +339,7 @@ fn test_generated_error_code() {
         operation_id_aliases: BTreeMap::new(),
         used_type_features: Default::default(),
         enum_extensions: BTreeMap::new(),
+        validation_context: Default::default(),
     };
 
     // Generate HTTP client code which includes error types
@@ -376,6 +423,14 @@ fn test_generated_error_code() {
     assert!(
         client_content.contains("API_ERROR_BODY_DISPLAY_LIMIT"),
         "Generated code should bound the displayed API error body"
+    );
+    assert!(
+        client_content.contains("pub mod openapi_to_rust_problem"),
+        "Generated clients should namespace RFC 9457 types"
+    );
+    assert!(
+        client_content.contains("pub fn problem_details"),
+        "Generated API errors should decode application/problem+json"
     );
     assert!(
         client_content.contains("API_ERROR_BODY_TRUNCATION_MARKER"),

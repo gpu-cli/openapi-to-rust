@@ -363,10 +363,19 @@ pub fn collect_generated_dep_requirements<'a>(
             features.push("tokio");
         }
         dependencies.push(
-            DepRequirement::new("axum", "0.7")
+            DepRequirement::new("axum", "0.8")
                 .without_default_features()
                 .with_features(&features),
         );
+    }
+    if uses("jsonschema::") {
+        dependencies.push(DepRequirement::new("jsonschema", "0.49").without_default_features());
+    }
+    if uses("http_body_util::") {
+        dependencies.push(DepRequirement::new("http-body-util", "0.1"));
+    }
+    if uses("mime::") {
+        dependencies.push(DepRequirement::new("mime", "0.3"));
     }
     if enable_specta {
         let mut features = vec!["derive"];

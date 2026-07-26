@@ -21,17 +21,18 @@ pub mod gen;
 
 use axum::response::sse::Event;
 use futures_util::stream;
-use gen::CreateResponse;
 use gen::server::{
-    CreateResponseResponse, ListInputItemsResponse, ResponsesApi, UsageApi, UsageCostsResponse,
-    build_router, sse_response,
+    build_router, sse_response, CreateResponseResponse, ListInputItemsOrder, ListInputItemsResponse,
+    ResponsesApi, UsageApi, UsageCostsBucketWidth, UsageCostsResponse,
 };
+use gen::CreateResponse;
 use std::convert::Infallible;
+use std::io::Write;
 
 #[derive(Clone)]
 struct AppState;
 
-#[axum::async_trait]
+#[async_trait::async_trait]
 impl ResponsesApi for AppState {
     async fn create_response(&self, body: CreateResponse) -> CreateResponseResponse {
         if body.stream == Some(true) {
@@ -45,18 +46,22 @@ impl ResponsesApi for AppState {
         &self,
         response_id: String,
         limit: Option<i64>,
-        order: Option<gen::ListInputItemsOrder>,
+        order: Option<ListInputItemsOrder>,
         _after: Option<String>,
-        _include: Option<String>,
+        _include: Option<Vec<gen::IncludeEnum>>,
     ) -> ListInputItemsResponse {
         // Echo the params back in a minimal valid ResponseItemList so
         // the test can introspect what the handler saw. Real services
         // would hit storage here.
-        let _ = (response_id, limit, order);
+        let _ = order;
         let body: gen::ResponseItemList = serde_json::from_value(serde_json::json!({
             "data": [],
             "object": "list",
-            "first_id": "",
+            "first_id": format!(
+                "{response_id}:{}:{}",
+                limit.unwrap_or_default(),
+                _after.as_deref().unwrap_or_default(),
+            ),
             "last_id": "",
             "has_more": false,
         }))
@@ -92,14 +97,19 @@ fn create_response_unary(body: CreateResponse) -> CreateResponseResponse {
     CreateResponseResponse::Ok(resp)
 }
 
-/// Streaming path: four canned SSE events. Production swaps
+/// Streaming path: two canned deltas followed by the SDK's `[DONE]` sentinel. Production swaps
 /// `stream::iter(...)` for a stream piped from your model server.
 fn create_response_streaming() -> CreateResponseResponse {
     let events = stream::iter(vec![
-        sse_event("response.created", r#"{"id":"resp_demo"}"#),
-        sse_event("response.output_text.delta", r#"{"delta":"hello "}"#),
-        sse_event("response.output_text.delta", r#"{"delta":"world"}"#),
-        sse_event("response.completed", r#"{"id":"resp_demo"}"#),
+        sse_event(
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","sequence_number":0,"item_id":"msg_demo","output_index":0,"content_index":0,"delta":"hello ","logprobs":[]}"#,
+        ),
+        sse_event(
+            "response.output_text.delta",
+            r#"{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_demo","output_index":0,"content_index":0,"delta":"world","logprobs":[]}"#,
+        ),
+        sse_event("done", "[DONE]"),
     ]);
     // `sse_response` is the generated helper — wraps any
     // `Stream<Item = Result<Event, Infallible>>` so the user
@@ -111,7 +121,7 @@ fn sse_event(name: &str, data: &str) -> Result<Event, Infallible> {
     Ok(Event::default().event(name).data(data))
 }
 
-#[axum::async_trait]
+#[async_trait::async_trait]
 impl UsageApi for AppState {
     /// `start_time` is `i64` (not `Option`) — the generated handler
     /// short-circuits with 400 if the client omits it, so by the
@@ -120,9 +130,9 @@ impl UsageApi for AppState {
         &self,
         start_time: i64,
         _end_time: Option<i64>,
-        _bucket_width: Option<gen::UsageCostsBucketWidth>,
-        _project_ids: Option<String>,
-        _group_by: Option<String>,
+        _bucket_width: Option<UsageCostsBucketWidth>,
+        _project_ids: Option<Vec<String>>,
+        _group_by: Option<Vec<String>>,
         _limit: Option<i64>,
         _page: Option<String>,
     ) -> UsageCostsResponse {
@@ -130,7 +140,7 @@ impl UsageApi for AppState {
             "object": "page",
             "data": [],
             "has_more": false,
-            "next_page": "",
+            "next_page": format!("start:{start_time}"),
         }))
         .unwrap_or_else(|e| panic!("UsageResponse must deserialize: {e}; start_time={start_time}"));
         UsageCostsResponse::Ok(body)
@@ -142,8 +152,14 @@ async fn main() {
     // Single combined router that takes both trait impls. Each tag's
     // routes get mounted on the same axum::Router via `.merge()`.
     let app = build_router(AppState, AppState);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
-    println!("listening on http://{}", listener.local_addr().unwrap());
+    let bind_address =
+        std::env::var("OPENAPI_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_address).await.unwrap();
+    println!(
+        "OPENAPI_SERVER_URL=http://{}",
+        listener.local_addr().unwrap()
+    );
+    std::io::stdout().flush().unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 

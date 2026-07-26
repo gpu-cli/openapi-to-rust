@@ -224,6 +224,7 @@ fn server_config() -> ServerSection {
         framework: "axum".into(),
         operations: vec!["listItems".into(), "streamItems".into()],
         prune_models: false,
+        validation: Default::default(),
     }
 }
 
@@ -232,6 +233,7 @@ fn plain_server_config() -> ServerSection {
         framework: "axum".into(),
         operations: vec!["listItems".into()],
         prune_models: false,
+        validation: Default::default(),
     }
 }
 
@@ -373,10 +375,14 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
     assert_names(
         &server,
         [
+            "async-trait",
             "axum",
             "base64",
             "bytes",
             "chrono",
+            "http-body-util",
+            "jsonschema",
+            "mime",
             "serde",
             "serde_json",
             "serde_urlencoded",
@@ -389,8 +395,17 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .iter()
         .find(|dependency| dependency.crate_name == "axum")
         .expect("axum dependency");
+    assert_eq!(axum.version, "0.8");
     assert_eq!(axum.features, vec!["json"]);
     assert!(!axum.default_features);
+    let jsonschema = server
+        .required_deps
+        .iter()
+        .find(|dependency| dependency.crate_name == "jsonschema")
+        .expect("jsonschema dependency");
+    assert_eq!(jsonschema.version, "0.49");
+    assert!(jsonschema.features.is_empty());
+    assert!(!jsonschema.default_features);
 
     let combined = compile_case(
         "combined",
@@ -418,6 +433,9 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "chrono",
             "futures-core",
             "futures-util",
+            "http-body-util",
+            "jsonschema",
+            "mime",
             "reqwest",
             "reqwest-eventsource",
             "reqwest-middleware",

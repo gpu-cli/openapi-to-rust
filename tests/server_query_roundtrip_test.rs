@@ -15,10 +15,16 @@ fn round_trip_spec() -> Value {
         "openapi": "3.1.0",
         "info": { "title": "query round trip", "version": "1.0.0" },
         "paths": {
-            "/round-trip": {
+            "/round-trip/{scope}": {
                 "get": {
                     "operationId": "queryRoundTrip",
                     "parameters": [
+                        {
+                            "name": "scope",
+                            "in": "path",
+                            "required": true,
+                            "schema": { "type": "string" }
+                        },
                         {
                             "name": "page",
                             "in": "query",
@@ -128,6 +134,7 @@ fn generated_client_and_server_round_trip_typed_query_parameters() {
         framework: "axum".into(),
         operations: vec!["queryRoundTrip".into()],
         prune_models: true,
+        validation: Default::default(),
     };
     let config = GeneratorConfig {
         output_dir: output_dir.clone(),
@@ -163,10 +170,14 @@ fn generated_client_and_server_round_trip_typed_query_parameters() {
         r#"[package]
 name = "generated-query-round-trip"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-axum = "0.7"
+async-trait = "0.1"
+axum = "0.8"
+jsonschema = { version = "0.49", default-features = false }
+mime = "0.3"
+http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json", "multipart"] }
 reqwest-middleware = { version = "0.4", features = ["multipart"] }
 serde = { version = "1", features = ["derive"] }
@@ -193,10 +204,11 @@ mod tests {
         captured: UnboundedSender<Value>,
     }
 
-    #[axum::async_trait]
+    #[async_trait::async_trait]
     impl ServerApi for Api {
         async fn query_round_trip(
             &self,
+            scope: String,
             page: i64,
             active: Option<bool>,
             required_expanded: QueryRoundTripRequiredExpanded,
@@ -208,6 +220,7 @@ mod tests {
         ) -> QueryRoundTripResponse {
             self.captured
                 .send(json!({
+                    "scope": scope,
                     "page": page,
                     "active": active,
                     "required_expanded": required_expanded,
@@ -239,6 +252,7 @@ mod tests {
 
         client
             .query_round_trip(
+                "public",
                 7,
                 Some(true),
                 QueryRoundTripRequiredExpanded {
@@ -272,6 +286,7 @@ mod tests {
         assert_eq!(
             full,
             json!({
+                "scope": "public",
                 "page": 7,
                 "active": true,
                 "required_expanded": { "color": "red", "min_count": 2 },
@@ -285,6 +300,7 @@ mod tests {
 
         client
             .query_round_trip(
+                "empty",
                 0,
                 None,
                 QueryRoundTripRequiredExpanded::default(),
@@ -306,6 +322,7 @@ mod tests {
         assert_eq!(
             empty,
             json!({
+                "scope": "empty",
                 "page": 0,
                 "active": null,
                 "required_expanded": {},
@@ -318,14 +335,18 @@ mod tests {
         );
 
         let missing_required = reqwest::Client::new()
-            .get(format!("http://{address}/round-trip?page=1"))
+            .get(format!("http://{address}/round-trip/public?page=1"))
             .send()
             .await
             .unwrap();
-        assert_eq!(missing_required.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            missing_required.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        );
 
         let comma_error = client
             .query_round_trip(
+                "public",
                 1,
                 None,
                 QueryRoundTripRequiredExpanded::default(),
@@ -394,6 +415,7 @@ fn server_generation_error(spec: Value) -> String {
         framework: "axum".into(),
         operations: vec!["badQuery".into()],
         prune_models: false,
+        validation: Default::default(),
     };
     let config = GeneratorConfig {
         server: Some(server.clone()),

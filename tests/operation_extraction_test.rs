@@ -46,6 +46,23 @@ fn test_extract_post_with_body() {
         op.request_body.as_ref().and_then(|rb| rb.schema_name()),
         Some("CreateItemRequest")
     );
+    let body_schema = match op.request_body.as_ref().unwrap() {
+        RequestBodyContent::Json {
+            validation_schema, ..
+        } => validation_schema,
+        other => panic!("expected JSON body, got {other:?}"),
+    };
+    assert_eq!(
+        body_schema["$ref"],
+        "#/components/schemas/CreateItemRequest"
+    );
+    assert_eq!(analysis.validation_context.openapi_version, "3.1.0");
+    assert!(
+        analysis
+            .validation_context
+            .component_schemas
+            .contains_key("CreateItemRequest")
+    );
     assert!(!op.response_schemas.is_empty());
 
     insta::assert_yaml_snapshot!("post_with_body_operations", analysis.operations);
@@ -72,6 +89,10 @@ fn test_extract_path_params() {
     assert_eq!(op.parameters[0].name, "itemId");
     assert_eq!(op.parameters[0].location, "path");
     assert!(op.parameters[0].required);
+    assert_eq!(
+        op.parameters[0].validation_schema.as_ref().unwrap()["type"],
+        "string"
+    );
 
     insta::assert_yaml_snapshot!("path_params_operations", analysis.operations);
 }
@@ -342,7 +363,7 @@ fn test_extract_form_urlencoded_body() {
     assert!(op.request_body.is_some());
     assert!(matches!(
         op.request_body.as_ref().unwrap(),
-        RequestBodyContent::FormUrlEncoded { schema_name } if schema_name == "TokenRequest"
+        RequestBodyContent::FormUrlEncoded { schema_name, .. } if schema_name == "TokenRequest"
     ));
 }
 
@@ -424,6 +445,48 @@ fn test_content_type_priority() {
     assert!(op.request_body.is_some());
     assert!(matches!(
         op.request_body.as_ref().unwrap(),
-        RequestBodyContent::Json { schema_name } if schema_name == "CreateItemRequest"
+        RequestBodyContent::Json { schema_name, .. } if schema_name == "CreateItemRequest"
     ));
+}
+
+#[test]
+fn request_body_media_type_is_retained_and_schema_less_content_is_rejected() {
+    let vendor_spec = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": { "title": "vendor json", "version": "1" },
+        "paths": { "/items": { "post": {
+            "operationId": "createItem",
+            "requestBody": { "required": true, "content": {
+                "application/vnd.example+json": {
+                    "schema": { "type": "object", "additionalProperties": false }
+                }
+            }},
+            "responses": { "204": { "description": "ok" } }
+        }}}
+    });
+    let analysis = SchemaAnalyzer::new(vendor_spec).unwrap().analyze().unwrap();
+    assert!(matches!(
+        &analysis.operations["createItem"].request_body,
+        Some(RequestBodyContent::Json { media_type, .. })
+            if media_type == "application/vnd.example+json"
+    ));
+
+    let schema_less = serde_json::json!({
+        "openapi": "3.1.0",
+        "info": { "title": "schema-less", "version": "1" },
+        "paths": { "/items": { "post": {
+            "operationId": "createItem",
+            "requestBody": { "required": true, "content": {
+                "application/json": {}
+            }},
+            "responses": { "204": { "description": "ok" } }
+        }}}
+    });
+    let error = SchemaAnalyzer::new(schema_less)
+        .unwrap()
+        .analyze()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("createItem"));
+    assert!(error.contains("without a schema"));
 }

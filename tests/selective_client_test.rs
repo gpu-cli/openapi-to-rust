@@ -371,6 +371,7 @@ fn registry_only_pruning_does_not_reintroduce_an_async_client_scope() {
             framework: "axum".into(),
             operations: vec!["getUser".into()],
             prune_models: true,
+            validation: Default::default(),
         }),
         ..Default::default()
     })
@@ -437,6 +438,7 @@ fn generated_custom_method_server_route_compiles_with_exact_guard() {
         framework: "axum".into(),
         operations: vec!["QUERY /things".into(), "PURGE /things".into()],
         prune_models: true,
+        validation: Default::default(),
     };
     let config = GeneratorConfig {
         output_dir: output_dir.clone(),
@@ -474,7 +476,7 @@ mod tests {
     #[derive(Clone)]
     struct Api;
 
-    #[axum::async_trait]
+    #[async_trait::async_trait]
     impl ThingsApi for Api {
         async fn query_things(&self) -> QueryThingsResponse {
             QueryThingsResponse::Empty
@@ -518,9 +520,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.7"
+async-trait = "0.1"
+axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jsonschema = { version = "0.49", default-features = false }
+mime = "0.3"
+http-body-util = "0.1"
 tokio = { version = "1", features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }
 "#,
@@ -548,6 +554,13 @@ tower = { version = "0.5", features = ["util"] }
     assert!(router.contains("\"QUERY\" =>"));
     assert!(router.contains("\"PURGE\" =>"));
     assert!(router.contains("StatusCode::METHOD_NOT_ALLOWED"));
+    let validation = std::fs::read_to_string(output_dir.join("server/validation.rs")).unwrap();
+    assert!(validation.contains("LazyLock"));
+    assert!(validation.contains("PatternOptions::regex"));
+    assert!(!validation.contains("resolve-http"));
+    let errors = std::fs::read_to_string(output_dir.join("server/errors.rs")).unwrap();
+    assert!(errors.contains("pub struct ProblemDetails"));
+    assert!(errors.contains("application/problem+json"));
 }
 
 #[test]
@@ -561,6 +574,7 @@ fn cross_tag_custom_methods_on_one_path_fail_during_generation() {
         framework: "axum".into(),
         operations: vec!["QUERY /things".into(), "PURGE /things".into()],
         prune_models: false,
+        validation: Default::default(),
     };
     let config = GeneratorConfig {
         enable_async_client: false,
@@ -590,6 +604,7 @@ fn standalone_client_generation_does_not_validate_server_scope() {
             framework: "axum".into(),
             operations: vec!["doesNotExist".into()],
             prune_models: false,
+            validation: Default::default(),
         }),
         ..Default::default()
     })
@@ -703,6 +718,7 @@ fn model_pruning_keeps_union_of_client_and_server_reachability() {
             framework: "axum".into(),
             operations: vec!["hostLocal".into()],
             prune_models: false,
+            validation: Default::default(),
         }),
         ..Default::default()
     });
@@ -729,6 +745,7 @@ fn server_pruning_preserves_every_operation_for_an_unscoped_client() {
             framework: "axum".into(),
             operations: vec!["getUser".into()],
             prune_models: true,
+            validation: Default::default(),
         }),
         ..Default::default()
     });
