@@ -119,6 +119,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: scripts/install-smoke.sh
+        env:
+          # Keep cargo-install artifacts inside the target tree restored by
+          # rust-cache; the script still isolates and removes its package root.
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/install-smoke
 
   msrv:
     runs-on: ubuntu-latest
@@ -136,6 +140,10 @@ jobs:
   spec-compile:
     if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
+    env:
+      # Share scratch-crate dependencies across runs through rust-cache's
+      # root-workspace target directory.
+      SPEC_COMPILE_TARGET_DIR: ${{ github.workspace }}/target/spec-compile
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -147,6 +155,8 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    env:
+      SPEC_COMPILE_TARGET_DIR: ${{ github.workspace }}/target/spec-compile
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
