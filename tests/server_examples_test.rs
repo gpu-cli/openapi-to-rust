@@ -1,15 +1,15 @@
 //! End-to-end smoke test for both server-codegen examples.
 //!
 //! Steps per example:
-//!   1. Build the workspace `openapi-to-rust` binary (once).
-//!   2. Run it against the example's TOML config to populate
+//!   1. Run the Cargo-provided `openapi-to-rust` test binary against the
+//!      example's TOML config to populate
 //!      `examples/<name>/src/gen/`.
-//!   3. Run `cargo build` against the example crate and assert exit 0.
+//!   2. Run `cargo test` against the example crate and assert exit 0.
 //!
 //! These tests are gated behind `--ignored` by default because they
-//! take ~30s each (transitive `cargo build` of generated types). Run
-//! with `cargo test --test server_examples_test -- --ignored` or in
-//! CI with the `examples` job.
+//! compile generated types and their transitive dependencies. Run with
+//! `cargo test --test server_examples_test -- --ignored`. PR CI exercises
+//! each example through its official Python SDK compatibility job.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,25 +20,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn workspace_binary() -> PathBuf {
-    // Use the same target/debug dir cargo built into. CARGO_TARGET_DIR
-    // overrides this if set, but the default suffices for local + CI.
-    repo_root()
-        .join("target")
-        .join("debug")
-        .join("openapi-to-rust")
-}
-
-fn ensure_binary_built() {
-    let bin = workspace_binary();
-    if bin.exists() {
-        return;
-    }
-    let status = Command::new(env!("CARGO"))
-        .current_dir(repo_root())
-        .args(["build", "--bin", "openapi-to-rust"])
-        .status()
-        .expect("failed to spawn cargo build");
-    assert!(status.success(), "cargo build of openapi-to-rust failed");
+    PathBuf::from(env!("CARGO_BIN_EXE_openapi-to-rust"))
 }
 
 fn regenerate(example_dir: &Path) {
@@ -81,7 +63,6 @@ fn cargo_test(example_dir: &Path) {
 #[test]
 #[ignore]
 fn openai_responses_example_builds() {
-    ensure_binary_built();
     let dir = repo_root().join("examples").join("server-openai-responses");
     regenerate(&dir);
     cargo_test(&dir);
@@ -90,7 +71,6 @@ fn openai_responses_example_builds() {
 #[test]
 #[ignore]
 fn anthropic_messages_example_builds() {
-    ensure_binary_built();
     let dir = repo_root()
         .join("examples")
         .join("server-anthropic-messages");

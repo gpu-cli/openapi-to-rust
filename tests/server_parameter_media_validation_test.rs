@@ -126,14 +126,14 @@ mod tests {
         async fn check_item(&self, item_id: i64, limit: i64, mode: Option<CheckItemMode>, x_level: i64, _1_mode: Option<String>, session: String) -> CheckItemResponse {
             assert_eq!((item_id, limit, mode, x_level, _1_mode, session.as_str()), (2, 3, None, 4, None, "safe"));
             self.0.fetch_add(1, Ordering::SeqCst);
-            CheckItemResponse::Empty
+            CheckItemResponse::NoContent
         }
 
         async fn submit_form(&self, body: FormPayload) -> SubmitFormResponse {
             assert_eq!(body.name, "valid");
             assert_eq!(body.count, 2);
             self.0.fetch_add(1, Ordering::SeqCst);
-            SubmitFormResponse::Empty
+            SubmitFormResponse::NoContent
         }
     }
 

@@ -216,6 +216,74 @@ fn init_creates_a_safe_config_consumed_by_bare_generate() {
     );
 }
 
+#[test]
+fn server_commands_apply_configured_schema_extensions_but_explicit_spec_is_raw() {
+    let temp = TempDir::new().unwrap();
+    std::fs::write(temp.path().join("api.yaml"), SPEC).unwrap();
+    std::fs::write(
+        temp.path().join("sse-overlay.json"),
+        r#"{
+  "paths": {
+    "/pets": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("openapi-to-rust.toml"),
+        r#"[generator]
+spec_path = "api.yaml"
+output_dir = "src/gen"
+module_name = "api"
+schema_extensions = ["sse-overlay.json"]
+
+[features]
+enable_async_client = false
+
+[server]
+framework = "axum"
+operations = []
+"#,
+    )
+    .unwrap();
+
+    let configured_list = run(temp.path(), &["server", "list"]);
+    assert_success(&configured_list);
+    assert!(
+        String::from_utf8_lossy(&configured_list.stdout).contains("/pets  [SSE]"),
+        "configured server list did not apply the SSE overlay:\n{}",
+        String::from_utf8_lossy(&configured_list.stdout)
+    );
+
+    let configured_add = run(temp.path(), &["server", "add", "listPets", "--dry-run"]);
+    assert_success(&configured_add);
+    assert!(
+        String::from_utf8_lossy(&configured_add.stdout).contains("Streaming: yes"),
+        "configured server add did not apply the SSE overlay:\n{}",
+        String::from_utf8_lossy(&configured_add.stdout)
+    );
+
+    let explicit_list = run(temp.path(), &["server", "list", "--spec", "api.yaml"]);
+    assert_success(&explicit_list);
+    assert!(
+        !String::from_utf8_lossy(&explicit_list.stdout).contains("[SSE]"),
+        "an explicit --spec unexpectedly applied config extensions:\n{}",
+        String::from_utf8_lossy(&explicit_list.stdout)
+    );
+}
+
 fn serve_once(
     body: &'static str,
     declared_length: Option<u64>,

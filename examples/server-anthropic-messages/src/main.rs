@@ -32,6 +32,7 @@ use futures_util::stream;
 use gen::CreateMessageParams;
 use gen::server::{MessagesPostResponse, ServerApi, server_api_router, sse_response};
 use std::convert::Infallible;
+use std::io::Write;
 
 #[derive(Clone)]
 struct AppState;
@@ -62,7 +63,7 @@ fn messages_unary() -> MessagesPostResponse {
         model: gen::Model::Custom("claude-demo".into()),
         role: gen::MessageRole::Assistant,
         stop_details: None,
-        stop_reason: None,
+        stop_reason: Some(gen::StopReason::EndTurn),
         stop_sequence: None,
         r#type: gen::MessageType::Message,
         usage: gen::Usage {
@@ -71,7 +72,7 @@ fn messages_unary() -> MessagesPostResponse {
             cache_read_input_tokens: None,
             inference_geo: None,
             input_tokens: 0,
-            output_tokens: 0,
+            output_tokens: 2,
             server_tool_use: None,
             service_tier: None,
         },
@@ -86,7 +87,10 @@ fn messages_streaming() -> MessagesPostResponse {
     // subset; production code mirrors the full sequence from the
     // upstream model.
     let events = stream::iter(vec![
-        sse_event("message_start", r#"{"type":"message_start","message":{"id":"msg_demo"}}"#),
+        sse_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_demo","type":"message","role":"assistant","model":"claude-demo","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}"#,
+        ),
         sse_event(
             "content_block_start",
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
@@ -100,6 +104,10 @@ fn messages_streaming() -> MessagesPostResponse {
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}"#,
         ),
         sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+        sse_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}"#,
+        ),
         sse_event("message_stop", r#"{"type":"message_stop"}"#),
     ]);
     MessagesPostResponse::OkStream(sse_response(events))
@@ -112,8 +120,14 @@ fn sse_event(name: &str, data: &str) -> Result<Event, Infallible> {
 #[tokio::main]
 async fn main() {
     let app = server_api_router(AppState);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001").await.unwrap();
-    println!("listening on http://{}", listener.local_addr().unwrap());
+    let bind_address =
+        std::env::var("OPENAPI_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:3001".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_address).await.unwrap();
+    println!(
+        "OPENAPI_SERVER_URL=http://{}",
+        listener.local_addr().unwrap()
+    );
+    std::io::stdout().flush().unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 

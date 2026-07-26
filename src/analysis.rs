@@ -71,6 +71,10 @@ pub struct SchemaAnalysis {
     pub patterns: DetectedPatterns,
     /// OpenAPI operations and their request/response schemas
     pub operations: BTreeMap<String, OperationInfo>,
+    /// Complete response contracts by emitted operation ID and response key.
+    /// Unlike `OperationInfo::response_schemas`, this retains responses with
+    /// no body as well as their selected JSON media type and SSE declaration.
+    pub operation_responses: BTreeMap<String, BTreeMap<String, OperationResponse>>,
     /// Source operationId to emitted operation IDs. Duplicate or
     /// Rust-identifier-colliding IDs are renamed during analysis; retaining
     /// this mapping lets selector resolution report ambiguity or renaming.
@@ -96,6 +100,21 @@ pub struct SchemaAnalysis {
     /// This is deliberately independent of `schemas`, which model pruning may
     /// mutate before server artifacts are emitted.
     pub validation_context: ValidationContext,
+}
+
+/// Server-relevant semantics of one OpenAPI Response Object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct OperationResponse {
+    /// Generated Rust body type for the preferred JSON-compatible content.
+    pub schema_name: Option<String>,
+    /// Exact declared JSON-compatible media type selected for `schema_name`.
+    pub media_type: Option<String>,
+    /// Whether this response also declares `text/event-stream` content.
+    pub supports_streaming: bool,
+    /// Whether the Response Object declared at least one content entry.
+    pub has_content: bool,
+    /// Declared response media types the server generator cannot emit.
+    pub unsupported_media_types: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -647,13 +666,40 @@ pub fn merge_schema_extensions(
     Ok(result)
 }
 
-/// Load an extension file and parse as JSON
+/// Load an extension file and parse it into the JSON representation used by
+/// the analyzer. YAML extensions follow the same conversion policy as YAML
+/// OpenAPI documents; every other extension is parsed as JSON.
 fn load_extension_file(path: &Path) -> Result<Value> {
     let content = std::fs::read_to_string(path).map_err(|e| GeneratorError::FileError {
         message: format!("Failed to read file {}: {}", path.display(), e),
     })?;
 
-    serde_json::from_str(&content).map_err(GeneratorError::ParseError)
+    let is_yaml = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("yaml") || extension.eq_ignore_ascii_case("yml")
+        });
+
+    if is_yaml {
+        crate::spec_source::yaml_to_json_value(&content).map_err(|error| {
+            GeneratorError::FileError {
+                message: format!(
+                    "Failed to parse schema extension {} as YAML: {}",
+                    path.display(),
+                    error
+                ),
+            }
+        })
+    } else {
+        serde_json::from_str(&content).map_err(|error| GeneratorError::FileError {
+            message: format!(
+                "Failed to parse schema extension {} as JSON: {}",
+                path.display(),
+                error
+            ),
+        })
+    }
 }
 
 /// Merge JSON objects with explicit replacement support
@@ -866,6 +912,7 @@ pub struct SchemaAnalyzer {
     openapi_spec: Value,
     current_schema_name: Option<String>,
     component_parameters: BTreeMap<String, crate::openapi::Parameter>,
+    component_responses: BTreeMap<String, crate::openapi::Response>,
     /// Single chokepoint for `(openapi_type, format)` → Rust-type
     /// decisions (Q2.0). Defaulted when the analyzer is built without a
     /// config; threaded from `GeneratorConfig.types` via
@@ -895,6 +942,12 @@ impl SchemaAnalyzer {
             .and_then(|c| c.parameters.as_ref())
             .cloned()
             .unwrap_or_default();
+        let component_responses = spec
+            .components
+            .as_ref()
+            .and_then(|c| c.responses.as_ref())
+            .cloned()
+            .unwrap_or_default();
 
         Ok(Self {
             schemas,
@@ -902,6 +955,7 @@ impl SchemaAnalyzer {
             openapi_spec,
             current_schema_name: None,
             component_parameters,
+            component_responses,
             type_mapper,
         })
     }
@@ -1050,6 +1104,7 @@ impl SchemaAnalyzer {
                 type_mappings: BTreeMap::new(),
             },
             operations: BTreeMap::new(),
+            operation_responses: BTreeMap::new(),
             operation_id_aliases: BTreeMap::new(),
             used_type_features: crate::type_mapping::UsedFeatures::default(),
             enum_extensions: BTreeMap::new(),
@@ -4335,7 +4390,7 @@ impl SchemaAnalyzer {
                 raw_operation_id.clone()
             };
 
-            let op_info = self.analyze_single_operation(
+            let (op_info, responses) = self.analyze_single_operation(
                 &operation_id,
                 method,
                 path,
@@ -4349,6 +4404,9 @@ impl SchemaAnalyzer {
                 .or_default()
                 .push(operation_id.clone());
             canonical_operation_ids.insert(Self::canonical_operation_id(&operation_id));
+            analysis
+                .operation_responses
+                .insert(operation_id.clone(), responses);
             analysis.operations.insert(operation_id, op_info);
         }
         Ok(())
@@ -4407,7 +4465,7 @@ impl SchemaAnalyzer {
         operation: &crate::openapi::Operation,
         path_item_parameters: Option<&Vec<crate::openapi::Parameter>>,
         _analysis: &mut SchemaAnalysis,
-    ) -> Result<OperationInfo> {
+    ) -> Result<(OperationInfo, BTreeMap<String, OperationResponse>)> {
         let raw_path_item = self
             .openapi_spec
             .get("paths")
@@ -4436,6 +4494,7 @@ impl SchemaAnalyzer {
             stream_parameter: None,    // Will be determined by StreamingConfig, not spec
             tags: operation.tags.clone().unwrap_or_default(),
         };
+        let mut operation_responses = BTreeMap::new();
 
         // Extract request body schema with content-type awareness
         if let Some(request_body) = &operation.request_body {
@@ -4508,24 +4567,38 @@ impl SchemaAnalyzer {
         // Extract response schemas
         if let Some(responses) = &operation.responses {
             for (status_code, response) in responses {
+                let response = self.resolve_response(response)?;
                 // T15: SSE auto-detection. If any response declares
                 // `text/event-stream`, mark the operation as streaming. The
                 // user can still override via config; here we lift the spec
                 // signal so a `stream: true` parameter and an event-stream
                 // content type produce a streaming variant by default.
-                if let Some(content) = response.content.as_ref() {
-                    if content.keys().any(|ct| ct.starts_with("text/event-stream")) {
-                        op_info.supports_streaming = true;
-                    }
+                let supports_streaming = response.content.as_ref().is_some_and(|content| {
+                    content
+                        .keys()
+                        .any(|ct| crate::openapi::is_event_stream_media_type(ct))
+                });
+                if supports_streaming {
+                    op_info.supports_streaming = true;
                 }
 
-                if let Some(schema) = response.json_schema() {
+                let mut response_info = OperationResponse {
+                    supports_streaming,
+                    has_content: response
+                        .content
+                        .as_ref()
+                        .is_some_and(|content| !content.is_empty()),
+                    ..Default::default()
+                };
+                if let Some((media_type, schema)) = response.json_content() {
                     if let Some(schema_ref) = schema.reference() {
                         // Named schema reference
                         if let Some(schema_name) = self.extract_schema_name(schema_ref) {
                             op_info
                                 .response_schemas
                                 .insert(status_code.clone(), schema_name.to_string());
+                            response_info.schema_name = Some(schema_name.to_string());
+                            response_info.media_type = Some(media_type.to_string());
                         }
                     } else {
                         // Inline schema - generate a synthetic type name and analyze it
@@ -4538,9 +4611,24 @@ impl SchemaAnalyzer {
 
                         op_info
                             .response_schemas
-                            .insert(status_code.clone(), synthetic_name);
+                            .insert(status_code.clone(), synthetic_name.clone());
+                        response_info.schema_name = Some(synthetic_name);
+                        response_info.media_type = Some(media_type.to_string());
                     }
                 }
+                response_info.unsupported_media_types = response
+                    .content
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|content| content.iter())
+                    .filter(|(media_type, content)| {
+                        !crate::openapi::is_event_stream_media_type(media_type)
+                            && (!crate::openapi::is_json_media_type(media_type)
+                                || content.schema.is_none())
+                    })
+                    .map(|(media_type, _)| media_type.clone())
+                    .collect();
+                operation_responses.insert(status_code.clone(), response_info);
             }
         }
 
@@ -4679,7 +4767,32 @@ impl SchemaAnalyzer {
             p.rust_ident = Some(chosen);
         }
 
-        Ok(op_info)
+        Ok((op_info, operation_responses))
+    }
+
+    /// Resolve a local reusable Response Object, following chains and
+    /// rejecting missing, external, or cyclic references explicitly.
+    fn resolve_response(
+        &self,
+        response: &crate::openapi::Response,
+    ) -> Result<crate::openapi::Response> {
+        let mut current = response;
+        let mut visited = HashSet::new();
+        while let Some(reference) = current.reference.as_deref() {
+            let token = reference
+                .strip_prefix("#/components/responses/")
+                .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?;
+            let name = token.replace("~1", "/").replace("~0", "~");
+            if !visited.insert(name.clone()) {
+                return Err(GeneratorError::CircularDependency(format!(
+                    "response reference {reference}"
+                )));
+            }
+            current = self.component_responses.get(&name).ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!("response {reference}"))
+            })?;
+        }
+        Ok(current.clone())
     }
 
     /// Generate a type name for an inline response schema.

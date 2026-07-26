@@ -4,6 +4,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[workspace]
+
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"

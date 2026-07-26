@@ -239,12 +239,12 @@ mod tests {
     impl ServerApi for Api {
         async fn create_payload(&self, _body: Payload) -> CreatePayloadResponse {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            CreatePayloadResponse::Empty
+            CreatePayloadResponse::NoContent
         }
 
         async fn maybe_payload(&self, _body: Option<Payload>) -> MaybePayloadResponse {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            MaybePayloadResponse::Empty
+            MaybePayloadResponse::NoContent
         }
     }
 

@@ -8,8 +8,8 @@
 //! Router wiring, extractors, and SSE response variants are P5.
 
 use crate::analysis::{
-    ObjectAdditionalProperties, OperationInfo, ParameterInfo, QuerySerialization,
-    RequestBodyContent, SchemaAnalysis, SchemaType,
+    ObjectAdditionalProperties, OperationInfo, OperationResponse, ParameterInfo,
+    QuerySerialization, RequestBodyContent, SchemaAnalysis, SchemaType,
 };
 use crate::config::ServerSection;
 use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig};
@@ -193,6 +193,14 @@ pub enum ServerCodegenError {
         "cannot generate exact Axum routes for custom HTTP methods on `{path}` across multiple primary tags ({tags}); Axum cannot merge multiple fallback dispatchers for one path. Put those operations under the same first tag or select only one custom method for this server"
     )]
     CrossTagCustomMethods { path: String, tags: String },
+    #[error(
+        "cannot generate Axum server for distinct primary tags `{first_tag}` and `{second_tag}`: both normalize to Rust trait identifier `{identifier}` (and the same router factory name). Rename one tag in the OpenAPI document or a schema overlay, or select the operations in separate generated servers"
+    )]
+    TagIdentifierCollision {
+        first_tag: String,
+        second_tag: String,
+        identifier: String,
+    },
     #[error("cannot generate Axum route for `{path}`: {reason}")]
     InvalidRoutePath { path: String, reason: String },
     #[error(
@@ -229,6 +237,14 @@ pub enum ServerCodegenError {
         operation_id: String,
         media_type: String,
         reason: String,
+    },
+    #[error(
+        "cannot generate response for `{operation_id}` status `{status}`: unsupported media content {media_types}"
+    )]
+    UnsupportedResponseContent {
+        operation_id: String,
+        status: String,
+        media_types: String,
     },
 }
 
@@ -315,9 +331,11 @@ impl<'a> ServerCodegen<'a> {
                     })
             })
             .collect::<Result<_, _>>()?;
+        validate_tag_identifier_collisions(&ops)?;
         validate_custom_method_route_groups(&ops)?;
         self.validate_query_parameters(&ops)?;
         self.validate_supported_server_inputs(&ops)?;
+        self.validate_supported_server_outputs(&ops)?;
         if !self.server.validation.enabled
             && ops.iter().any(|operation| {
                 operation
@@ -563,6 +581,41 @@ impl<'a> ServerCodegen<'a> {
                     });
                 }
                 _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_supported_server_outputs(
+        &self,
+        operations: &[&OperationInfo],
+    ) -> Result<(), ServerCodegenError> {
+        for operation in operations {
+            if let Some(responses) = self
+                .analysis
+                .operation_responses
+                .get(&operation.operation_id)
+            {
+                for (status, response) in responses {
+                    // A Response Object may advertise multiple representations.
+                    // Generation is viable whenever at least one JSON or SSE
+                    // representation can be emitted; unsupported alternatives
+                    // do not invalidate that supported path.
+                    if response.has_content
+                        && response.schema_name.is_none()
+                        && !response.supports_streaming
+                    {
+                        return Err(ServerCodegenError::UnsupportedResponseContent {
+                            operation_id: operation.operation_id.clone(),
+                            status: status.clone(),
+                            media_types: if response.unsupported_media_types.is_empty() {
+                                "(schema-less content)".to_string()
+                            } else {
+                                response.unsupported_media_types.join(", ")
+                            },
+                        });
+                    }
+                }
             }
         }
         Ok(())
@@ -2110,29 +2163,133 @@ impl<'a> ServerCodegen<'a> {
         let mut variants: Vec<TokenStream> = Vec::new();
         let mut arms: Vec<TokenStream> = Vec::new();
 
-        for (status, schema_name) in &op.response_schemas {
-            let variant = format_ident!("{}", status_variant_name(status));
-            let body_ty = parse_type(schema_name);
-            variants.push(quote! { #variant(#body_ty) });
-            let status_expr = status_token(status);
-            arms.push(quote! {
-                Self::#variant(body) => (#status_expr, Json(body)).into_response()
-            });
-        }
+        // Analyses produced before complete response metadata existed (and a
+        // few unit tests that construct OperationInfo directly) still expose
+        // `response_schemas`. Keep that compatibility path while treating the
+        // complete response map as authoritative for real specs.
+        let fallback_responses;
+        let responses = if let Some(responses) = self
+            .analysis
+            .operation_responses
+            .get(&op.operation_id)
+            .filter(|responses| !responses.is_empty())
+        {
+            responses
+        } else {
+            fallback_responses = op
+                .response_schemas
+                .iter()
+                .map(|(status, schema_name)| {
+                    (
+                        status.clone(),
+                        OperationResponse {
+                            schema_name: Some(schema_name.clone()),
+                            media_type: Some("application/json".to_string()),
+                            supports_streaming: false,
+                            has_content: true,
+                            unsupported_media_types: Vec::new(),
+                        },
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            &fallback_responses
+        };
 
-        // SSE: when the operation declares text/event-stream on any
-        // response, add a streaming sibling variant. The user picks
-        // it when their request had `stream: true` (or whatever the
-        // streaming trigger is). Variant payload is a fully built
-        // `axum::Sse` so the user controls keep-alive, retry interval,
-        // etc.
-        if op.supports_streaming {
-            variants.push(quote! {
-                OkStream(::axum::response::sse::Sse<ServerEventStream>)
-            });
-            arms.push(quote! {
-                Self::OkStream(sse) => sse.into_response()
-            });
+        for (status, response) in responses {
+            let base_name = status_variant_name(status);
+            let variant = format_ident!("{}", base_name);
+            let runtime_status = response_uses_runtime_status(status);
+            let status_expr = status_token(status);
+            let status_guard = runtime_status_guard(status, quote! { status });
+
+            if let Some(schema_name) = &response.schema_name {
+                let body_ty = parse_type(schema_name);
+                let media_type = response.media_type.as_deref().unwrap_or("application/json");
+                if runtime_status {
+                    variants.push(quote! { #variant(StatusCode, #body_ty) });
+                    arms.push(quote! {
+                        Self::#variant(status, body) => {
+                            if !(#status_guard) {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            let mut response = (status, Json(body)).into_response();
+                            let Ok(content_type) = ::axum::http::HeaderValue::from_bytes(#media_type.as_bytes()) else {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            };
+                            response.headers_mut().insert(
+                                ::axum::http::header::CONTENT_TYPE,
+                                content_type,
+                            );
+                            response
+                        }
+                    });
+                } else {
+                    variants.push(quote! { #variant(#body_ty) });
+                    arms.push(quote! {
+                        Self::#variant(body) => {
+                            let mut response = (#status_expr, Json(body)).into_response();
+                            let Ok(content_type) = ::axum::http::HeaderValue::from_bytes(#media_type.as_bytes()) else {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            };
+                            response.headers_mut().insert(
+                                ::axum::http::header::CONTENT_TYPE,
+                                content_type,
+                            );
+                            response
+                        }
+                    });
+                }
+            } else if !response.has_content {
+                if runtime_status {
+                    variants.push(quote! { #variant(StatusCode) });
+                    arms.push(quote! {
+                        Self::#variant(status) => {
+                            if #status_guard {
+                                status.into_response()
+                            } else {
+                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            }
+                        }
+                    });
+                } else {
+                    variants.push(quote! { #variant });
+                    arms.push(quote! {
+                        Self::#variant => #status_expr.into_response()
+                    });
+                }
+            }
+
+            // The stream variant belongs to the response which declared SSE,
+            // so it carries that response's status instead of implicitly 200.
+            if response.supports_streaming {
+                let stream_variant = format_ident!("{}Stream", base_name);
+                if runtime_status {
+                    variants.push(quote! {
+                        #stream_variant(StatusCode, ::axum::response::sse::Sse<ServerEventStream>)
+                    });
+                    arms.push(quote! {
+                        Self::#stream_variant(status, sse) => {
+                            if !(#status_guard) {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            let mut response = sse.into_response();
+                            *response.status_mut() = status;
+                            response
+                        }
+                    });
+                } else {
+                    variants.push(quote! {
+                        #stream_variant(::axum::response::sse::Sse<ServerEventStream>)
+                    });
+                    arms.push(quote! {
+                        Self::#stream_variant(sse) => {
+                            let mut response = sse.into_response();
+                            *response.status_mut() = #status_expr;
+                            response
+                        }
+                    });
+                }
+            }
         }
 
         // Fallback: if no response variants were declared we still need
@@ -2339,6 +2496,26 @@ fn primary_tag(op: &OperationInfo) -> String {
     op.tags.first().cloned().unwrap_or_else(|| "Server".into())
 }
 
+/// Reject distinct raw primary tags which would emit the same Rust items.
+/// Sorting the raw tags first keeps the selected pair and diagnostic stable
+/// even when selectors are reordered in configuration.
+fn validate_tag_identifier_collisions(ops: &[&OperationInfo]) -> Result<(), ServerCodegenError> {
+    let raw_tags: std::collections::BTreeSet<String> =
+        ops.iter().map(|operation| primary_tag(operation)).collect();
+    let mut raw_by_identifier: BTreeMap<String, String> = BTreeMap::new();
+    for raw_tag in raw_tags {
+        let identifier = trait_ident_for_tag(&raw_tag).to_string();
+        if let Some(first_tag) = raw_by_identifier.insert(identifier.clone(), raw_tag.clone()) {
+            return Err(ServerCodegenError::TagIdentifierCollision {
+                first_tag,
+                second_tag: raw_tag,
+                identifier,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_custom_method_route_groups(ops: &[&OperationInfo]) -> Result<(), ServerCodegenError> {
     let mut tags_by_path: BTreeMap<&str, std::collections::BTreeSet<String>> = BTreeMap::new();
     for op in ops {
@@ -2370,7 +2547,8 @@ fn trait_ident_for_tag(tag: &str) -> syn::Ident {
 
 /// Convert a status code (or `default`, or wildcard `4XX`) to a
 /// variant identifier.
-fn status_variant_name(status: &str) -> String {
+/// Rust response-enum variant name for an OpenAPI response key.
+pub fn status_variant_name(status: &str) -> String {
     match status {
         "200" => "Ok".into(),
         "201" => "Created".into(),
@@ -2391,11 +2569,31 @@ fn status_variant_name(status: &str) -> String {
         "502" => "BadGateway".into(),
         "503" => "ServiceUnavailable".into(),
         "default" => "Default".into(),
+        "1XX" => "Informational".into(),
         "2XX" => "Success".into(),
         "3XX" => "Redirection".into(),
         "4XX" => "ClientError".into(),
         "5XX" => "ServerError".into(),
         other => format!("Status{}", other.to_ascii_uppercase().replace('X', "x")),
+    }
+}
+
+fn response_uses_runtime_status(status: &str) -> bool {
+    status == "default" || matches!(status.as_bytes(), [b'1'..=b'5', b'X' | b'x', b'X' | b'x'])
+}
+
+fn runtime_status_guard(status: &str, value: TokenStream) -> TokenStream {
+    if status == "default" {
+        quote! { true }
+    } else {
+        let class = u16::from(
+            status
+                .as_bytes()
+                .first()
+                .map(|digit| digit - b'0')
+                .unwrap_or_default(),
+        );
+        quote! { #value.as_u16() / 100 == #class }
     }
 }
 
@@ -2423,10 +2621,11 @@ fn status_token(status: &str) -> TokenStream {
         "502" => quote! { StatusCode::BAD_GATEWAY },
         "503" => quote! { StatusCode::SERVICE_UNAVAILABLE },
         "default" => quote! { StatusCode::INTERNAL_SERVER_ERROR },
-        "2XX" => quote! { StatusCode::OK },
-        "3XX" => quote! { StatusCode::MOVED_PERMANENTLY },
-        "4XX" => quote! { StatusCode::BAD_REQUEST },
-        "5XX" => quote! { StatusCode::INTERNAL_SERVER_ERROR },
+        // Range/default responses carry a runtime StatusCode in their enum
+        // variant and never reach this fixed-status helper.
+        "1XX" | "2XX" | "3XX" | "4XX" | "5XX" => {
+            quote! { StatusCode::INTERNAL_SERVER_ERROR }
+        }
         // Specific numeric codes not in our table — fall back to
         // StatusCode::from_u16. Codegen ensures a panic-free path by
         // unwrapping on a value that must parse (we already
@@ -2482,6 +2681,31 @@ mod tests {
     fn untagged_falls_back_to_server_api() {
         let id = trait_ident_for_tag("");
         assert_eq!(id.to_string(), "ServerApi");
+    }
+
+    #[test]
+    fn colliding_raw_tags_are_rejected_in_stable_order() {
+        let first = OperationInfo {
+            operation_id: "first".into(),
+            tags: vec!["foo_bar".into()],
+            ..Default::default()
+        };
+        let second = OperationInfo {
+            operation_id: "second".into(),
+            tags: vec!["foo-bar".into()],
+            ..Default::default()
+        };
+        let error = validate_tag_identifier_collisions(&[&first, &second]).unwrap_err();
+        assert!(matches!(
+            error,
+            ServerCodegenError::TagIdentifierCollision {
+                first_tag,
+                second_tag,
+                identifier,
+            } if first_tag == "foo-bar"
+                && second_tag == "foo_bar"
+                && identifier == "FooBarApi"
+        ));
     }
 
     #[test]

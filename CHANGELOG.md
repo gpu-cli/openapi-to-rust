@@ -4,6 +4,26 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
+## Unreleased
+
+### Added
+
+- Every-PR compatibility coverage for the generated Anthropic Messages server
+  through the pinned official Python SDK, including unary and SSE responses.
+
+### Fixed
+
+- Config-driven `server list` and `server add` now apply
+  `generator.schema_extensions`, so overlay-provided operations and SSE media
+  types match generation.
+- Schema extensions accept the documented JSON, YAML, and YML formats with
+  path-rich parse errors.
+- Generated server response enums retain reusable Response Object references,
+  bodyless status codes, vendor/problem JSON media types, SSE status codes,
+  and runtime status values for wildcard/default responses.
+- Server example tests use Cargo's current integration-test binary instead of
+  a potentially stale hard-coded `target/debug` executable.
+
 ## [0.9.1] - 2026-07-26
 
 ### Fixed

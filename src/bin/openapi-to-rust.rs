@@ -635,12 +635,14 @@ fn starter_module_name(source: &str) -> String {
     }
 }
 
-fn resolve_spec_path(
+fn resolve_server_spec(
     spec: Option<PathBuf>,
     config: &std::path::Path,
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, Vec<PathBuf>), Box<dyn std::error::Error>> {
     match spec {
-        Some(p) => Ok(p),
+        // An explicit spec is intentionally analyzed as-is. Schema extensions
+        // belong to config mode and must not affect a caller that bypasses it.
+        Some(path) => Ok((path, Vec::new())),
         None => {
             let cf = ConfigFile::load(config).map_err(|e| {
                 format!(
@@ -649,18 +651,24 @@ fn resolve_spec_path(
                     e
                 )
             })?;
-            Ok(cf.into_generator_config().spec_path)
+            let generator = cf.into_generator_config();
+            Ok((generator.spec_path, generator.schema_extensions))
         }
     }
 }
 
 fn load_analysis(
     spec_path: &std::path::Path,
+    schema_extensions: &[PathBuf],
 ) -> Result<openapi_to_rust::SchemaAnalysis, Box<dyn std::error::Error>> {
     let source = spec_path.to_string_lossy();
     let spec_content = load_spec(&source)?;
     let spec_value = parse_spec(&spec_content, &source)?;
-    let mut analyzer = SchemaAnalyzer::new(spec_value)?;
+    let mut analyzer = if schema_extensions.is_empty() {
+        SchemaAnalyzer::new(spec_value)?
+    } else {
+        SchemaAnalyzer::new_with_extensions(spec_value, schema_extensions)?
+    };
     Ok(analyzer.analyze()?)
 }
 
@@ -672,8 +680,8 @@ fn run_server_list(
     grep: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let spec_path = resolve_spec_path(spec, &config)?;
-    let analysis = load_analysis(&spec_path)?;
+    let (spec_path, schema_extensions) = resolve_server_spec(spec, &config)?;
+    let analysis = load_analysis(&spec_path, &schema_extensions)?;
     let index = OperationIndex::from_analysis(&analysis);
 
     let filter = ListFilter { tag, method, grep };
@@ -695,8 +703,8 @@ fn run_server_add(
     dry_run: bool,
     regenerate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let spec_path = resolve_spec_path(spec, &config)?;
-    let analysis = load_analysis(&spec_path)?;
+    let (spec_path, schema_extensions) = resolve_server_spec(spec, &config)?;
+    let analysis = load_analysis(&spec_path, &schema_extensions)?;
     let index = OperationIndex::from_analysis(&analysis);
 
     // Determine which selectors to add. --all-tag expands; otherwise
@@ -894,7 +902,30 @@ fn print_server_hint(
     eprintln!("   let app = {router_fn}(AppState {{ /* … */ }});");
     eprintln!();
     if op.supports_streaming {
-        eprintln!("   For streaming, return `{response_ty}::OkStream(sse_response(your_stream))`.");
+        let (stream_variant, runtime_status) = analysis
+            .operation_responses
+            .get(&op.operation_id)
+            .and_then(|responses| {
+                responses
+                    .iter()
+                    .find(|(_, response)| response.supports_streaming)
+            })
+            .map(|(status, _)| {
+                (
+                    format!(
+                        "{}Stream",
+                        openapi_to_rust::server::codegen::status_variant_name(status)
+                    ),
+                    status == "default" || status.ends_with("XX"),
+                )
+            })
+            .unwrap_or_else(|| ("OkStream".to_string(), false));
+        let stream_args = if runtime_status {
+            "status_code, sse_response(your_stream)"
+        } else {
+            "sse_response(your_stream)"
+        };
+        eprintln!("   For streaming, return `{response_ty}::{stream_variant}({stream_args})`.");
     }
 }
 
