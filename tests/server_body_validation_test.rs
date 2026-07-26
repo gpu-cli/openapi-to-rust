@@ -124,6 +124,40 @@ fn unsupported_request_media_is_rejected_during_server_generation() {
 }
 
 #[test]
+fn schema_less_request_content_is_rejected_during_server_generation() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "schema-less body", "version": "1" },
+        "paths": { "/actions": { "post": {
+            "operationId": "triggerAction",
+            "requestBody": { "required": true, "content": {
+                "application/json": {}
+            }},
+            "responses": { "204": { "description": "unused" } }
+        }}}
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["triggerAction".into()],
+        prune_models: true,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        server: Some(server.clone()),
+        ..Default::default()
+    };
+    let error = ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("triggerAction"), "{error}");
+    assert!(error.contains("application/json"), "{error}");
+    assert!(error.contains("no schema to validate"), "{error}");
+}
+
+#[test]
 fn generated_json_pipeline_validates_before_invoking_the_api() {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::TempDir::new().expect("scratch crate");

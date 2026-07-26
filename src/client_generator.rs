@@ -889,6 +889,7 @@ impl CodeGenerator {
                     optional_fields: Vec::new(),
                 });
             }
+            RequestBodyContent::SchemaLess { .. } => return None,
         };
         let body_type_name = self.to_rust_type_name(body_name);
         let body_type = syn::Ident::new(&body_type_name, proc_macro2::Span::call_site());
@@ -1894,6 +1895,13 @@ impl CodeGenerator {
         // (`requestBody.required` is false or absent) become `Option<T>` per T11.
         if let Some(ref rb) = op.request_body {
             use crate::analysis::RequestBodyContent;
+            if matches!(rb, RequestBodyContent::SchemaLess { .. }) {
+                return if params.is_empty() {
+                    quote! {}
+                } else {
+                    quote! { #(#params),* }
+                };
+            }
             let required = op.request_body_required;
             let body_type = match rb {
                 RequestBodyContent::Json { schema_name, .. }
@@ -1907,12 +1915,18 @@ impl CodeGenerator {
                 RequestBodyContent::OctetStream => quote! { Vec<u8> },
                 RequestBodyContent::TextPlain => quote! { String },
                 RequestBodyContent::Unsupported { .. } => quote! { Vec<u8> },
+                RequestBodyContent::SchemaLess { .. } => unreachable!(
+                    "schema-less request bodies preserve the historical client signature"
+                ),
             };
             let body_ident = match rb {
                 RequestBodyContent::Multipart => quote! { form },
                 RequestBodyContent::OctetStream
                 | RequestBodyContent::TextPlain
                 | RequestBodyContent::Unsupported { .. } => quote! { body },
+                RequestBodyContent::SchemaLess { .. } => unreachable!(
+                    "schema-less request bodies preserve the historical client signature"
+                ),
                 _ => quote! { request },
             };
             if required {
@@ -2055,6 +2069,7 @@ impl CodeGenerator {
                     },
                 )
             }
+            RequestBodyContent::SchemaLess { .. } => return quote! {},
         };
         if required {
             apply

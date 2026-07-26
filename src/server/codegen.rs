@@ -547,6 +547,13 @@ impl<'a> ServerCodegen<'a> {
                         reason: "text server extraction is not implemented".to_string(),
                     });
                 }
+                Some(RequestBodyContent::SchemaLess { media_type }) => {
+                    return Err(ServerCodegenError::UnsupportedRequestBody {
+                        operation_id: operation.operation_id.clone(),
+                        media_type: media_type.clone(),
+                        reason: "request content has no schema to validate".to_string(),
+                    });
+                }
                 Some(RequestBodyContent::Unsupported { media_types }) => {
                     return Err(ServerCodegenError::UnsupportedRequestBody {
                         operation_id: operation.operation_id.clone(),

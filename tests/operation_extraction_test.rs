@@ -450,7 +450,7 @@ fn test_content_type_priority() {
 }
 
 #[test]
-fn request_body_media_type_is_retained_and_schema_less_content_is_rejected() {
+fn request_body_media_type_and_schema_less_content_are_retained() {
     let vendor_spec = serde_json::json!({
         "openapi": "3.1.0",
         "info": { "title": "vendor json", "version": "1" },
@@ -482,11 +482,10 @@ fn request_body_media_type_is_retained_and_schema_less_content_is_rejected() {
             "responses": { "204": { "description": "ok" } }
         }}}
     });
-    let error = SchemaAnalyzer::new(schema_less)
-        .unwrap()
-        .analyze()
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("createItem"));
-    assert!(error.contains("without a schema"));
+    let analysis = SchemaAnalyzer::new(schema_less).unwrap().analyze().unwrap();
+    assert!(matches!(
+        &analysis.operations["createItem"].request_body,
+        Some(RequestBodyContent::SchemaLess { media_type })
+            if media_type == "application/json"
+    ));
 }
