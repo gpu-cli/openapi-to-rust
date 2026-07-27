@@ -78,7 +78,8 @@ fn required_type_array_null_through_allof_is_optional() {
         }
     });
 
-    let result = test_generation("required_type_array_null_allof", spec).expect("Generation failed");
+    let result =
+        test_generation("required_type_array_null_allof", spec).expect("Generation failed");
 
     assert!(
         result.contains("pub template: Option<String>"),
