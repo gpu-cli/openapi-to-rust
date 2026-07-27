@@ -642,10 +642,17 @@ binary    = "bytes"                      # bytes   (default) | vec_u8 | string
 uuid      = "uuid"                       # uuid    (default) | string
 byte      = "base64"                     # base64 (default) | base64_url_unpadded | vec_u8 | string
 unsigned  = true                         # uint32/uint64 -> u32/u64
+float_precision = "f64"                  # f64 (default) | f32 — see below
 
 [generator.types.shape]
 additional_properties_typed = true
 ```
+
+**`format: float` maps to `f64`, not `f32`.** JSON carries no binary32, so the
+declared format describes the server's storage rather than the transport. A
+price sent on the wire as `0.03` parses losslessly into `f64`, but through
+`f32` it becomes `0.029999999329447746` — a real hazard when the field is
+money. Set `float_precision = "f32"` to map strictly by declared format.
 
 ## Testing
 

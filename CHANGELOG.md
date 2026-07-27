@@ -17,8 +17,22 @@ when correcting output that was wrong or incomplete on the wire.
   SSE variant names and require a runtime status for wildcard/default variants.
   This is a source-breaking correction for existing server trait implementations.
 
+### Changed
+
+- `format: float` now maps to `f64` instead of `f32`. JSON carries no binary32,
+  so the declared format describes the server's storage rather than the
+  transport: a value sent as `0.03` survives in `f64` but becomes
+  `0.029999999329447746` through `f32`, which matters when the field is money.
+  Set `float_precision = "f32"` under `[generator.types]` to map strictly by
+  declared format. `--types-conservative` keeps the literal `f32` mapping.
+
 ### Fixed
 
+- Parameter-level inline enums honor `x-enum-varnames`. Schema-level enums
+  already did, so the same enum produced different Rust variant names depending
+  on whether it lived in `components.schemas` or on a parameter. A varnames
+  array whose length disagrees with `enum` is ignored rather than applied to a
+  prefix.
 - Properties that are both `required` and nullable via OpenAPI 3.1's
   `type: ["X", "null"]` now generate `Option<T>` instead of a bare `T`, in plain
   object schemas and in `allOf`-composed ones alike. Previously such a client

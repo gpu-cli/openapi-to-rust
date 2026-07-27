@@ -112,9 +112,12 @@ fn int64_and_formatless_integer_parameters_stay_i64() {
 #[test]
 fn number_format_parameters_resolve_through_type_mapper() {
     let code = generate(spec());
+    // `format: float` maps to f64 by default: JSON has no binary32, so a value
+    // sent as `0.03` survives in f64 but becomes 0.029999999329447746 through
+    // f32. Set `float_precision = "f32"` to map by declared format instead.
     assert!(
-        code.contains("ratio : f32"),
-        "float query parameter should render as f32; got:\n{code}"
+        code.contains("ratio : f64"),
+        "float query parameter should render as f64 by default; got:\n{code}"
     );
     assert!(
         code.contains("weight : f64"),

@@ -447,6 +447,13 @@ pub struct ParameterInfo {
     /// See issue #10 follow-up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<String>>,
+    /// `x-enum-varnames` declared on the parameter's inline enum schema, when
+    /// present and the same length as `enum_values`. Schema-level enums already
+    /// honor this vendor extension through `SchemaAnalysis::enum_extensions`;
+    /// parameter enums are inline and have no analyzed-schema name to key on,
+    /// so their names ride along here instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_varnames: Option<Vec<String>>,
     /// Disambiguated Rust ident assigned by the analyzer at the operation
     /// scope. When two parameters in the same operation sanitize to the same
     /// snake_case name (e.g. `exclude_ids` + `exclude-ids` in vercel,
@@ -4734,6 +4741,7 @@ impl SchemaAnalyzer {
                 rust_type: "String".to_string(),
                 description: None,
                 enum_values: None,
+                enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
                 validation_schema: None,
@@ -4986,6 +4994,7 @@ impl SchemaAnalyzer {
         let mut rust_type = "String".to_string();
         let mut schema_ref = None;
         let mut enum_values: Option<Vec<String>> = None;
+        let mut enum_varnames: Option<Vec<String>> = None;
         let mut query_serialization: Option<QuerySerialization> = None;
 
         // OAS 3.x style/explode resolution for `in: query`. Defaults are
@@ -5102,6 +5111,21 @@ impl SchemaAnalyzer {
                                 let op_pascal = operation_id.replace('.', "_").to_pascal_case();
                                 let param_pascal = name.to_pascal_case();
                                 rust_type = format!("{op_pascal}{param_pascal}");
+                                // Honor `x-enum-varnames` here the same way
+                                // schema-level enums do. A mismatched length is
+                                // ambiguous about which value each name refers
+                                // to, so drop it rather than guess.
+                                enum_varnames = details
+                                    .extra
+                                    .get("x-enum-varnames")
+                                    .and_then(Value::as_array)
+                                    .map(|raw| {
+                                        raw.iter()
+                                            .filter_map(Value::as_str)
+                                            .map(str::to_owned)
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .filter(|names| names.len() == values.len());
                                 enum_values = Some(values);
                             }
                         }
@@ -5167,6 +5191,7 @@ impl SchemaAnalyzer {
             rust_type,
             description: param.description.clone(),
             enum_values,
+            enum_varnames,
             rust_ident: None,
             query_serialization,
             validation_schema,

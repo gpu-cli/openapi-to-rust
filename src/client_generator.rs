@@ -1110,10 +1110,23 @@ impl CodeGenerator {
         // while keeping each `serde(rename)` pointing at the original
         // wire string.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // `x-enum-varnames` wins over the naming heuristic when the spec
+        // supplies it — the whole point of the extension is that the author
+        // knows better than a transformation of the wire string. Schema-level
+        // enums already honored it; parameter enums did not, so the same spec
+        // produced different variant names depending on where its enum lived.
+        // Suffix disambiguation still applies, since nothing stops a spec from
+        // declaring two names that collide once converted to an identifier.
         let variant_names: Vec<String> = values
             .iter()
-            .map(|value| {
-                let base = self.to_rust_enum_variant(value);
+            .enumerate()
+            .map(|(index, value)| {
+                let base = param
+                    .enum_varnames
+                    .as_ref()
+                    .and_then(|names| names.get(index))
+                    .map(|name| self.to_rust_enum_variant(name))
+                    .unwrap_or_else(|| self.to_rust_enum_variant(value));
                 let mut chosen = base.clone();
                 let mut suffix = 2;
                 while !used.insert(chosen.clone()) {

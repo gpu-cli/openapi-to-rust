@@ -17,6 +17,10 @@
 #   SPEC_COMPILE_LIMIT=N    process only the first N alphabetically-sorted specs
 #   SPEC_COMPILE_PARSE_ONLY=1  skip cargo check; only verify the generator
 #                              parses+emits without errors. Faster.
+#   SPEC_COMPILE_FORCE_CHECK=1 also cargo check the specs in
+#                              GENERATE_ONLY_SPECS (see below), which are
+#                              skipped by default because their generated
+#                              crate exceeds CI runner memory.
 #   SPEC_COMPILE_TARGET_DIR=path  shared cargo target dir for the scratch
 #                              workspace (default tmp/spec-compile-target).
 #                              Dependency artifacts (reqwest, chrono, …)
@@ -78,11 +82,40 @@ fi
 echo "[spec-compile] running ${#SPECS[@]} spec(s)"
 echo
 
+# Specs whose generated crate is too large to `cargo check` inside a standard
+# CI runner. They are still generated (which catches the majority of generator
+# defects); only the compile step is skipped, and the summary reports them
+# separately so a green run is never mistaken for full verification.
+#
+# Set SPEC_COMPILE_FORCE_CHECK=1 to check them anyway on a machine with the
+# headroom. Measured peaks, `cargo check`, single rustc process:
+#   microsoft-graph  2.4M lines generated  ~14.3 GB RSS  (16,153 operations)
+# A GitHub-hosted ubuntu-latest runner has 16 GB total, so it is killed with
+# SIGTERM partway through. Raising cargo parallelism does not help — the memory
+# is one rustc type-checking one crate.
+GENERATE_ONLY_SPECS=("microsoft-graph")
+
+is_generate_only() {
+  [ "${SPEC_COMPILE_FORCE_CHECK:-}" = "1" ] && return 1
+  for entry in "${GENERATE_ONLY_SPECS[@]}"; do
+    [ "$entry" = "$1" ] && return 0
+  done
+  return 1
+}
+
+generate_only_reason() {
+  case "$1" in
+    microsoft-graph) echo "~14.3 GB RSS, exceeds CI runner memory" ;;
+    *) echo "exceeds CI runner resources" ;;
+  esac
+}
+
 # ---- Phase 1: generate a scratch crate per spec -------------------------
 passed=()
 failed_gen=()
 failed_check=()
 skipped=()
+generate_only=()
 gen_ok=()
 for entry in "${SPECS[@]}"; do
   IFS='|' read -r name spec_path <<<"$entry"
@@ -163,6 +196,11 @@ elif [ ${#gen_ok[@]} -gt 0 ]; then
   echo
   echo "[spec-compile] cargo check (${#gen_ok[@]} isolated manifest(s))..."
   for name in "${gen_ok[@]}"; do
+    if is_generate_only "$name"; then
+      printf "%-30s GEN-ONLY (cargo check skipped: %s)\n" "$name" "$(generate_only_reason "$name")"
+      generate_only+=("$name")
+      continue
+    fi
     log="$ROOT/$name/check.log"
     if ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check $OFFLINE ) >"$log" 2>&1; then
       printf "%-30s PASS\n" "$name"
@@ -177,12 +215,21 @@ elif [ ${#gen_ok[@]} -gt 0 ]; then
 fi
 
 echo
-echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed, ${#failed_check[@]} check-failed, ${#skipped[@]} skipped"
+echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed, ${#failed_check[@]} check-failed, ${#generate_only[@]} generate-only, ${#skipped[@]} skipped"
 [ ${#failed_gen[@]}   -gt 0 ] && echo "  gen-fail:   ${failed_gen[*]}"
 [ ${#failed_check[@]} -gt 0 ] && echo "  check-fail: ${failed_check[*]}"
 [ ${#skipped[@]}      -gt 0 ] && echo "  skipped:    ${skipped[*]}"
+if [ ${#generate_only[@]} -gt 0 ]; then
+  echo "  generate-only (NOT compile-verified): ${generate_only[*]}"
+  echo "  ^ these generated cleanly but were never compiled. Run them locally"
+  echo "    on a machine with enough RAM: scripts/spec-compile.sh ${generate_only[*]}"
+fi
 
 if [ ${#failed_gen[@]} -gt 0 ] || [ ${#failed_check[@]} -gt 0 ]; then
   exit 1
 fi
-echo "[spec-compile] ✅ all specs compiled cleanly"
+if [ ${#generate_only[@]} -gt 0 ]; then
+  echo "[spec-compile] ✅ ${#passed[@]} spec(s) compiled cleanly; ${#generate_only[@]} generated but not compiled"
+else
+  echo "[spec-compile] ✅ all specs compiled cleanly"
+fi
