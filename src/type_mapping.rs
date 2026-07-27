@@ -599,6 +599,26 @@ pub struct TypeMappingConfig {
 
     /// Vendor-extension toggles for enums. Filled in by Q2.6.
     pub enums: Option<TypeEnumsConfig>,
+
+    /// Rust type for `format: float`. Defaults to `f64`, which round-trips the
+    /// JSON number the server actually sent; `f32` maps strictly by declared
+    /// format at the cost of precision.
+    #[serde(default)]
+    pub float_precision: FloatPrecision,
+}
+
+/// How `format: float` is mapped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FloatPrecision {
+    /// Map to `f64` (default). JSON carries no binary32, so widening preserves
+    /// the transmitted value exactly.
+    #[default]
+    F64,
+    /// Map to `f32`, matching the declared format literally. Values that are
+    /// not representable in binary32 lose precision — `0.03` becomes
+    /// `0.029999999329447746`.
+    F32,
 }
 
 fn default_true() -> bool {
@@ -608,6 +628,7 @@ fn default_true() -> bool {
 impl Default for TypeMappingConfig {
     fn default() -> Self {
         Self {
+            float_precision: FloatPrecision::default(),
             date_time: DateStrategy::default(),
             date: DateStrategy::default(),
             time: DateStrategy::default(),
@@ -681,6 +702,9 @@ impl TypeMappingConfig {
     /// by typed-scalar adoption.
     pub fn conservative() -> Self {
         Self {
+            // Conservative mode reproduces pre-Q2 output, which mapped
+            // `format: float` literally to `f32`.
+            float_precision: FloatPrecision::F32,
             date_time: DateStrategy::String,
             date: DateStrategy::String,
             time: DateStrategy::String,
@@ -1025,10 +1049,25 @@ impl TypeMapper {
         }
     }
 
+    /// Map `number` + optional `format` → Rust type.
+    ///
+    /// `format: float` maps to `f64` by default rather than `f32`. JSON has no
+    /// binary32: a value written on the wire as `0.03` parses losslessly into
+    /// `f64`, but through `f32` it becomes `0.029999999329447746`. The declared
+    /// format describes the server's internal storage, not the transport, so
+    /// `f32` discards precision the response actually carried. Observed live on
+    /// RunPod's catalog prices, which declare `float` while the billing
+    /// endpoints declare `double`.
+    ///
+    /// Set `float_precision = "f32"` under `[generator.types]` to map strictly
+    /// by declared format instead.
     pub fn number_format(&self, format: Option<&str>) -> MappedType {
         let normalized = self.normalize_format(format);
         match normalized.as_deref() {
-            Some("float") => MappedType::plain("f32"),
+            Some("float") if self.config.float_precision == FloatPrecision::F32 => {
+                MappedType::plain("f32")
+            }
+            Some("float") => MappedType::plain("f64"),
             Some("double") => MappedType::plain("f64"),
             _ => MappedType::plain("f64"),
         }
