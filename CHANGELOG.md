@@ -4,18 +4,12 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
-## [0.10.0] - 2026-07-26
+## [0.11.0] - 2026-07-27
 
-### Added
-
-- Every-PR compatibility coverage for the generated Anthropic Messages server
-  through the pinned official Python SDK, including unary and SSE responses.
-
-### Changed
-
-- Regenerated server response enums now use the declared status in bodyless and
-  SSE variant names and require a runtime status for wildcard/default variants.
-  This is a source-breaking correction for existing server trait implementations.
+Nearly everything here was found by generating a client from RunPod's published
+OpenAPI document and exercising it against the live API. The spec was accurate;
+the generator was not. Two of these defects broke real calls outright, and both
+would have passed any amount of spec-diffing.
 
 ### Changed
 
@@ -54,6 +48,32 @@ when correcting output that was wrong or incomplete on the wire.
   feature in `REQUIRED_DEPS.toml`. The feature was enabled for
   `reqwest-middleware` but not for `reqwest` itself, so generated file-upload
   clients failed to compile.
+
+### Internal
+
+- The `full-spec-compile` CI tier passes again. It had been killed with SIGTERM
+  roughly 25 minutes into a 240-minute budget, on `main` as well as branches.
+  The cause was memory, not time or disk: `microsoft-graph` generates 2.4M lines
+  from 16,153 operations and peaks at ~14.3 GB in a single rustc process against
+  a 16 GB runner. It is now generated but not compile-checked, reported in its
+  own bucket so a green run is never mistaken for full corpus verification.
+  `SPEC_COMPILE_FORCE_CHECK=1` checks it where there is headroom.
+
+## [0.10.0] - 2026-07-26
+
+### Added
+
+- Every-PR compatibility coverage for the generated Anthropic Messages server
+  through the pinned official Python SDK, including unary and SSE responses.
+
+### Changed
+
+- Regenerated server response enums now use the declared status in bodyless and
+  SSE variant names and require a runtime status for wildcard/default variants.
+  This is a source-breaking correction for existing server trait implementations.
+
+### Fixed
+
 - Config-driven `server list` and `server add` now apply
   `generator.schema_extensions`, so overlay-provided operations and SSE media
   types match generation.
