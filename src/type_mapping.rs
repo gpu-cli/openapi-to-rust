@@ -314,6 +314,20 @@ pub fn collect_generated_dep_requirements<'a>(
         if uses(".json(&") {
             features.push("json");
         }
+        // Multipart operations reference `reqwest::multipart::Form` directly.
+        // reqwest is pinned with default-features off, so the feature has to be
+        // requested explicitly or the generated client fails to compile with
+        // "cannot find `multipart` in `reqwest`". The reqwest-middleware side
+        // of this was already handled below; reqwest itself was missed
+        // (openapi-generator-upz). Hits any spec with a file upload.
+        if uses("reqwest::multipart") {
+            features.push("multipart");
+        }
+        // `Response::bytes_stream()`, used by generated SSE operations, is
+        // gated behind reqwest's `stream` feature.
+        if uses(".bytes_stream()") {
+            features.push("stream");
+        }
         dependencies.push(
             DepRequirement::new("reqwest", "0.12")
                 .without_default_features()

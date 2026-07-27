@@ -19,6 +19,27 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- Properties that are both `required` and nullable via OpenAPI 3.1's
+  `type: ["X", "null"]` now generate `Option<T>` instead of a bare `T`, in plain
+  object schemas and in `allOf`-composed ones alike. Previously such a client
+  compiled and then failed to deserialize the first real response containing
+  `null`. All three nullability spellings (`nullable: true`, the 3.1 type array,
+  and an `anyOf`/`oneOf` null branch) now route through one helper.
+- Client operations whose only success content is `text/event-stream` return a
+  `futures_util::Stream` of bytes instead of `()`. They previously buffered the
+  response with `.text()`, which never returns on a live SSE stream and hung the
+  caller's task indefinitely.
+- Generated clients default `base_url` to the document's `servers[0].url` when
+  configuration does not set one, so `HttpClient::new()` targets the real API
+  instead of an empty string. Explicit configuration still wins; relative and
+  templated server URLs are ignored.
+- The `Default(..)` per-operation error variant is now constructed for responses
+  matched by the spec's `default` response. It was previously declared but
+  unreachable, so a typed `default` body still surfaced as `typed: None`.
+- Specs with `multipart/form-data` operations now request reqwest's `multipart`
+  feature in `REQUIRED_DEPS.toml`. The feature was enabled for
+  `reqwest-middleware` but not for `reqwest` itself, so generated file-upload
+  clients failed to compile.
 - Config-driven `server list` and `server add` now apply
   `generator.schema_extensions`, so overlay-provided operations and SSE media
   types match generation.

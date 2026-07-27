@@ -655,6 +655,23 @@ impl Schema {
         }
     }
 
+    /// True when the schema is nullable in any form OpenAPI allows:
+    /// 3.0's `nullable: true`, 3.1's `type: ["X", "null"]`, or an
+    /// `anyOf`/`oneOf` carrying a `null` branch.
+    ///
+    /// Property nullability must be decided through this, not through any
+    /// single one of the three checks. Each form was added separately and each
+    /// time a call site was missed: `nullable: true` first, then the
+    /// `anyOf`-with-null shape (openapi-generator-bgo), leaving the 3.1
+    /// canonical type-array form unhandled on properties
+    /// (openapi-generator-dsu) — which silently generated non-`Option` fields
+    /// for values the API really does send as `null`.
+    pub fn is_nullable_any(&self) -> bool {
+        self.details().is_nullable()
+            || self.type_array_contains_null()
+            || self.is_nullable_pattern()
+    }
+
     /// Get schema details
     pub fn details(&self) -> &SchemaDetails {
         static EMPTY_DETAILS: Lazy<SchemaDetails> = Lazy::new(SchemaDetails::default);

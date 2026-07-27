@@ -209,6 +209,51 @@ impl Default for GeneratorConfig {
     }
 }
 
+impl GeneratorConfig {
+    /// Adopt the document's `servers[0].url` as the client's default base URL
+    /// when configuration didn't supply one.
+    ///
+    /// The spec already states where the API lives; making every user restate
+    /// it in TOML (or discover at runtime that requests go nowhere) is friction
+    /// with no upside. Explicit configuration always wins.
+    ///
+    /// Two server URLs are deliberately ignored: relative ones (`/v1`), which
+    /// are meaningless without an origin, and templated ones containing `{}`
+    /// server variables, which are not usable until substituted.
+    pub fn apply_spec_server_default(&mut self, spec: &serde_json::Value) {
+        let already_configured = self
+            .http_client_config
+            .as_ref()
+            .and_then(|http| http.base_url.as_deref())
+            .is_some_and(|url| !url.is_empty());
+        if already_configured {
+            return;
+        }
+
+        let Some(url) = spec
+            .pointer("/servers/0/url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .filter(|url| !url.starts_with('/'))
+            .filter(|url| !url.contains('{'))
+        else {
+            return;
+        };
+
+        match self.http_client_config.as_mut() {
+            Some(http) => http.base_url = Some(url.to_string()),
+            None => {
+                self.http_client_config = Some(crate::http_config::HttpClientConfig {
+                    base_url: Some(url.to_string()),
+                    timeout_seconds: None,
+                    default_headers: Default::default(),
+                })
+            }
+        }
+    }
+}
+
 pub fn default_type_mappings() -> BTreeMap<String, String> {
     let mut mappings = BTreeMap::new();
     mappings.insert("integer".to_string(), "i64".to_string());

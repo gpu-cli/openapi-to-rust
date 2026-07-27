@@ -1933,8 +1933,8 @@ impl SchemaAnalyzer {
                 };
 
                 let prop_details = prop_schema.details();
-                // Check for both explicit nullable and anyOf nullable patterns
-                let prop_nullable = prop_details.is_nullable() || prop_schema.is_nullable_pattern();
+                // Every nullability form, via one helper — see is_nullable_any.
+                let prop_nullable = prop_schema.is_nullable_any();
                 let prop_description = prop_details.description.clone();
                 let prop_default = prop_details.default.clone();
 
@@ -2506,12 +2506,13 @@ impl SchemaAnalyzer {
                 )?;
                 let prop_details = prop_schema.details();
 
-                // Bug openapi-generator-bgo: pick up 3.1-style nullability
-                // (anyOf/oneOf with a `type: null` branch) in addition to the
-                // 3.0 `nullable: true` keyword. Without this, properties merged
-                // through allOf composition lose their null-branch detection
-                // (real hit: OpenAI Response.incomplete_details).
-                let nullable = prop_details.is_nullable() || prop_schema.is_nullable_pattern();
+                // Properties merged through allOf composition must go through
+                // the same nullability check as plain object properties.
+                // Real hits: OpenAI Response.incomplete_details (anyOf-with-null,
+                // openapi-generator-bgo) and RunPod Pod.startedAt / Pod.template
+                // (3.1 type-array, openapi-generator-dsu) — the latter arrive
+                // as `null` from the live API for any pod that hasn't started.
+                let nullable = prop_schema.is_nullable_any();
                 merged_properties.insert(
                     prop_name.clone(),
                     PropertyInfo {
