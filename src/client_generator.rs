@@ -285,6 +285,20 @@ impl CodeGenerator {
 
     /// Generate the constructor method
     fn generate_constructor(&self, has_retry: bool, has_tracing: bool) -> TokenStream {
+        // Seed `base_url` from configuration rather than always starting empty.
+        // A client built with an empty base URL sends every request to a
+        // relative path and fails, so a user who set `[http_client] base_url`
+        // in their TOML — or whose spec declares `servers[0].url`, which the
+        // config layer resolves into the same field — previously had to repeat
+        // it via `with_base_url` or watch every call 404 (openapi-generator-igg).
+        let configured_base_url = self
+            .config()
+            .http_client_config
+            .as_ref()
+            .and_then(|http| http.base_url.as_deref())
+            .unwrap_or_default();
+        let default_base_url = quote! { #configured_base_url.to_string() };
+
         let retry_param = if has_retry {
             quote! { retry_config: Option<RetryConfig>, }
         } else {
@@ -358,7 +372,7 @@ impl CodeGenerator {
                     let http_client = client_builder.build();
 
                     Self {
-                        base_url: String::new(),
+                        base_url: #default_base_url,
                         api_key: None,
                         http_client,
                         custom_headers: BTreeMap::new(),
@@ -382,7 +396,7 @@ impl CodeGenerator {
                     let http_client = client_builder.build();
 
                     Self {
-                        base_url: String::new(),
+                        base_url: #default_base_url,
                         api_key: None,
                         http_client,
                         custom_headers: BTreeMap::new(),
@@ -2106,9 +2120,28 @@ impl CodeGenerator {
             let rust_type_name = self.to_rust_type_name(response_type);
             let response_ident = syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
             quote! { #response_ident }
+        } else if Self::returns_raw_event_stream(op) {
+            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> }
         } else {
             quote! { () }
         }
+    }
+
+    /// True when the operation's success response carries `text/event-stream`
+    /// and nothing this generator can model as a JSON body.
+    ///
+    /// These previously generated `-> Result<(), _>` and then called
+    /// `response.text().await`, which on a live SSE stream never returns: the
+    /// caller's task deadlocks rather than erroring (openapi-generator-x9v).
+    /// The streaming signal was already detected in analysis and honored by the
+    /// server generator; only the client ignored it.
+    ///
+    /// Operations declaring *both* a JSON body and `text/event-stream` keep
+    /// their JSON contract here — those are the `stream: true` style endpoints
+    /// covered by the explicit `[streaming]` configuration, and silently
+    /// changing their return type would break existing callers.
+    fn returns_raw_event_stream(op: &OperationInfo) -> bool {
+        op.supports_streaming
     }
 
     /// Generate error handling.
@@ -2147,6 +2180,35 @@ impl CodeGenerator {
         };
 
         let error_match_arms = self.generate_error_match_arms(op);
+
+        // Streaming success path: hand back the live byte stream instead of
+        // buffering it. Reading an SSE body to a string blocks until the server
+        // closes the connection, which is precisely what it will not do.
+        // The error path still buffers — an error response is finite.
+        if !has_response_body && Self::returns_raw_event_stream(op) {
+            return quote! {
+                let status = response.status();
+                let status_code = status.as_u16();
+                let headers = response.headers().clone();
+
+                if status.is_success() {
+                    Ok(response.bytes_stream())
+                } else {
+                    let body_text = response.text().await
+                        .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
+                    let typed: Option<#op_error_type>;
+                    let parse_error: Option<String>;
+                    #error_match_arms
+                    Err(ApiOpError::Api(ApiError {
+                        status: status_code,
+                        headers,
+                        body: body_text,
+                        typed,
+                        parse_error,
+                    }))
+                }
+            };
+        }
 
         quote! {
             let status = response.status();
@@ -2232,7 +2294,36 @@ impl CodeGenerator {
             .iter()
             .any(|(code, _)| !code.starts_with('2'));
 
-        let default_arm = if has_typed_enum {
+        // A spec-declared `default` response is the catch-all arm's payload
+        // type. Without this the generated enum carries a `Default(..)` variant
+        // that nothing ever constructs, so a response matched only by `default`
+        // — a perfectly parseable typed body — still surfaces as
+        // `typed: None` and callers fall back to raw strings
+        // (openapi-generator-nu7).
+        let default_payload = op
+            .response_schemas
+            .iter()
+            .find(|(code, _)| matches!(code.as_str(), "default" | "Default"))
+            .map(|(_, schema)| self.to_rust_type_name(schema));
+
+        let default_arm = if let Some(payload_ty_name) = default_payload {
+            let payload_ty = syn::Ident::new(&payload_ty_name, proc_macro2::Span::call_site());
+            let enum_ident = self.op_error_enum_ident(op);
+            quote! {
+                _ => {
+                    match serde_json::from_str::<#payload_ty>(&body_text) {
+                        Ok(v) => {
+                            typed = Some(#enum_ident::Default(v));
+                            parse_error = None;
+                        }
+                        Err(e) => {
+                            typed = None;
+                            parse_error = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+        } else if has_typed_enum {
             quote! {
                 _ => {
                     typed = None;

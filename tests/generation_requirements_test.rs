@@ -309,6 +309,11 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "base64",
             "bytes",
             "chrono",
+            // The fixture's streaming operation declares only
+            // `text/event-stream`, so its client method now returns a
+            // `futures_util::Stream` of bytes rather than `()`
+            // (openapi-generator-x9v).
+            "futures-util",
             "reqwest",
             "reqwest-middleware",
             "serde",

@@ -344,6 +344,7 @@ fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn std::error::Error>> {
     let spec_content = load_spec(&load_source)?;
     let spec_value = parse_spec(&spec_content, &load_source)?;
     let warning = openapi_to_rust::spec_source::validate_oas_document(&spec_value)?;
+    generator_config.apply_spec_server_default(&spec_value);
     let mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
     let mut analyzer = if generator_config.schema_extensions.is_empty() {
         SchemaAnalyzer::with_type_mapper(spec_value, mapper)?
