@@ -146,6 +146,109 @@ fn schema_less_request_content_preserves_client_operation_without_a_body() {
     assert!(result.contains(". post (request_url)"), "{result}");
     assert!(!result.contains("request :"), "{result}");
     assert!(!result.contains(". body ("), "{result}");
+    assert!(
+        result.contains("reqwest :: header :: CONTENT_LENGTH , \"0\""),
+        "{result}"
+    );
+}
+
+#[test]
+fn bodyless_content_methods_emit_zero_content_length() {
+    let config = create_test_config();
+    let generator = CodeGenerator::new(config);
+
+    for method in ["POST", "PUT", "PATCH"] {
+        let operation = OperationInfo {
+            operation_id: format!("bodyless{method}"),
+            method: method.to_string(),
+            path: "/actions".to_string(),
+            summary: None,
+            description: None,
+            request_body: None,
+            response_schemas: BTreeMap::new(),
+            parameters: vec![],
+            request_body_required: false,
+            supports_streaming: false,
+            stream_parameter: None,
+            tags: Vec::new(),
+        };
+
+        let analysis = create_test_analysis_with_operations(vec![operation]);
+        let result = generator.generate_operation_methods(&analysis).to_string();
+
+        assert!(
+            result.contains("reqwest :: header :: CONTENT_LENGTH , \"0\""),
+            "expected Content-Length: 0 for {method}: {result}"
+        );
+    }
+}
+
+#[test]
+fn bodyless_methods_without_content_semantics_do_not_emit_content_length() {
+    let config = create_test_config();
+    let generator = CodeGenerator::new(config);
+
+    for method in ["GET", "HEAD", "DELETE", "OPTIONS", "TRACE"] {
+        let operation = OperationInfo {
+            operation_id: format!("bodyless{method}"),
+            method: method.to_string(),
+            path: "/actions".to_string(),
+            summary: None,
+            description: None,
+            request_body: None,
+            response_schemas: BTreeMap::new(),
+            parameters: vec![],
+            request_body_required: false,
+            supports_streaming: false,
+            stream_parameter: None,
+            tags: Vec::new(),
+        };
+
+        let analysis = create_test_analysis_with_operations(vec![operation]);
+        let result = generator.generate_operation_methods(&analysis).to_string();
+
+        assert!(
+            !result.contains("reqwest :: header :: CONTENT_LENGTH"),
+            "did not expect Content-Length for {method}: {result}"
+        );
+    }
+}
+
+#[test]
+fn optional_content_body_emits_zero_content_length_only_when_absent() {
+    let config = create_test_config();
+    let generator = CodeGenerator::new(config);
+    let operation = OperationInfo {
+        operation_id: "maybeCreateUser".to_string(),
+        method: "POST".to_string(),
+        path: "/users".to_string(),
+        summary: None,
+        description: None,
+        request_body: Some(RequestBodyContent::Json {
+            schema_name: "CreateUserRequest".to_string(),
+            media_type: "application/json".to_string(),
+            validation_schema: serde_json::Value::Null,
+        }),
+        response_schemas: BTreeMap::new(),
+        parameters: vec![],
+        request_body_required: false,
+        supports_streaming: false,
+        stream_parameter: None,
+        tags: Vec::new(),
+    };
+
+    let analysis = create_test_analysis_with_operations(vec![operation]);
+    let result = generator.generate_operation_methods(&analysis).to_string();
+
+    assert!(
+        result.contains("if let Some (request) = request"),
+        "{result}"
+    );
+    assert!(result.contains("else { req = req . header"), "{result}");
+    assert!(
+        result.contains("reqwest :: header :: CONTENT_LENGTH , \"0\""),
+        "{result}"
+    );
 }
 
 #[test]
