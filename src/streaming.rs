@@ -154,6 +154,8 @@ pub enum StreamingError {
     Authentication(String),
     /// Rate limiting error
     RateLimit(String),
+    /// An error response exceeded the configured in-memory limit
+    ResponseTooLarge { limit: usize },
     /// Generic API error
     Api(String),
 }
@@ -165,6 +167,12 @@ impl std::fmt::Display for StreamingError {
             StreamingError::Parsing(msg) => write!(f, "Parsing error: {msg}"),
             StreamingError::Authentication(msg) => write!(f, "Authentication error: {msg}"),
             StreamingError::RateLimit(msg) => write!(f, "Rate limit error: {msg}"),
+            StreamingError::ResponseTooLarge { limit } => {
+                write!(
+                    f,
+                    "Response body exceeded configured limit of {limit} bytes"
+                )
+            }
             StreamingError::Api(msg) => write!(f, "API error: {msg}"),
         }
     }

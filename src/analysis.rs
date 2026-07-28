@@ -109,12 +109,36 @@ pub struct OperationResponse {
     pub schema_name: Option<String>,
     /// Exact declared JSON-compatible media type selected for `schema_name`.
     pub media_type: Option<String>,
+    /// Preferred buffered response representation for this status. JSON keeps
+    /// its generated schema name; text and binary bodies are represented
+    /// directly by the generated client/server runtime types.
+    pub body: Option<OperationResponseBody>,
     /// Whether this response also declares `text/event-stream` content.
     pub supports_streaming: bool,
     /// Whether the Response Object declared at least one content entry.
     pub has_content: bool,
     /// Declared response media types the server generator cannot emit.
     pub unsupported_media_types: Vec<String>,
+}
+
+/// Buffered response representation selected from one OpenAPI Response Object.
+/// SSE remains orthogonal on [`OperationResponse::supports_streaming`] because
+/// a response may advertise both a buffered JSON representation and an event
+/// stream.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OperationResponseBody {
+    Json {
+        schema_name: String,
+        media_type: String,
+    },
+    Text {
+        media_type: String,
+    },
+    Binary {
+        media_type: String,
+        wildcard: bool,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -369,8 +393,15 @@ pub enum RequestBodyContent {
         validation_schema: Value,
     },
     Multipart,
-    OctetStream,
-    TextPlain,
+    OctetStream {
+        media_type: String,
+    },
+    Binary {
+        media_type: String,
+    },
+    TextPlain {
+        media_type: String,
+    },
     /// A declared request media type without a schema. Client generation
     /// preserves its historical no-body signature, while server generation
     /// rejects the operation because there is no contract to validate.
@@ -390,8 +421,9 @@ impl RequestBodyContent {
                 Some(schema_name)
             }
             Self::Multipart
-            | Self::OctetStream
-            | Self::TextPlain
+            | Self::OctetStream { .. }
+            | Self::Binary { .. }
+            | Self::TextPlain { .. }
             | Self::SchemaLess { .. }
             | Self::Unsupported { .. } => None,
         }
@@ -509,15 +541,15 @@ pub enum QuerySerialization {
 /// Item type of a typed array query parameter. The two variants need
 /// different handling in codegen: scalars are already Rust type strings
 /// (possibly paths like `rust_decimal::Decimal` from `[type_mappings]`),
-/// while enum refs are raw *schema names* that must run through
+/// while schema refs are raw *schema names* that must run through
 /// `to_rust_type_name` sanitization (cloudflare:
 /// `resource-sharing_resource_type`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum ArrayItemType {
     /// A Rust scalar type string from the TypeMapper (`String`, `i32`, …).
     Scalar(String),
-    /// The schema name of a referenced string enum (emits `Display`).
-    EnumRef(String),
+    /// The schema name of a referenced scalar alias or string enum.
+    SchemaRef(String),
 }
 
 impl Default for DependencyGraph {
@@ -4501,7 +4533,10 @@ impl SchemaAnalyzer {
 
         // Extract request body schema with content-type awareness
         if let Some(request_body) = &request_body {
-            use crate::openapi::{is_form_urlencoded_media_type, is_json_media_type};
+            use crate::openapi::{
+                is_binary_media_type, is_form_urlencoded_media_type, is_json_media_type,
+                media_type_essence,
+            };
             if let Some((content_type, maybe_schema)) = request_body.best_content() {
                 op_info.request_body = if is_json_media_type(content_type) {
                     match maybe_schema {
@@ -4545,13 +4580,28 @@ impl SchemaAnalyzer {
                             media_type: content_type.to_string(),
                         }),
                     }
-                } else {
-                    match content_type {
-                        "multipart/form-data" => Some(RequestBodyContent::Multipart),
-                        "application/octet-stream" => Some(RequestBodyContent::OctetStream),
-                        "text/plain" => Some(RequestBodyContent::TextPlain),
-                        _ => None,
+                } else if media_type_essence(content_type)
+                    .eq_ignore_ascii_case("multipart/form-data")
+                {
+                    Some(RequestBodyContent::Multipart)
+                } else if is_binary_media_type(content_type, maybe_schema) {
+                    if media_type_essence(content_type)
+                        .eq_ignore_ascii_case("application/octet-stream")
+                    {
+                        Some(RequestBodyContent::OctetStream {
+                            media_type: content_type.to_string(),
+                        })
+                    } else {
+                        Some(RequestBodyContent::Binary {
+                            media_type: content_type.to_string(),
+                        })
                     }
+                } else if media_type_essence(content_type).eq_ignore_ascii_case("text/plain") {
+                    Some(RequestBodyContent::TextPlain {
+                        media_type: content_type.to_string(),
+                    })
+                } else {
+                    None
                 };
             }
             if op_info.request_body.is_none() {
@@ -4602,6 +4652,10 @@ impl SchemaAnalyzer {
                                 .insert(status_code.clone(), schema_name.to_string());
                             response_info.schema_name = Some(schema_name.to_string());
                             response_info.media_type = Some(media_type.to_string());
+                            response_info.body = Some(OperationResponseBody::Json {
+                                schema_name: schema_name.to_string(),
+                                media_type: media_type.to_string(),
+                            });
                         }
                     } else {
                         // Inline schema - generate a synthetic type name and analyze it
@@ -4615,8 +4669,68 @@ impl SchemaAnalyzer {
                         op_info
                             .response_schemas
                             .insert(status_code.clone(), synthetic_name.clone());
+                        response_info.body = Some(OperationResponseBody::Json {
+                            schema_name: synthetic_name.clone(),
+                            media_type: media_type.to_string(),
+                        });
                         response_info.schema_name = Some(synthetic_name);
                         response_info.media_type = Some(media_type.to_string());
+                    }
+                }
+                if response_info.body.is_none()
+                    && let Some(content) = response.content.as_ref()
+                {
+                    let selected = content
+                        .iter()
+                        .find(|(media_type, media)| {
+                            matches!(
+                                crate::openapi::classify_response_media_type(
+                                    media_type,
+                                    media.schema.as_ref()
+                                ),
+                                crate::openapi::ResponseMediaKind::Text
+                            )
+                        })
+                        .or_else(|| {
+                            content.iter().find(|(media_type, media)| {
+                                matches!(
+                                    crate::openapi::classify_response_media_type(
+                                        media_type,
+                                        media.schema.as_ref()
+                                    ),
+                                    crate::openapi::ResponseMediaKind::Binary
+                                ) && !crate::openapi::is_wildcard_media_type(media_type)
+                            })
+                        })
+                        .or_else(|| {
+                            content.iter().find(|(media_type, media)| {
+                                matches!(
+                                    crate::openapi::classify_response_media_type(
+                                        media_type,
+                                        media.schema.as_ref()
+                                    ),
+                                    crate::openapi::ResponseMediaKind::Binary
+                                )
+                            })
+                        });
+                    if let Some((media_type, media)) = selected {
+                        response_info.body = match crate::openapi::classify_response_media_type(
+                            media_type,
+                            media.schema.as_ref(),
+                        ) {
+                            crate::openapi::ResponseMediaKind::Text => {
+                                Some(OperationResponseBody::Text {
+                                    media_type: media_type.clone(),
+                                })
+                            }
+                            crate::openapi::ResponseMediaKind::Binary => {
+                                Some(OperationResponseBody::Binary {
+                                    media_type: media_type.clone(),
+                                    wildcard: crate::openapi::is_wildcard_media_type(media_type),
+                                })
+                            }
+                            _ => None,
+                        };
                     }
                 }
                 response_info.unsupported_media_types = response
@@ -4625,9 +4739,16 @@ impl SchemaAnalyzer {
                     .into_iter()
                     .flat_map(|content| content.iter())
                     .filter(|(media_type, content)| {
-                        !crate::openapi::is_event_stream_media_type(media_type)
-                            && (!crate::openapi::is_json_media_type(media_type)
-                                || content.schema.is_none())
+                        match crate::openapi::classify_response_media_type(
+                            media_type,
+                            content.schema.as_ref(),
+                        ) {
+                            crate::openapi::ResponseMediaKind::Json => content.schema.is_none(),
+                            crate::openapi::ResponseMediaKind::Unsupported => true,
+                            crate::openapi::ResponseMediaKind::EventStream
+                            | crate::openapi::ResponseMediaKind::Text
+                            | crate::openapi::ResponseMediaKind::Binary => false,
+                        }
                     })
                     .map(|(media_type, _)| media_type.clone())
                     .collect();
@@ -5255,8 +5376,8 @@ impl SchemaAnalyzer {
 
     /// Rust item type for a typed array query parameter
     /// (openapi-generator-anu). Scalar items map through the TypeMapper;
-    /// $ref items resolve only when the target is a generated string enum
-    /// (those emit `Display`, so `item.to_string()` works in the client).
+    /// $ref items resolve when the target is a scalar alias or generated
+    /// string enum (both support the client/server string wire projection).
     /// Anything else — objects, nested arrays — returns None and the
     /// parameter keeps the opaque-string fallback. Inline-enum'd string
     /// items stay plain `String`: the op-scoped enum synthesis (issue #10)
@@ -5265,9 +5386,7 @@ impl SchemaAnalyzer {
         let items = schema.details().items.as_deref()?;
         if let Some(ref_str) = items.reference() {
             let name = self.extract_schema_name(ref_str)?;
-            return self
-                .referenced_schema_is_string_enum(name)
-                .then(|| ArrayItemType::EnumRef(name.to_string()));
+            return self.referenced_array_scalar_item_type(name);
         }
         let format = items.details().format.clone();
         let scalar = match items.schema_type()? {
@@ -5299,16 +5418,50 @@ impl SchemaAnalyzer {
             SchemaType::Primitive { rust_type, .. } => {
                 Some(ArrayItemType::Scalar(rust_type.clone()))
             }
-            SchemaType::Reference { target } => {
-                let resolved = self.resolve_cached_schema(target)?;
-                matches!(
-                    resolved.schema_type,
-                    SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. }
-                )
-                .then(|| ArrayItemType::EnumRef(target.clone()))
-            }
+            SchemaType::Reference { target } => self.referenced_array_scalar_item_type(target),
             _ => None,
         }
+    }
+
+    /// Resolve a referenced array item through any alias chain while
+    /// preserving the outer schema name used by the public `Vec<T>` type.
+    ///
+    /// `SchemaType::Primitive` also represents dynamic JSON/object fallbacks,
+    /// so require an actual OpenAPI scalar `type` before accepting it as a
+    /// form-style query item. Unresolved and cyclic chains are rejected by
+    /// `resolve_cached_schema`.
+    fn referenced_array_scalar_item_type(&self, name: &str) -> Option<ArrayItemType> {
+        let resolved = self.resolve_cached_schema(name)?;
+        let supported = match &resolved.schema_type {
+            SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. } => true,
+            SchemaType::Primitive { .. } => resolved
+                .original
+                .get("type")
+                .is_some_and(Self::query_scalar_type_value),
+            _ => false,
+        };
+        supported.then(|| ArrayItemType::SchemaRef(name.to_string()))
+    }
+
+    fn query_scalar_type_value(value: &Value) -> bool {
+        const SCALARS: [&str; 4] = ["string", "integer", "number", "boolean"];
+        if let Some(value) = value.as_str() {
+            return SCALARS.contains(&value);
+        }
+        let Some(values) = value.as_array() else {
+            return false;
+        };
+        if !values.iter().all(Value::is_string) {
+            return false;
+        }
+        let mut non_null = values
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|value| *value != "null");
+        let Some(scalar) = non_null.next() else {
+            return false;
+        };
+        non_null.next().is_none() && SCALARS.contains(&scalar)
     }
 
     /// True when a component (following `$ref` aliases) analyzes to an object.

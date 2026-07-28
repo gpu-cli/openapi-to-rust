@@ -232,6 +232,11 @@ download "cloudflare-dns" \
     "https://raw.githubusercontent.com/cloudflare/api-schemas/main/openapi.json" \
     "cloudflare-dns.json"
 
+# --- Community Platforms ---
+download "storyden" \
+    "https://raw.githubusercontent.com/Southclaws/storyden/main/api/openapi.yaml" \
+    "storyden.yaml"
+
 # --- Misc DevTools ---
 download "railway" \
     "https://docs.railway.com/reference/public-api-spec.json" \

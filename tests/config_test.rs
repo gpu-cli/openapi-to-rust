@@ -106,6 +106,7 @@ enable_specta = true
 [http_client]
 base_url = "https://api.example.com"
 timeout_seconds = 60
+max_response_body_bytes = 4194304
 
 [http_client.retry]
 max_retries = 5
@@ -164,6 +165,7 @@ value = "test-client"
         "https://api.example.com"
     );
     assert_eq!(http_client.timeout_seconds, Some(60));
+    assert_eq!(http_client.max_response_body_bytes, Some(4_194_304));
 
     let retry = http_client.retry.as_ref().unwrap();
     assert_eq!(retry.max_retries, 5);

@@ -430,7 +430,85 @@ fn unescape_pointer_token(value: &str) -> String {
     value.replace("~1", "/").replace("~0", "~")
 }
 
-pub(crate) fn emit_validation_module(bundle: &ValidationBundle, max_errors: usize) -> TokenStream {
+fn emit_transport_decoders(has_binary_body: bool, has_text_body: bool) -> TokenStream {
+    let binary_decoder = has_binary_body.then(|| {
+        quote! {
+            pub(crate) async fn decode_binary_body(
+                request: ::axum::extract::Request,
+                expected_media_type: &str,
+                required: bool,
+                max_body_bytes: usize,
+            ) -> ::std::result::Result<
+                ::std::option::Option<::bytes::Bytes>,
+                RequestValidationRejection,
+            > {
+                let (parts, body) = request.into_parts();
+                let content_type = parts.headers
+                    .get(::axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok());
+                if !content_type.is_some_and(|value| media_type_is(value, expected_media_type)) {
+                    if content_type.is_none() && !required {
+                        let bytes = read_body(body, max_body_bytes).await?;
+                        if bytes.is_empty() {
+                            return Ok(None);
+                        }
+                    }
+                    return Err(unsupported_media_type());
+                }
+                let bytes = read_body(body, max_body_bytes).await?;
+                if bytes.is_empty() && !required {
+                    Ok(None)
+                } else {
+                    Ok(Some(bytes))
+                }
+            }
+        }
+    });
+    let text_decoder = has_text_body.then(|| {
+        quote! {
+            pub(crate) async fn decode_text_body(
+                request: ::axum::extract::Request,
+                expected_media_type: &str,
+                required: bool,
+                max_body_bytes: usize,
+            ) -> ::std::result::Result<
+                ::std::option::Option<String>,
+                RequestValidationRejection,
+            > {
+                let (parts, body) = request.into_parts();
+                let content_type = parts.headers
+                    .get(::axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok());
+                if !content_type.is_some_and(|value| media_type_is(value, expected_media_type)) {
+                    if content_type.is_none() && !required {
+                        let bytes = read_body(body, max_body_bytes).await?;
+                        if bytes.is_empty() {
+                            return Ok(None);
+                        }
+                    }
+                    return Err(unsupported_media_type());
+                }
+                let bytes = read_body(body, max_body_bytes).await?;
+                if bytes.is_empty() && !required {
+                    return Ok(None);
+                }
+                let text = String::from_utf8(bytes.to_vec()).map_err(|_| malformed_request())?;
+                Ok(Some(text))
+            }
+        }
+    });
+    quote! {
+        #binary_decoder
+        #text_decoder
+    }
+}
+
+pub(crate) fn emit_validation_module(
+    bundle: &ValidationBundle,
+    max_errors: usize,
+    has_binary_body: bool,
+    has_text_body: bool,
+) -> TokenStream {
     let document = &bundle.document_json;
     let draft = match bundle.draft {
         ValidationDraft::Draft4 => quote! { ::jsonschema::Draft::Draft4 },
@@ -441,6 +519,7 @@ pub(crate) fn emit_validation_module(bundle: &ValidationBundle, max_errors: usiz
         let pointer = &target.pointer;
         quote! { pub(crate) const #ident: &str = #pointer; }
     });
+    let transport_decoders = emit_transport_decoders(has_binary_body, has_text_body);
     let form_decoder = bundle.has_form_body.then(|| {
         quote! {
             pub(crate) async fn decode_form_body<T>(
@@ -580,6 +659,8 @@ pub(crate) fn emit_validation_module(bundle: &ValidationBundle, max_errors: usiz
 
         #form_decoder
 
+        #transport_decoders
+
         pub(crate) fn decode_parameter<T>(
             raw: &str,
             target: &str,
@@ -680,6 +761,12 @@ pub(crate) fn emit_validation_module(bundle: &ValidationBundle, max_errors: usiz
             };
             content_type.type_() == expected.type_()
                 && content_type.subtype() == expected.subtype()
+                && content_type.suffix() == expected.suffix()
+                && expected.params().all(|(name, value)| {
+                    content_type
+                        .get_param(name)
+                        .is_some_and(|actual| actual == value)
+                })
         }
 
         pub(crate) fn validate(
@@ -876,6 +963,110 @@ pub(crate) fn emit_validation_module(bundle: &ValidationBundle, max_errors: usiz
 
         fn escape_pointer_token(value: &str) -> String {
             value.replace('~', "~0").replace('/', "~1")
+        }
+    }
+}
+
+/// Emit only bounded transport decoding when JSON-Schema validation is
+/// disabled. Media-type and size enforcement are protocol safety properties,
+/// so raw request bodies retain them independently of schema validation.
+pub(crate) fn emit_transport_validation_module(
+    has_binary_body: bool,
+    has_text_body: bool,
+) -> TokenStream {
+    let transport_decoders = emit_transport_decoders(has_binary_body, has_text_body);
+    quote! {
+        //! Bounded raw request-body decoders and normalized public rejections.
+        #![allow(dead_code)]
+
+        use super::errors::{ProblemDetails, RequestValidationRejection};
+
+        #transport_decoders
+
+        async fn read_body(
+            body: ::axum::body::Body,
+            max_body_bytes: usize,
+        ) -> ::std::result::Result<::axum::body::Bytes, RequestValidationRejection> {
+            ::axum::body::to_bytes(body, max_body_bytes)
+                .await
+                .map_err(|error| {
+                    let source = ::std::error::Error::source(&error);
+                    if source.is_some_and(|source| {
+                        source.is::<::http_body_util::LengthLimitError>()
+                    }) {
+                        request_body_too_large()
+                    } else {
+                        malformed_request()
+                    }
+                })
+        }
+
+        fn media_type_is(content_type: &str, expected: &str) -> bool {
+            let Ok(content_type) = content_type.parse::<::mime::Mime>() else {
+                return false;
+            };
+            let Ok(expected) = expected.parse::<::mime::Mime>() else {
+                return false;
+            };
+            content_type.type_() == expected.type_()
+                && content_type.subtype() == expected.subtype()
+                && content_type.suffix() == expected.suffix()
+                && expected.params().all(|(name, value)| {
+                    content_type
+                        .get_param(name)
+                        .is_some_and(|actual| actual == value)
+                })
+        }
+
+        pub(crate) fn malformed_request() -> RequestValidationRejection {
+            public_problem(
+                400,
+                "https://openapi-to-rust.dev/problems/malformed-request",
+                "Malformed request",
+                "malformed_request",
+            )
+        }
+
+        pub(crate) fn request_body_too_large() -> RequestValidationRejection {
+            public_problem(
+                413,
+                "https://openapi-to-rust.dev/problems/request-body-too-large",
+                "Request body too large",
+                "request_body_too_large",
+            )
+        }
+
+        pub(crate) fn unsupported_media_type() -> RequestValidationRejection {
+            public_problem(
+                415,
+                "https://openapi-to-rust.dev/problems/unsupported-media-type",
+                "Unsupported media type",
+                "unsupported_media_type",
+            )
+        }
+
+        pub(crate) fn generated_contract_error() -> RequestValidationRejection {
+            public_problem(
+                500,
+                "https://openapi-to-rust.dev/problems/generated-contract-error",
+                "Internal server error",
+                "generated_contract_error",
+            )
+        }
+
+        fn public_problem(
+            status: u16,
+            problem_type: &str,
+            title: &str,
+            code: &str,
+        ) -> RequestValidationRejection {
+            RequestValidationRejection(ProblemDetails {
+                r#type: problem_type.to_string(),
+                title: title.to_string(),
+                status,
+                code: code.to_string(),
+                errors: Vec::new(),
+            })
         }
     }
 }

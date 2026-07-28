@@ -8,8 +8,8 @@
 //! Router wiring, extractors, and SSE response variants are P5.
 
 use crate::analysis::{
-    ObjectAdditionalProperties, OperationInfo, OperationResponse, ParameterInfo,
-    QuerySerialization, RequestBodyContent, SchemaAnalysis, SchemaType,
+    ObjectAdditionalProperties, OperationInfo, OperationResponse, OperationResponseBody,
+    ParameterInfo, QuerySerialization, RequestBodyContent, SchemaAnalysis, SchemaType,
 };
 use crate::config::ServerSection;
 use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig};
@@ -74,10 +74,10 @@ pub fn reachable_schemas_with_roots(
             }
             if let Some(
                 QuerySerialization::FormExplodedArray {
-                    item_type: crate::analysis::ArrayItemType::EnumRef(name),
+                    item_type: crate::analysis::ArrayItemType::SchemaRef(name),
                 }
                 | QuerySerialization::FormArray {
-                    item_type: crate::analysis::ArrayItemType::EnumRef(name),
+                    item_type: crate::analysis::ArrayItemType::SchemaRef(name),
                 },
             ) = &p.query_serialization
             {
@@ -356,6 +356,19 @@ impl<'a> ServerCodegen<'a> {
 
         // Group by primary tag (first tag wins; untagged → "Server").
         let groups = group_by_tag(&ops);
+        let response_enum_names = self.allocate_response_enum_names(&ops);
+        let has_binary_body = ops.iter().any(|operation| {
+            matches!(
+                operation.request_body,
+                Some(RequestBodyContent::OctetStream { .. } | RequestBodyContent::Binary { .. })
+            )
+        });
+        let has_text_body = ops.iter().any(|operation| {
+            matches!(
+                operation.request_body,
+                Some(RequestBodyContent::TextPlain { .. })
+            )
+        });
 
         let validation_bundle = if self.server.validation.enabled {
             Some(
@@ -372,10 +385,12 @@ impl<'a> ServerCodegen<'a> {
             None
         };
 
-        let api_rs = self.emit_api(&groups);
-        let errors_rs = self.emit_errors(&ops, validation_bundle.is_some());
+        let transport_validation = has_binary_body || has_text_body;
+        let validation_module_enabled = validation_bundle.is_some() || transport_validation;
+        let api_rs = self.emit_api(&groups, &response_enum_names);
+        let errors_rs = self.emit_errors(&ops, validation_module_enabled, &response_enum_names);
         let router_rs = self.emit_router(&groups, validation_bundle.as_ref())?;
-        let mod_rs = self.emit_mod(validation_bundle.is_some());
+        let mod_rs = self.emit_mod(validation_module_enabled);
 
         let mut files = vec![
             GeneratedFile {
@@ -401,6 +416,16 @@ impl<'a> ServerCodegen<'a> {
                 content: format_or_raw(super::validation::emit_validation_module(
                     bundle,
                     self.server.validation.max_errors,
+                    has_binary_body,
+                    has_text_body,
+                )),
+            });
+        } else if transport_validation {
+            files.push(GeneratedFile {
+                path: PathBuf::from("server").join("validation.rs"),
+                content: format_or_raw(super::validation::emit_transport_validation_module(
+                    has_binary_body,
+                    has_text_body,
                 )),
             });
         }
@@ -551,20 +576,6 @@ impl<'a> ServerCodegen<'a> {
                         reason: "typed multipart server extraction is not implemented".to_string(),
                     });
                 }
-                Some(RequestBodyContent::OctetStream) => {
-                    return Err(ServerCodegenError::UnsupportedRequestBody {
-                        operation_id: operation.operation_id.clone(),
-                        media_type: "application/octet-stream".to_string(),
-                        reason: "binary server extraction is not implemented".to_string(),
-                    });
-                }
-                Some(RequestBodyContent::TextPlain) => {
-                    return Err(ServerCodegenError::UnsupportedRequestBody {
-                        operation_id: operation.operation_id.clone(),
-                        media_type: "text/plain".to_string(),
-                        reason: "text server extraction is not implemented".to_string(),
-                    });
-                }
                 Some(RequestBodyContent::SchemaLess { media_type }) => {
                     return Err(ServerCodegenError::UnsupportedRequestBody {
                         operation_id: operation.operation_id.clone(),
@@ -598,10 +609,11 @@ impl<'a> ServerCodegen<'a> {
             {
                 for (status, response) in responses {
                     // A Response Object may advertise multiple representations.
-                    // Generation is viable whenever at least one JSON or SSE
+                    // Generation is viable whenever at least one buffered or SSE
                     // representation can be emitted; unsupported alternatives
                     // do not invalidate that supported path.
                     if response.has_content
+                        && response.body.is_none()
                         && response.schema_name.is_none()
                         && !response.supports_streaming
                     {
@@ -624,6 +636,53 @@ impl<'a> ServerCodegen<'a> {
     fn parameter_ident(&self, parameter: &ParameterInfo) -> syn::Ident {
         let generator = CodeGenerator::new(self.config.clone());
         CodeGenerator::to_field_ident(&generator.param_ident_str(parameter))
+    }
+
+    /// Allocate public response-enum identifiers without colliding with the
+    /// retained models that the generated server modules glob-import.
+    fn allocate_response_enum_names(&self, ops: &[&OperationInfo]) -> BTreeMap<String, syn::Ident> {
+        let generator = CodeGenerator::new(self.config.clone());
+        let mut used_names: std::collections::BTreeSet<String> = self
+            .analysis
+            .schemas
+            .keys()
+            .map(|name| generator.to_rust_type_name(name))
+            .collect();
+
+        // Parameter enums are emitted directly into api.rs rather than into
+        // analysis.schemas, but share that module's type namespace with the
+        // imported response enums.
+        used_names.extend(
+            ops.iter()
+                .flat_map(|operation| operation.parameters.iter())
+                .filter(|parameter| parameter.enum_values.is_some())
+                .map(|parameter| parameter.rust_type.clone()),
+        );
+
+        // Selector ordering is user-controlled. Allocate in operation-id order
+        // so reversing selectors cannot change generated public identifiers.
+        let mut sorted_ops = ops.to_vec();
+        sorted_ops.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+
+        let mut names = BTreeMap::new();
+        for operation in sorted_ops {
+            let operation_name = operation.operation_id.to_pascal_case();
+            let preferred = format!("{operation_name}Response");
+            let chosen = if used_names.insert(preferred.clone()) {
+                preferred
+            } else {
+                let fallback = format!("{operation_name}ServerResponse");
+                let mut candidate = fallback.clone();
+                let mut suffix = 2;
+                while !used_names.insert(candidate.clone()) {
+                    candidate = format!("{fallback}{suffix}");
+                    suffix += 1;
+                }
+                candidate
+            };
+            names.insert(operation.operation_id.clone(), format_ident!("{chosen}"));
+        }
+        names
     }
 
     fn validation_target(
@@ -1498,13 +1557,52 @@ impl<'a> ServerCodegen<'a> {
         let body_ty_opt = body_type(op);
         if let Some(body_ty) = &body_ty_opt {
             let body_ty_tokens = parse_type(body_ty);
+            let transport_body = match &op.request_body {
+                Some(RequestBodyContent::OctetStream { media_type }) => {
+                    Some((format_ident!("decode_binary_body"), media_type.clone()))
+                }
+                Some(RequestBodyContent::Binary { media_type }) => {
+                    Some((format_ident!("decode_binary_body"), media_type.clone()))
+                }
+                Some(RequestBodyContent::TextPlain { media_type }) => {
+                    Some((format_ident!("decode_text_body"), media_type.clone()))
+                }
+                _ => None,
+            };
             let validated_json = matches!(&op.request_body, Some(RequestBodyContent::Json { .. }))
                 && validation_bundle.is_some();
             let validated_form = matches!(
                 &op.request_body,
                 Some(RequestBodyContent::FormUrlEncoded { .. })
             ) && validation_bundle.is_some();
-            if validated_json {
+            if let Some((decoder, media_type)) = transport_body {
+                extractors.push(quote! { __request: ::axum::extract::Request });
+                let required = op.request_body_required;
+                let max_body_bytes = self.server.validation.max_body_bytes;
+                body_decode = quote! {
+                    let body: ::std::option::Option<#body_ty_tokens> =
+                        match super::validation::#decoder(
+                            __request,
+                            #media_type,
+                            #required,
+                            #max_body_bytes,
+                        ).await {
+                            Ok(body) => body,
+                            Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                        };
+                };
+                if required {
+                    body_decode.extend(quote! {
+                        let body = match body {
+                            Some(body) => body,
+                            None => return ::axum::response::IntoResponse::into_response(
+                                super::validation::generated_contract_error()
+                            ),
+                        };
+                    });
+                }
+                call_args.push(quote! { body });
+            } else if validated_json {
                 extractors.push(quote! { __request: ::axum::extract::Request });
                 let Some(RequestBodyContent::Json { media_type, .. }) = &op.request_body else {
                     return Err(ServerCodegenError::Internal(
@@ -1612,7 +1710,6 @@ impl<'a> ServerCodegen<'a> {
             }
         }
 
-        let _ = format_ident!("{}Response", op.operation_id.to_pascal_case());
         // Keep referencing trait_ident so the where-bound name is
         // visible to downstream readers — clippy would otherwise flag
         // it as unused in some configurations.
@@ -1656,11 +1753,15 @@ impl<'a> ServerCodegen<'a> {
         })
     }
 
-    fn emit_api(&self, groups: &BTreeMap<String, Vec<&OperationInfo>>) -> TokenStream {
+    fn emit_api(
+        &self,
+        groups: &BTreeMap<String, Vec<&OperationInfo>>,
+        response_enum_names: &BTreeMap<String, syn::Ident>,
+    ) -> TokenStream {
         let provenance_attribute = self.provenance_attribute();
         let traits: Vec<TokenStream> = groups
             .iter()
-            .map(|(tag, ops)| self.emit_trait(tag, ops))
+            .map(|(tag, ops)| self.emit_trait(tag, ops, response_enum_names))
             .collect();
 
         // Inline string enums declared on parameters get synthetic
@@ -1702,9 +1803,17 @@ impl<'a> ServerCodegen<'a> {
         }
     }
 
-    fn emit_trait(&self, tag: &str, ops: &[&OperationInfo]) -> TokenStream {
+    fn emit_trait(
+        &self,
+        tag: &str,
+        ops: &[&OperationInfo],
+        response_enum_names: &BTreeMap<String, syn::Ident>,
+    ) -> TokenStream {
         let trait_ident = trait_ident_for_tag(tag);
-        let methods: Vec<TokenStream> = ops.iter().map(|op| self.emit_method_sig(op)).collect();
+        let methods: Vec<TokenStream> = ops
+            .iter()
+            .map(|op| self.emit_method_sig(op, response_enum_names))
+            .collect();
         let doc = format!(" Operations under the `{tag}` tag.");
         quote! {
             #[doc = #doc]
@@ -1715,9 +1824,13 @@ impl<'a> ServerCodegen<'a> {
         }
     }
 
-    fn emit_method_sig(&self, op: &OperationInfo) -> TokenStream {
+    fn emit_method_sig(
+        &self,
+        op: &OperationInfo,
+        response_enum_names: &BTreeMap<String, syn::Ident>,
+    ) -> TokenStream {
         let name = format_ident!("{}", op.operation_id.to_snake_case());
-        let response_ty = format_ident!("{}Response", op.operation_id.to_pascal_case());
+        let response_ty = &response_enum_names[&op.operation_id];
 
         // Order: path → query → header → body. Required params keep
         // their declared rust_type; optional params wrap in Option<…>.
@@ -2037,10 +2150,18 @@ impl<'a> ServerCodegen<'a> {
         })
     }
 
-    fn emit_errors(&self, ops: &[&OperationInfo], validation_enabled: bool) -> TokenStream {
+    fn emit_errors(
+        &self,
+        ops: &[&OperationInfo],
+        validation_enabled: bool,
+        response_enum_names: &BTreeMap<String, syn::Ident>,
+    ) -> TokenStream {
         let provenance_attribute = self.provenance_attribute();
         let any_streaming = ops.iter().any(|op| op.supports_streaming);
-        let enums: Vec<TokenStream> = ops.iter().map(|op| self.emit_response_enum(op)).collect();
+        let enums: Vec<TokenStream> = ops
+            .iter()
+            .map(|op| self.emit_response_enum(op, response_enum_names))
+            .collect();
         let problem_types = validation_enabled.then(|| {
             quote! {
                 /// RFC 9457 Problem Details profile used for rejected requests.
@@ -2158,8 +2279,12 @@ impl<'a> ServerCodegen<'a> {
         }
     }
 
-    fn emit_response_enum(&self, op: &OperationInfo) -> TokenStream {
-        let enum_ident = format_ident!("{}Response", op.operation_id.to_pascal_case());
+    fn emit_response_enum(
+        &self,
+        op: &OperationInfo,
+        response_enum_names: &BTreeMap<String, syn::Ident>,
+    ) -> TokenStream {
+        let enum_ident = &response_enum_names[&op.operation_id];
         let mut variants: Vec<TokenStream> = Vec::new();
         let mut arms: Vec<TokenStream> = Vec::new();
 
@@ -2185,6 +2310,10 @@ impl<'a> ServerCodegen<'a> {
                         OperationResponse {
                             schema_name: Some(schema_name.clone()),
                             media_type: Some("application/json".to_string()),
+                            body: Some(OperationResponseBody::Json {
+                                schema_name: schema_name.clone(),
+                                media_type: "application/json".to_string(),
+                            }),
                             supports_streaming: false,
                             has_content: true,
                             unsupported_media_types: Vec::new(),
@@ -2202,17 +2331,84 @@ impl<'a> ServerCodegen<'a> {
             let status_expr = status_token(status);
             let status_guard = runtime_status_guard(status, quote! { status });
 
-            if let Some(schema_name) = &response.schema_name {
-                let body_ty = parse_type(schema_name);
-                let media_type = response.media_type.as_deref().unwrap_or("application/json");
-                if runtime_status {
+            let buffered_body = response.body.clone().or_else(|| {
+                response
+                    .schema_name
+                    .as_ref()
+                    .map(|schema_name| OperationResponseBody::Json {
+                        schema_name: schema_name.clone(),
+                        media_type: response
+                            .media_type
+                            .clone()
+                            .unwrap_or_else(|| "application/json".to_string()),
+                    })
+            });
+
+            if let Some(body) = buffered_body {
+                let (body_ty, response_body, media_type, wildcard) = match body {
+                    OperationResponseBody::Json {
+                        schema_name,
+                        media_type,
+                    } => (
+                        parse_type(&schema_name),
+                        quote! { Json(body) },
+                        media_type,
+                        false,
+                    ),
+                    OperationResponseBody::Text { media_type } => {
+                        (quote! { String }, quote! { body }, media_type, false)
+                    }
+                    OperationResponseBody::Binary {
+                        media_type,
+                        wildcard,
+                    } => (
+                        quote! { bytes::Bytes },
+                        quote! { body },
+                        media_type,
+                        wildcard,
+                    ),
+                };
+                if wildcard {
+                    if runtime_status {
+                        variants.push(quote! {
+                            #variant(StatusCode, ::axum::http::HeaderValue, #body_ty)
+                        });
+                        arms.push(quote! {
+                            Self::#variant(status, content_type, body) => {
+                                if !(#status_guard) {
+                                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                                }
+                                let mut response = (status, #response_body).into_response();
+                                response.headers_mut().insert(
+                                    ::axum::http::header::CONTENT_TYPE,
+                                    content_type,
+                                );
+                                response
+                            }
+                        });
+                    } else {
+                        variants.push(quote! {
+                            #variant(::axum::http::HeaderValue, #body_ty)
+                        });
+                        arms.push(quote! {
+                            Self::#variant(content_type, body) => {
+                                let mut response = (#status_expr, #response_body).into_response();
+                                response.headers_mut().insert(
+                                    ::axum::http::header::CONTENT_TYPE,
+                                    content_type,
+                                );
+                                response
+                            }
+                        });
+                    }
+                } else if runtime_status {
                     variants.push(quote! { #variant(StatusCode, #body_ty) });
                     arms.push(quote! {
                         Self::#variant(status, body) => {
                             if !(#status_guard) {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             }
-                            let mut response = (status, Json(body)).into_response();
+                            let mut response = (status, #response_body).into_response();
                             let Ok(content_type) = ::axum::http::HeaderValue::from_bytes(#media_type.as_bytes()) else {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             };
@@ -2227,7 +2423,7 @@ impl<'a> ServerCodegen<'a> {
                     variants.push(quote! { #variant(#body_ty) });
                     arms.push(quote! {
                         Self::#variant(body) => {
-                            let mut response = (#status_expr, Json(body)).into_response();
+                            let mut response = (#status_expr, #response_body).into_response();
                             let Ok(content_type) = ::axum::http::HeaderValue::from_bytes(#media_type.as_bytes()) else {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             };
@@ -2479,6 +2675,10 @@ fn body_type(op: &OperationInfo) -> Option<String> {
     match &op.request_body {
         Some(RequestBodyContent::Json { schema_name, .. })
         | Some(RequestBodyContent::FormUrlEncoded { schema_name, .. }) => Some(schema_name.clone()),
+        Some(RequestBodyContent::OctetStream { .. } | RequestBodyContent::Binary { .. }) => {
+            Some("bytes::Bytes".to_string())
+        }
+        Some(RequestBodyContent::TextPlain { .. }) => Some("String".to_string()),
         _ => None,
     }
 }

@@ -178,6 +178,10 @@ pub enum HttpError {
     #[error("Request timeout")]
     Timeout,
 
+    /// A response body exceeded the configured in-memory limit
+    #[error("Response body exceeded configured limit of {limit} bytes")]
+    ResponseTooLarge { limit: usize },
+
     /// Invalid configuration
     #[error("Configuration error: {0}")]
     Config(String),
@@ -238,9 +242,9 @@ pub type HttpResult<T> = Result<T, HttpError>;
 ///
 /// `ApiError<E>` is returned whenever the server actually responded — whether the
 /// status was non-2xx, or the 2xx body failed to deserialize into the expected
-/// type. `status`, `headers`, and `body` are always populated so callers can
-/// inspect what the server actually sent without having to hack the generated
-/// client. `typed` is `Some(_)` when the raw body was successfully parsed into a
+/// type. `status`, `headers`, and `raw_body` preserve what the server actually
+/// sent, while `body` is a convenient lossy UTF-8 rendering. `typed` is `Some(_)`
+/// when the response body was successfully parsed into a
 /// per-operation error type; `parse_error` records why parsing failed when not.
 /// Formatting the error limits only the displayed body preview; the public
 /// fields retain the complete response and parsing details.
@@ -249,6 +253,8 @@ pub struct ApiError<E> {
     pub status: u16,
     pub headers: reqwest::header::HeaderMap,
     pub body: String,
+    /// Exact response bytes before lossy UTF-8 conversion.
+    pub raw_body: Vec<u8>,
     pub typed: Option<E>,
     pub parse_error: Option<String>,
 }

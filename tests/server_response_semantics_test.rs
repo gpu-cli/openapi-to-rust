@@ -40,6 +40,33 @@ fn response_spec() -> serde_json::Value {
                         "text/event-streaming": {}
                     }}
                 }
+            }},
+            "/text": { "get": {
+                "operationId": "getText",
+                "tags": ["Things"],
+                "responses": {
+                    "200": { "description": "text", "content": {
+                        "text/plain; charset=utf-8": { "schema": { "type": "string" } }
+                    }}
+                }
+            }},
+            "/binary": { "get": {
+                "operationId": "getBinary",
+                "tags": ["Things"],
+                "responses": {
+                    "200": { "description": "binary", "content": {
+                        "image/png": { "schema": { "type": "string", "format": "binary" } }
+                    }}
+                }
+            }},
+            "/wildcard": { "get": {
+                "operationId": "getWildcard",
+                "tags": ["Things"],
+                "responses": {
+                    "2XX": { "description": "binary", "content": {
+                        "*/*": { "schema": { "type": "string", "format": "binary" } }
+                    }}
+                }
             }}
         },
         "components": {
@@ -75,6 +102,21 @@ fn analysis_retains_resolved_bodyless_media_and_exact_sse_responses() {
     assert!(create["204"].schema_name.is_none());
     assert!(analysis.operation_responses["streamThing"]["202"].supports_streaming);
     assert!(!analysis.operation_responses["notStream"]["200"].supports_streaming);
+    assert!(matches!(
+        analysis.operation_responses["getText"]["200"].body,
+        Some(openapi_to_rust::analysis::OperationResponseBody::Text { .. })
+    ));
+    assert!(matches!(
+        analysis.operation_responses["getBinary"]["200"].body,
+        Some(openapi_to_rust::analysis::OperationResponseBody::Binary {
+            wildcard: false,
+            ..
+        })
+    ));
+    assert!(matches!(
+        analysis.operation_responses["getWildcard"]["2XX"].body,
+        Some(openapi_to_rust::analysis::OperationResponseBody::Binary { wildcard: true, .. })
+    ));
 }
 
 #[test]
@@ -193,7 +235,6 @@ fn cyclic_response_reference_chain_is_rejected() {
 
 #[test]
 fn generated_responses_preserve_status_ranges_media_and_sse_status() {
-    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::TempDir::new().unwrap();
     let output_dir = temp.path().join("src/generated");
     let mut analysis = SchemaAnalyzer::new(response_spec())
@@ -202,7 +243,13 @@ fn generated_responses_preserve_status_ranges_media_and_sse_status() {
         .unwrap();
     let server = ServerSection {
         framework: "axum".into(),
-        operations: vec!["createThing".into(), "streamThing".into()],
+        operations: vec![
+            "createThing".into(),
+            "streamThing".into(),
+            "getText".into(),
+            "getBinary".into(),
+            "getWildcard".into(),
+        ],
         prune_models: true,
         validation: ServerValidationSection {
             enabled: false,
@@ -261,6 +308,31 @@ mod tests {
         assert_eq!(default.status(), StatusCode::IM_A_TEAPOT);
         assert_eq!(default.headers()[CONTENT_TYPE], "application/problem+json");
 
+        let text = GetTextResponse::Ok("hello".to_string()).into_response();
+        assert_eq!(text.status(), StatusCode::OK);
+        assert_eq!(text.headers()[CONTENT_TYPE], "text/plain; charset=utf-8");
+
+        let binary = GetBinaryResponse::Ok(bytes::Bytes::from_static(&[0, 159, 146, 150]))
+            .into_response();
+        assert_eq!(binary.status(), StatusCode::OK);
+        assert_eq!(binary.headers()[CONTENT_TYPE], "image/png");
+
+        let wildcard = GetWildcardResponse::Success(
+            StatusCode::MULTI_STATUS,
+            axum::http::HeaderValue::from_static("image/webp"),
+            bytes::Bytes::from_static(&[0, 255]),
+        ).into_response();
+        assert_eq!(wildcard.status(), StatusCode::MULTI_STATUS);
+        assert_eq!(wildcard.headers()[CONTENT_TYPE], "image/webp");
+        assert_eq!(
+            GetWildcardResponse::Success(
+                StatusCode::BAD_REQUEST,
+                axum::http::HeaderValue::from_static("image/webp"),
+                bytes::Bytes::new(),
+            ).into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+
         let stream = futures_util::stream::empty::<
             Result<axum::response::sse::Event, std::convert::Infallible>
         >();
@@ -282,6 +354,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
+bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -295,10 +368,15 @@ serde_urlencoded = "0.7"
     let output = Command::new("cargo")
         .arg("test")
         .arg("--quiet")
+        .arg("--offline")
         .current_dir(temp.path())
         .env(
+            "CARGO_BUILD_BUILD_DIR",
+            "/private/tmp/non-json-media-target/server-runtime-build",
+        )
+        .env(
             "CARGO_TARGET_DIR",
-            manifest_dir.join("target/server-response-semantics-smoke"),
+            "/private/tmp/non-json-media-target/server-runtime-target",
         )
         .output()
         .unwrap();
@@ -311,7 +389,7 @@ serde_urlencoded = "0.7"
 }
 
 #[test]
-fn unsupported_response_content_fails_instead_of_becoming_a_unit_variant() {
+fn text_response_content_generates_a_string_variant() {
     let spec = json!({
         "openapi": "3.1.0",
         "info": { "title": "unsupported response", "version": "1.0.0" },
@@ -334,12 +412,50 @@ fn unsupported_response_content_fails_instead_of_becoming_a_unit_variant() {
         server: Some(server.clone()),
         ..Default::default()
     };
+    let files = ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .expect("text/plain is a supported response body");
+    let errors = files
+        .iter()
+        .find(|file| file.path.ends_with("errors.rs"))
+        .expect("generated errors.rs");
+    assert!(errors.content.contains("Ok(String)"), "{}", errors.content);
+    assert!(errors.content.contains("text/plain"), "{}", errors.content);
+}
+
+#[test]
+fn text_wildcard_response_is_rejected_instead_of_emitting_wildcard_content_type() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "wildcard text response", "version": "1.0.0" },
+        "paths": { "/report": { "get": {
+            "operationId": "getReport",
+            "responses": { "200": { "description": "report", "content": {
+                "text/*": { "schema": { "type": "string" } }
+            }}}
+        }}}
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let response = &analysis.operation_responses["getReport"]["200"];
+    assert!(response.body.is_none());
+    assert_eq!(response.unsupported_media_types, ["text/*"]);
+
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["getReport".into()],
+        prune_models: false,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        enable_async_client: false,
+        server: Some(server.clone()),
+        ..Default::default()
+    };
     let error = ServerCodegen::new(&config, &analysis, &server)
         .generate()
-        .unwrap_err()
+        .expect_err("text wildcard must not become a literal Content-Type")
         .to_string();
-    assert!(error.contains("getReport"), "{error}");
-    assert!(error.contains("text/plain"), "{error}");
+    assert!(error.contains("text/*"), "{error}");
 }
 
 #[test]
@@ -356,6 +472,12 @@ fn supported_json_representation_allows_unsupported_alternatives() {
         }}}
     });
     let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let response = &analysis.operation_responses["getReport"]["200"];
+    assert!(matches!(
+        response.body,
+        Some(openapi_to_rust::analysis::OperationResponseBody::Json { .. })
+    ));
+    assert_eq!(response.unsupported_media_types, ["application/xml"]);
     let server = ServerSection {
         framework: "axum".into(),
         operations: vec!["getReport".into()],
@@ -370,4 +492,27 @@ fn supported_json_representation_allows_unsupported_alternatives() {
     ServerCodegen::new(&config, &analysis, &server)
         .generate()
         .expect("the supported JSON representation should be generated");
+}
+
+#[test]
+fn schema_bearing_vendor_json_wins_over_schema_less_canonical_json() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "JSON fallback", "version": "1.0.0" },
+        "paths": { "/report": { "get": {
+            "operationId": "getReport",
+            "responses": { "200": { "description": "report", "content": {
+                "application/json": {},
+                "application/vnd.example+json": { "schema": { "type": "string" } }
+            }} }
+        }} }
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let response = &analysis.operation_responses["getReport"]["200"];
+    assert!(matches!(
+        &response.body,
+        Some(openapi_to_rust::analysis::OperationResponseBody::Json { media_type, .. })
+            if media_type == "application/vnd.example+json"
+    ));
+    assert_eq!(response.unsupported_media_types, ["application/json"]);
 }

@@ -330,6 +330,77 @@ fn array_of_ref_string_enum_items_uses_enum_type() {
 }
 
 #[test]
+fn inline_array_of_scalar_alias_items_preserves_alias_and_pruning_root() {
+    let mut spec = spec_with_filter_param(json!({
+        "name": "tags",
+        "in": "query",
+        "schema": {
+            "type": "array",
+            "items": {"$ref": "#/components/schemas/Identifier"}
+        }
+    }));
+    spec["components"] = json!({
+        "schemas": {
+            "Identifier": {"type": "string", "format": "xid"},
+            "Unused": {"type": "string"}
+        }
+    });
+
+    let code = generate_methods(spec.clone());
+    assert!(
+        code.contains("tags : Option < Vec < Identifier > >"),
+        "direct scalar alias items should preserve their named type; got:\n{code}"
+    );
+    assert!(
+        code.contains("for item in v")
+            && code.contains("\"tags\" . to_string () , item . to_string ()"),
+        "exploded scalar aliases must still emit one pair per item; got:\n{code}"
+    );
+
+    let mut analyzer = SchemaAnalyzer::new(spec).expect("analyzer construction");
+    let analysis = analyzer.analyze().expect("analysis");
+    let operation = analysis.operations.get("findWidgets").expect("operation");
+    let reachable = openapi_to_rust::server::codegen::reachable_schemas(&analysis, &[operation]);
+    assert!(reachable.contains("Identifier"));
+    assert!(!reachable.contains("Unused"));
+}
+
+#[test]
+fn reusable_array_of_transitive_scalar_alias_items_preserves_outer_alias() {
+    let mut spec = spec_with_filter_param(json!({
+        "name": "scores",
+        "in": "query",
+        "explode": false,
+        "schema": {"$ref": "#/components/schemas/ScoreListAlias"}
+    }));
+    spec["components"] = json!({
+        "schemas": {
+            "ScoreListAlias": {"$ref": "#/components/schemas/ScoreList"},
+            "ScoreList": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/PublicScore"}
+            },
+            "PublicScore": {"$ref": "#/components/schemas/Score"},
+            "Score": {"type": "integer", "format": "int32"}
+        }
+    });
+
+    let code = generate_methods(spec);
+    assert!(
+        code.contains("scores : Option < Vec < PublicScore > >"),
+        "transitive scalar aliases should retain the array item's outer alias; got:\n{code}"
+    );
+    assert!(
+        code.contains("parts . join (\",\")"),
+        "explode=false alias arrays must retain comma-joined serialization; got:\n{code}"
+    );
+    assert!(
+        !code.contains("scores : Option < impl AsRef < str > >"),
+        "supported alias arrays must not use the opaque string fallback; got:\n{code}"
+    );
+}
+
+#[test]
 fn array_of_objects_keeps_string_fallback() {
     // Arrays of objects have no defined form serialization — fallback.
     let code = generate_methods(spec_with_filter_param(json!({

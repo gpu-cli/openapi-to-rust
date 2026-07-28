@@ -147,7 +147,7 @@
 //! 5. Handles query parameters and request bodies
 //! 6. Configures middleware stack based on generator config
 
-use crate::analysis::{OperationInfo, ParameterInfo, SchemaAnalysis};
+use crate::analysis::{OperationInfo, OperationResponseBody, ParameterInfo, SchemaAnalysis};
 use crate::generator::CodeGenerator;
 use heck::{ToPascalCase, ToSnakeCase};
 use proc_macro2::TokenStream;
@@ -166,6 +166,22 @@ struct BodyFieldPlan {
     value_ident: syn::Ident,
     value_type: TokenStream,
     access_path: Vec<syn::Ident>,
+}
+
+#[derive(Clone, Copy)]
+enum ClientSuccessBody<'a> {
+    Json(&'a str),
+    Text,
+    Binary,
+    EventStream,
+    Empty,
+}
+
+#[derive(Clone)]
+struct ClientSuccessSelection<'a> {
+    statuses: Vec<&'a str>,
+    body: ClientSuccessBody<'a>,
+    accept: Option<&'a str>,
 }
 
 enum RequiredBodyConstruction {
@@ -222,6 +238,9 @@ impl CodeGenerator {
             use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
             use std::collections::BTreeMap;
 
+            /// Default upper bound for any response body buffered in memory.
+            pub const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
+
             /// HTTP client for making API requests
             #[derive(Clone)]
             pub struct HttpClient {
@@ -229,6 +248,22 @@ impl CodeGenerator {
                 api_key: Option<String>,
                 http_client: ClientWithMiddleware,
                 custom_headers: BTreeMap<String, String>,
+                max_response_body_bytes: usize,
+            }
+
+            async fn __read_bounded_response_body(
+                mut response: reqwest::Response,
+                limit: usize,
+            ) -> Result<Vec<u8>, HttpError> {
+                let mut body = Vec::new();
+                while let Some(chunk) = response.chunk().await.map_err(HttpError::Network)? {
+                    let next_len = body.len().checked_add(chunk.len());
+                    if next_len.is_none_or(|next_len| next_len > limit) {
+                        return Err(HttpError::ResponseTooLarge { limit });
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(body)
             }
         };
 
@@ -298,6 +333,12 @@ impl CodeGenerator {
             .and_then(|http| http.base_url.as_deref())
             .unwrap_or_default();
         let default_base_url = quote! { #configured_base_url.to_string() };
+        let max_response_body_bytes = self
+            .config()
+            .http_client_config
+            .as_ref()
+            .and_then(|http| http.max_response_body_bytes)
+            .unwrap_or(8 * 1024 * 1024);
 
         let retry_param = if has_retry {
             quote! { retry_config: Option<RetryConfig>, }
@@ -376,6 +417,7 @@ impl CodeGenerator {
                         api_key: None,
                         http_client,
                         custom_headers: BTreeMap::new(),
+                        max_response_body_bytes: #max_response_body_bytes,
                     }
                 }
             }
@@ -400,6 +442,7 @@ impl CodeGenerator {
                         api_key: None,
                         http_client,
                         custom_headers: BTreeMap::new(),
+                        max_response_body_bytes: #max_response_body_bytes,
                     }
                 }
             }
@@ -420,6 +463,12 @@ impl CodeGenerator {
             /// Set the API key for authentication
             pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
                 self.api_key = Some(api_key.into());
+                self
+            }
+
+            /// Set the maximum number of response-body bytes buffered in memory.
+            pub fn with_max_response_body_bytes(mut self, limit: usize) -> Self {
+                self.max_response_body_bytes = limit;
                 self
             }
 
@@ -469,7 +518,7 @@ impl CodeGenerator {
         let methods: Vec<TokenStream> = operations
             .iter()
             .copied()
-            .map(|op| self.generate_single_operation_method(op))
+            .map(|op| self.generate_single_operation_method(analysis, op))
             .collect();
 
         let (operation_builders, builder_entries) =
@@ -571,6 +620,7 @@ impl CodeGenerator {
             let builder_ident = format_ident!("{builder_name}");
 
             let (definition, entry) = self.generate_single_operation_builder(
+                analysis,
                 operation,
                 &allocated_params,
                 body_plan,
@@ -585,8 +635,10 @@ impl CodeGenerator {
         (definitions, entries)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_single_operation_builder(
         &self,
+        analysis: &SchemaAnalysis,
         operation: &OperationInfo,
         allocated_params: &[AllocatedOperationParam<'_>],
         body_plan: Option<BodyModelPlan>,
@@ -743,7 +795,7 @@ impl CodeGenerator {
             call_arguments.push(quote! { self.#body_ident });
         }
 
-        let response_type = self.get_response_type(operation);
+        let response_type = self.get_response_type(analysis, operation);
         let error_type = self.op_error_type_token(operation);
         let operation_id = &operation.operation_id;
         let definition = quote! {
@@ -887,7 +939,9 @@ impl CodeGenerator {
                     optional_fields: Vec::new(),
                 });
             }
-            RequestBodyContent::OctetStream | RequestBodyContent::Unsupported { .. } => {
+            RequestBodyContent::OctetStream { .. }
+            | RequestBodyContent::Binary { .. }
+            | RequestBodyContent::Unsupported { .. } => {
                 return Some(BodyModelPlan {
                     body_ident: format_ident!("body"),
                     body_type: quote! { Vec<u8> },
@@ -895,7 +949,7 @@ impl CodeGenerator {
                     optional_fields: Vec::new(),
                 });
             }
-            RequestBodyContent::TextPlain => {
+            RequestBodyContent::TextPlain { .. } => {
                 return Some(BodyModelPlan {
                     body_ident: format_ident!("body"),
                     body_type: quote! { String },
@@ -1271,7 +1325,11 @@ impl CodeGenerator {
     }
 
     /// Generate a single operation method
-    fn generate_single_operation_method(&self, op: &OperationInfo) -> TokenStream {
+    fn generate_single_operation_method(
+        &self,
+        analysis: &SchemaAnalysis,
+        op: &OperationInfo,
+    ) -> TokenStream {
         let method_name = self.get_method_name(op);
         let http_method_call = self.http_method_call(op);
         let path = &op.path;
@@ -1281,10 +1339,34 @@ impl CodeGenerator {
         let header_params = self.generate_header_params(op);
         let cookie_params = self.generate_cookie_params(op);
         let auth_application = self.generate_auth_application();
-        let response_type = self.get_response_type(op);
-        let has_response_body = self.get_success_response_schema(op).is_some();
+        let success = self.get_success_response(analysis, op);
+        let response_type = self.get_response_type(analysis, op);
         let op_error_type = self.op_error_type_token(op);
-        let error_handling = self.generate_error_handling(op, has_response_body);
+        let accept = success.accept;
+        let error_handling = self.generate_error_handling(op, success);
+        let (custom_headers, accept_header) = if let Some(media_type) = accept {
+            (
+                quote! {
+                    for (name, value) in &self.custom_headers {
+                        if !name.eq_ignore_ascii_case("accept") {
+                            req = req.header(name, value);
+                        }
+                    }
+                },
+                quote! {
+                    req = req.header(reqwest::header::ACCEPT, #media_type);
+                },
+            )
+        } else {
+            (
+                quote! {
+                    for (name, value) in &self.custom_headers {
+                        req = req.header(name, value);
+                    }
+                },
+                TokenStream::new(),
+            )
+        };
         let url_construction = self.generate_url_construction(path, op);
         let doc_comment = self.generate_operation_doc_comment(op);
 
@@ -1308,9 +1390,11 @@ impl CodeGenerator {
                 #auth_application
 
                 // Add custom headers
-                for (name, value) in &self.custom_headers {
-                    req = req.header(name, value);
-                }
+                #custom_headers
+
+                // Keep content negotiation aligned with the generated return type,
+                // replacing any custom Accept value for this operation.
+                #accept_header
 
                 let response = req.send().await?;
                 #error_handling
@@ -1939,8 +2023,10 @@ impl CodeGenerator {
                     quote! { #request_ident }
                 }
                 RequestBodyContent::Multipart => quote! { reqwest::multipart::Form },
-                RequestBodyContent::OctetStream => quote! { Vec<u8> },
-                RequestBodyContent::TextPlain => quote! { String },
+                RequestBodyContent::OctetStream { .. } | RequestBodyContent::Binary { .. } => {
+                    quote! { Vec<u8> }
+                }
+                RequestBodyContent::TextPlain { .. } => quote! { String },
                 RequestBodyContent::Unsupported { .. } => quote! { Vec<u8> },
                 RequestBodyContent::SchemaLess { .. } => unreachable!(
                     "schema-less request bodies preserve the historical client signature"
@@ -1948,8 +2034,9 @@ impl CodeGenerator {
             };
             let body_ident = match rb {
                 RequestBodyContent::Multipart => quote! { form },
-                RequestBodyContent::OctetStream
-                | RequestBodyContent::TextPlain
+                RequestBodyContent::OctetStream { .. }
+                | RequestBodyContent::Binary { .. }
+                | RequestBodyContent::TextPlain { .. }
                 | RequestBodyContent::Unsupported { .. } => quote! { body },
                 RequestBodyContent::SchemaLess { .. } => unreachable!(
                     "schema-less request bodies preserve the historical client signature"
@@ -1989,7 +2076,7 @@ impl CodeGenerator {
         use crate::analysis::QuerySerialization;
         // Typed form-style arrays take Vec<item> (openapi-generator-anu).
         // Scalars parse as-is (they may be type paths from [type_mappings]);
-        // enum refs are raw schema names and go through the same
+        // schema refs are raw schema names and go through the same
         // to_rust_type_name sanitization as every other schema reference
         // (cloudflare has enum schemas like `resource-sharing_resource_type`).
         if let Some(
@@ -2001,10 +2088,10 @@ impl CodeGenerator {
             let item_ty: syn::Type = match item_type {
                 ArrayItemType::Scalar(rust_type) => syn::parse_str(rust_type)
                     .unwrap_or_else(|_| panic!("invalid scalar item type `{rust_type}`")),
-                ArrayItemType::EnumRef(schema_name) => {
+                ArrayItemType::SchemaRef(schema_name) => {
                     let rust_name = self.to_rust_type_name(schema_name);
                     syn::parse_str(&rust_name)
-                        .unwrap_or_else(|_| panic!("invalid enum item type `{rust_name}`"))
+                        .unwrap_or_else(|_| panic!("invalid schema item type `{rust_name}`"))
                 }
             };
             return quote! { Vec<#item_ty> };
@@ -2068,27 +2155,55 @@ impl CodeGenerator {
                     req = req.multipart(form);
                 },
             ),
-            RequestBodyContent::OctetStream => (
+            RequestBodyContent::OctetStream { media_type } => (
                 quote! { body },
                 quote! {
                     req = req
                         .body(body)
-                        .header("content-type", "application/octet-stream");
+                        .header("content-type", #media_type);
                 },
             ),
-            RequestBodyContent::TextPlain => (
+            RequestBodyContent::Binary { media_type } => (
                 quote! { body },
                 quote! {
                     req = req
                         .body(body)
-                        .header("content-type", "text/plain");
+                        .header("content-type", #media_type);
+                },
+            ),
+            RequestBodyContent::TextPlain { media_type } => (
+                quote! { body },
+                quote! {
+                    req = req
+                        .body(body)
+                        .header("content-type", #media_type);
                 },
             ),
             RequestBodyContent::Unsupported { media_types } => {
                 let media_type = media_types
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or("application/octet-stream");
+                    .iter()
+                    .find(|media_type| !crate::openapi::is_wildcard_media_type(media_type))
+                    .map(String::as_str);
+                let Some(media_type) = media_type else {
+                    let ranges = media_types.join(", ");
+                    let message = format!(
+                        "request body for operation `{}` declares only wildcard media ranges ({ranges}); a concrete Content-Type is required",
+                        op.operation_id,
+                    );
+                    return if required {
+                        quote! {
+                            let _ = body;
+                            return Err(HttpError::Config(#message.to_string()).into());
+                        }
+                    } else {
+                        quote! {
+                            if body.is_some() {
+                                return Err(HttpError::Config(#message.to_string()).into());
+                            }
+                            #empty_request_framing
+                        }
+                    };
+                };
                 (
                     quote! { body },
                     quote! {
@@ -2135,29 +2250,195 @@ impl CodeGenerator {
     /// Only considers 2xx status codes. Error schemas (4xx, 5xx) are ignored
     /// so that endpoints like 204 No Content correctly return `()` instead of
     /// accidentally picking up the error schema (e.g. `BadRequestError`).
-    fn get_success_response_schema<'a>(&self, op: &'a OperationInfo) -> Option<&'a String> {
+    fn get_success_response_schema<'a>(
+        &self,
+        op: &'a OperationInfo,
+    ) -> Option<(&'a str, &'a String)> {
         op.response_schemas
-            .get("200")
-            .or_else(|| op.response_schemas.get("201"))
+            .get_key_value("200")
+            .or_else(|| op.response_schemas.get_key_value("201"))
             .or_else(|| {
                 op.response_schemas
                     .iter()
                     .find(|(code, _)| code.starts_with('2'))
-                    .map(|(_, v)| v)
             })
+            .map(|(status, schema)| (status.as_str(), schema))
+    }
+
+    fn get_success_response<'a>(
+        &self,
+        analysis: &'a SchemaAnalysis,
+        op: &'a OperationInfo,
+    ) -> ClientSuccessSelection<'a> {
+        if let Some(responses) = analysis.operation_responses.get(&op.operation_id) {
+            let mut candidates = Vec::new();
+            for preferred in ["200", "201"] {
+                if let Some((status, response)) = responses.get_key_value(preferred) {
+                    candidates.push((status.as_str(), response));
+                }
+            }
+            candidates.extend(
+                responses
+                    .iter()
+                    .filter(|(status, _)| {
+                        status.starts_with('2')
+                            && status.as_str() != "200"
+                            && status.as_str() != "201"
+                    })
+                    .map(|(status, response)| (status.as_str(), response)),
+            );
+
+            let selected = candidates
+                .iter()
+                .copied()
+                .find(|(_, response)| {
+                    matches!(
+                        Self::response_body(response),
+                        ClientSuccessBody::Json(_)
+                            | ClientSuccessBody::Text
+                            | ClientSuccessBody::Binary
+                    )
+                })
+                .or_else(|| {
+                    candidates.iter().copied().find(|(_, response)| {
+                        matches!(
+                            Self::response_body(response),
+                            ClientSuccessBody::EventStream
+                        )
+                    })
+                })
+                .or_else(|| candidates.first().copied());
+
+            if let Some((_, response)) = selected {
+                let body = Self::response_body(response);
+                let statuses = candidates
+                    .iter()
+                    .filter_map(|(status, candidate)| {
+                        Self::success_bodies_are_compatible(body, Self::response_body(candidate))
+                            .then_some(*status)
+                    })
+                    .collect();
+                let accept = match &response.body {
+                    Some(OperationResponseBody::Json { media_type, .. })
+                    | Some(OperationResponseBody::Text { media_type }) => Some(media_type.as_str()),
+                    Some(OperationResponseBody::Binary {
+                        media_type,
+                        wildcard,
+                    }) => (!wildcard).then_some(media_type.as_str()),
+                    None if response.schema_name.is_some() => {
+                        response.media_type.as_deref().or(Some("application/json"))
+                    }
+                    None if response.supports_streaming => Some("text/event-stream"),
+                    None => None,
+                };
+                return ClientSuccessSelection {
+                    statuses,
+                    body,
+                    accept,
+                };
+            }
+        }
+
+        if let Some((_status, schema_name)) = self.get_success_response_schema(op) {
+            let statuses = op
+                .response_schemas
+                .iter()
+                .filter_map(|(candidate_status, candidate_schema)| {
+                    (candidate_status.starts_with('2') && candidate_schema == schema_name)
+                        .then_some(candidate_status.as_str())
+                })
+                .collect();
+            ClientSuccessSelection {
+                statuses,
+                body: ClientSuccessBody::Json(schema_name),
+                accept: Some("application/json"),
+            }
+        } else if Self::returns_raw_event_stream(op) {
+            ClientSuccessSelection {
+                statuses: Vec::new(),
+                body: ClientSuccessBody::EventStream,
+                accept: Some("text/event-stream"),
+            }
+        } else {
+            ClientSuccessSelection {
+                statuses: Vec::new(),
+                body: ClientSuccessBody::Empty,
+                accept: None,
+            }
+        }
+    }
+
+    fn response_body(response: &crate::analysis::OperationResponse) -> ClientSuccessBody<'_> {
+        match &response.body {
+            Some(OperationResponseBody::Json { schema_name, .. }) => {
+                ClientSuccessBody::Json(schema_name)
+            }
+            Some(OperationResponseBody::Text { .. }) => ClientSuccessBody::Text,
+            Some(OperationResponseBody::Binary { .. }) => ClientSuccessBody::Binary,
+            None if response.schema_name.is_some() => {
+                ClientSuccessBody::Json(response.schema_name.as_deref().unwrap_or_default())
+            }
+            None if response.supports_streaming => ClientSuccessBody::EventStream,
+            None => ClientSuccessBody::Empty,
+        }
+    }
+
+    fn success_bodies_are_compatible(
+        selected: ClientSuccessBody<'_>,
+        candidate: ClientSuccessBody<'_>,
+    ) -> bool {
+        match (selected, candidate) {
+            (ClientSuccessBody::Json(selected), ClientSuccessBody::Json(candidate)) => {
+                selected == candidate
+            }
+            (ClientSuccessBody::Text, ClientSuccessBody::Text)
+            | (ClientSuccessBody::Binary, ClientSuccessBody::Binary)
+            | (ClientSuccessBody::EventStream, ClientSuccessBody::EventStream)
+            | (ClientSuccessBody::Empty, ClientSuccessBody::Empty) => true,
+            _ => false,
+        }
     }
 
     /// Get response type
-    fn get_response_type(&self, op: &OperationInfo) -> TokenStream {
-        if let Some(response_type) = self.get_success_response_schema(op) {
-            // Convert schema name to Rust type name (handles underscores, etc.)
-            let rust_type_name = self.to_rust_type_name(response_type);
-            let response_ident = syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
-            quote! { #response_ident }
-        } else if Self::returns_raw_event_stream(op) {
-            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> }
-        } else {
-            quote! { () }
+    fn get_response_type(&self, analysis: &SchemaAnalysis, op: &OperationInfo) -> TokenStream {
+        match self.get_success_response(analysis, op).body {
+            ClientSuccessBody::Json(response_type) => {
+                // Convert schema name to Rust type name (handles underscores, etc.)
+                let rust_type_name = self.to_rust_type_name(response_type);
+                let response_ident =
+                    syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
+                quote! { #response_ident }
+            }
+            ClientSuccessBody::Text => quote! { String },
+            ClientSuccessBody::Binary => quote! { bytes::Bytes },
+            ClientSuccessBody::EventStream => {
+                quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> }
+            }
+            ClientSuccessBody::Empty => quote! { () },
+        }
+    }
+
+    fn success_status_guard(statuses: &[&str]) -> TokenStream {
+        if statuses.is_empty() {
+            return quote! { status.is_success() };
+        }
+        let guards = statuses
+            .iter()
+            .map(|status| Self::single_status_guard(status));
+        quote! { false #( || #guards )* }
+    }
+
+    fn single_status_guard(status: &str) -> TokenStream {
+        match status {
+            status if status.chars().all(|character| character.is_ascii_digit()) => {
+                let status: u16 = status.parse().unwrap_or_default();
+                quote! { status_code == #status }
+            }
+            status if matches!(status.as_bytes(), [b'1'..=b'5', b'X' | b'x', b'X' | b'x']) => {
+                let class = u16::from(status.as_bytes()[0] - b'0');
+                quote! { status_code / 100 == #class }
+            }
+            _ => quote! { status.is_success() },
         }
     }
 
@@ -2180,23 +2461,33 @@ impl CodeGenerator {
 
     /// Generate error handling.
     ///
-    /// Always reads the response body to a string before attempting any typed
-    /// deserialization, so the raw body and headers are preserved on the error
-    /// path even when JSON parsing fails. On 2xx the body is parsed into the
-    /// success type; on non-2xx the body is parsed into the matching variant
-    /// of the per-operation error enum (when one is declared) and wrapped in
-    /// `ApiError<E>`.
-    fn generate_error_handling(&self, op: &OperationInfo, has_response_body: bool) -> TokenStream {
+    /// Buffers non-streaming responses once, retaining both exact bytes and a
+    /// lossy UTF-8 view for compatibility. Only the selected declared success
+    /// status is parsed into the generated return type; other 2xx statuses are
+    /// inspectable `ApiError`s rather than being fed to an incompatible parser.
+    fn generate_error_handling(
+        &self,
+        op: &OperationInfo,
+        success: ClientSuccessSelection<'_>,
+    ) -> TokenStream {
         let op_error_type = self.op_error_type_token(op);
+        let success_body = success.body;
+        let success_status_guard = Self::success_status_guard(&success.statuses);
+        let selected_status = if success.statuses.is_empty() {
+            "any declared 2xx response".to_string()
+        } else {
+            success.statuses.join(", ")
+        };
 
-        let success_branch = if has_response_body {
-            quote! {
+        let success_branch = match success_body {
+            ClientSuccessBody::Json(_) => quote! {
                 match serde_json::from_str(&body_text) {
                     Ok(body) => Ok(body),
                     Err(e) => Err(ApiOpError::Api(ApiError {
                         status: status_code,
                         headers: headers,
                         body: body_text,
+                        raw_body,
                         typed: None,
                         parse_error: Some(format!(
                             "failed to deserialize 2xx response body: {}",
@@ -2204,13 +2495,18 @@ impl CodeGenerator {
                         )),
                     })),
                 }
-            }
-        } else {
-            quote! {
+            },
+            ClientSuccessBody::Text => quote! {
+                let _ = raw_body;
+                Ok(body_text)
+            },
+            ClientSuccessBody::Empty => quote! {
                 let _ = body_text;
+                let _ = raw_body;
                 let _ = headers;
                 Ok(())
-            }
+            },
+            ClientSuccessBody::Binary | ClientSuccessBody::EventStream => quote! {},
         };
 
         let error_match_arms = self.generate_error_match_arms(op);
@@ -2219,17 +2515,35 @@ impl CodeGenerator {
         // buffering it. Reading an SSE body to a string blocks until the server
         // closes the connection, which is precisely what it will not do.
         // The error path still buffers — an error response is finite.
-        if !has_response_body && Self::returns_raw_event_stream(op) {
+        if matches!(success_body, ClientSuccessBody::EventStream) {
             return quote! {
                 let status = response.status();
                 let status_code = status.as_u16();
                 let headers = response.headers().clone();
 
-                if status.is_success() {
+                if #success_status_guard {
                     Ok(response.bytes_stream())
                 } else {
-                    let body_text = response.text().await
-                        .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
+                    if status.is_success() {
+                        return Err(ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers,
+                            body: String::new(),
+                            raw_body: Vec::new(),
+                            typed: None,
+                            parse_error: Some(format!(
+                                "unexpected successful status {}; generated return type selects `{}`; live response body was not buffered",
+                                status_code,
+                                #selected_status,
+                            )),
+                        }));
+                    }
+                    let body_bytes = __read_bounded_response_body(
+                        response,
+                        self.max_response_body_bytes,
+                    ).await?;
+                    let raw_body = body_bytes;
+                    let body_text = String::from_utf8_lossy(&raw_body).into_owned();
                     let typed: Option<#op_error_type>;
                     let parse_error: Option<String>;
                     #error_match_arms
@@ -2237,6 +2551,51 @@ impl CodeGenerator {
                         status: status_code,
                         headers,
                         body: body_text,
+                        raw_body,
+                        typed,
+                        parse_error,
+                    }))
+                }
+            };
+        }
+
+        if matches!(success_body, ClientSuccessBody::Binary) {
+            return quote! {
+                let status = response.status();
+                let status_code = status.as_u16();
+                let headers = response.headers().clone();
+
+                let body_bytes = __read_bounded_response_body(
+                    response,
+                    self.max_response_body_bytes,
+                ).await?;
+                if #success_status_guard {
+                    Ok(bytes::Bytes::from(body_bytes))
+                } else {
+                    let raw_body = body_bytes;
+                    let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+                    if status.is_success() {
+                        return Err(ApiOpError::Api(ApiError {
+                            status: status_code,
+                            headers,
+                            body: body_text,
+                            raw_body,
+                            typed: None,
+                            parse_error: Some(format!(
+                                "unexpected successful status {}; generated return type selects `{}`",
+                                status_code,
+                                #selected_status,
+                            )),
+                        }));
+                    }
+                    let typed: Option<#op_error_type>;
+                    let parse_error: Option<String>;
+                    #error_match_arms
+                    Err(ApiOpError::Api(ApiError {
+                        status: status_code,
+                        headers,
+                        body: body_text,
+                        raw_body,
                         typed,
                         parse_error,
                     }))
@@ -2248,11 +2607,28 @@ impl CodeGenerator {
             let status = response.status();
             let status_code = status.as_u16();
             let headers = response.headers().clone();
-            let body_text = response.text().await
-                .map_err(|e| ApiOpError::Transport(HttpError::Network(e)))?;
+            let body_bytes = __read_bounded_response_body(
+                response,
+                self.max_response_body_bytes,
+            ).await?;
+            let raw_body = body_bytes;
+            let body_text = String::from_utf8_lossy(&raw_body).into_owned();
 
-            if status.is_success() {
+            if #success_status_guard {
                 #success_branch
+            } else if status.is_success() {
+                Err(ApiOpError::Api(ApiError {
+                    status: status_code,
+                    headers,
+                    body: body_text,
+                    raw_body,
+                    typed: None,
+                    parse_error: Some(format!(
+                        "unexpected successful status {}; generated return type selects `{}`",
+                        status_code,
+                        #selected_status,
+                    )),
+                }))
             } else {
                 let typed: Option<#op_error_type>;
                 let parse_error: Option<String>;
@@ -2261,6 +2637,7 @@ impl CodeGenerator {
                     status: status_code,
                     headers,
                     body: body_text,
+                    raw_body,
                     typed,
                     parse_error,
                 }))

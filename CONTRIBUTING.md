@@ -77,7 +77,7 @@ scripts/spec-compile.sh anthropic openai # generator/client output
 scripts/spec-compile.sh                  # broad generator/type changes
 ```
 
-The full corpus generates and compile-checks 54 OpenAPI documents and can take
+The full corpus generates and compile-checks 55 OpenAPI documents and can take
 several minutes. CI runs a fast generation tier on pull requests and the full
 compile tier weekly or on manual dispatch.
 

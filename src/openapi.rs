@@ -1016,6 +1016,34 @@ pub struct RequestBody {
     pub extensions: Extensions,
 }
 
+/// Semantic representation used for a response media entry.
+///
+/// This deliberately keeps server-sent events separate from ordinary text:
+/// although `text/event-stream` belongs to the `text` top-level type, callers
+/// must stream it rather than buffer and UTF-8 decode it like `text/plain`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseMediaKind {
+    Json,
+    EventStream,
+    Text,
+    Binary,
+    Unsupported,
+}
+
+/// Return the media type essence, excluding parameters and surrounding space.
+///
+/// Media type comparisons remain ASCII-case-insensitive at their call sites;
+/// this helper only provides one consistent way to discard parameters such as
+/// `charset=utf-8` without allocating.
+pub fn media_type_essence(content_type: &str) -> &str {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+}
+
 /// Returns true for media types whose payload is JSON.
 ///
 /// Matches `application/json` exactly, plus any RFC 6839 structured-syntax
@@ -1024,12 +1052,7 @@ pub struct RequestBody {
 /// `application/problem+json`). Trailing parameters such as
 /// `; charset=utf-8` are tolerated.
 pub fn is_json_media_type(ct: &str) -> bool {
-    let essence = ct
-        .split(';')
-        .next()
-        .unwrap_or(ct)
-        .trim()
-        .to_ascii_lowercase();
+    let essence = media_type_essence(ct).to_ascii_lowercase();
     if essence == "application/json" {
         return true;
     }
@@ -1042,12 +1065,7 @@ pub fn is_json_media_type(ct: &str) -> bool {
 /// Returns true for `application/x-www-form-urlencoded` (with optional
 /// parameters).
 pub fn is_form_urlencoded_media_type(ct: &str) -> bool {
-    let essence = ct
-        .split(';')
-        .next()
-        .unwrap_or(ct)
-        .trim()
-        .to_ascii_lowercase();
+    let essence = media_type_essence(ct).to_ascii_lowercase();
     essence == "application/x-www-form-urlencoded"
 }
 
@@ -1057,21 +1075,116 @@ pub fn is_form_urlencoded_media_type(ct: &str) -> bool {
 /// the essence, so values such as `Text/Event-Stream; charset=utf-8` match,
 /// while similarly prefixed subtypes such as `text/event-streaming` do not.
 pub fn is_event_stream_media_type(ct: &str) -> bool {
-    ct.split(';')
-        .next()
-        .unwrap_or(ct)
-        .trim()
-        .eq_ignore_ascii_case("text/event-stream")
+    media_type_essence(ct).eq_ignore_ascii_case("text/event-stream")
+}
+
+/// Returns true for non-SSE media types in the `text` top-level family.
+pub fn is_text_media_type(ct: &str) -> bool {
+    let Some((top_level, subtype)) = media_type_essence(ct).split_once('/') else {
+        return false;
+    };
+    top_level.eq_ignore_ascii_case("text") && !subtype.is_empty() && !is_event_stream_media_type(ct)
+}
+
+/// Returns true for OpenAPI media ranges with a wildcard subtype.
+///
+/// This recognizes both `*/*` and type-specific ranges such as `image/*`.
+/// A wildcard is meaningful only as the complete subtype, so values such as
+/// `image/*+json` do not match.
+pub fn is_wildcard_media_type(ct: &str) -> bool {
+    let Some((top_level, subtype)) = media_type_essence(ct).split_once('/') else {
+        return false;
+    };
+    !top_level.is_empty() && subtype == "*"
+}
+
+fn schema_has_binary_format(schema: Option<&Schema>) -> bool {
+    schema.is_some_and(|schema| {
+        schema
+            .details()
+            .format
+            .as_deref()
+            .is_some_and(|format| format.eq_ignore_ascii_case("binary"))
+    })
+}
+
+/// Returns true when a response representation must be handled as raw bytes.
+///
+/// An explicit schema `format: binary` takes precedence over a textual-looking
+/// media type. Without that schema signal, known binary families and formats
+/// are recognized, as are non-text OpenAPI wildcard media ranges. Text media
+/// ranges cannot be emitted as a concrete response `Content-Type` and remain
+/// unsupported unless their schema explicitly declares the binary format.
+pub fn is_binary_media_type(ct: &str, schema: Option<&Schema>) -> bool {
+    if schema_has_binary_format(schema) {
+        return true;
+    }
+
+    let essence = media_type_essence(ct);
+    let Some((top_level, _)) = essence.split_once('/') else {
+        return false;
+    };
+    if top_level.eq_ignore_ascii_case("image")
+        || top_level.eq_ignore_ascii_case("audio")
+        || top_level.eq_ignore_ascii_case("video")
+    {
+        return true;
+    }
+    if essence.eq_ignore_ascii_case("application/octet-stream")
+        || essence.eq_ignore_ascii_case("application/zip")
+    {
+        return true;
+    }
+
+    !top_level.eq_ignore_ascii_case("text") && is_wildcard_media_type(ct)
+}
+
+/// Classify one declared response representation for client/server analysis.
+///
+/// JSON and exact SSE retain their established behavior. A binary schema wins
+/// over the media family so bytes are never accidentally UTF-8 decoded.
+pub fn classify_response_media_type(ct: &str, schema: Option<&Schema>) -> ResponseMediaKind {
+    if is_json_media_type(ct) {
+        ResponseMediaKind::Json
+    } else if is_event_stream_media_type(ct) {
+        ResponseMediaKind::EventStream
+    } else if schema_has_binary_format(schema) {
+        ResponseMediaKind::Binary
+    } else if is_text_media_type(ct) {
+        if is_wildcard_media_type(ct) {
+            ResponseMediaKind::Unsupported
+        } else {
+            ResponseMediaKind::Text
+        }
+    } else if is_binary_media_type(ct, schema) {
+        ResponseMediaKind::Binary
+    } else {
+        ResponseMediaKind::Unsupported
+    }
 }
 
 fn find_json_content(content: &BTreeMap<String, MediaType>) -> Option<(&str, &MediaType)> {
-    if let Some(mt) = content.get("application/json") {
+    if let Some(mt) = content
+        .get("application/json")
+        .filter(|media_type| media_type.schema.is_some())
+    {
         return Some(("application/json", mt));
     }
     content
         .iter()
-        .find(|(ct, _)| is_json_media_type(ct))
+        .find(|(ct, media_type)| is_json_media_type(ct) && media_type.schema.is_some())
         .map(|(ct, mt)| (ct.as_str(), mt))
+        .or_else(|| {
+            content
+                .get("application/json")
+                .map(|media_type| ("application/json", media_type))
+        })
+        .or_else(|| {
+            content
+                .iter()
+                .find(|(ct, _)| is_json_media_type(ct))
+                .map(|(ct, mt)| (ct.as_str(), mt))
+        })
 }
 
 impl RequestBody {
@@ -1101,12 +1214,25 @@ impl RequestBody {
             "application/octet-stream",
             "text/plain",
         ];
-        for ct in PRIORITY {
-            if let Some(media_type) = content.get(*ct) {
-                return Some((*ct, media_type.schema.as_ref()));
+        for preferred_essence in PRIORITY {
+            if let Some((ct, media_type)) = content
+                .iter()
+                .find(|(ct, _)| media_type_essence(ct).eq_ignore_ascii_case(preferred_essence))
+            {
+                return Some((ct.as_str(), media_type.schema.as_ref()));
             }
         }
-        None
+        content
+            .iter()
+            // A request media range is not a concrete Content-Type value. The
+            // generated client cannot send `image/*` or `*/*`, and the server
+            // cannot compare either range to one exact request representation,
+            // so leave wildcard request content unsupported instead of
+            // emitting a contract that always fails at runtime.
+            .find(|(ct, media_type)| {
+                !is_wildcard_media_type(ct) && is_binary_media_type(ct, media_type.schema.as_ref())
+            })
+            .map(|(ct, media_type)| (ct.as_str(), media_type.schema.as_ref()))
     }
 }
 
@@ -1317,6 +1443,126 @@ mod tests {
     }
 
     #[test]
+    fn response_media_helpers_normalize_parameters_and_case() {
+        assert_eq!(
+            media_type_essence("  Text/Plain ; charset=utf-8  "),
+            "Text/Plain"
+        );
+        assert!(is_text_media_type("TEXT/HTML; charset=UTF-8"));
+        assert!(!is_text_media_type("Text/Event-Stream; charset=utf-8"));
+        assert!(is_wildcard_media_type("*/*; q=0.8"));
+        assert!(is_wildcard_media_type("IMAGE/*"));
+        assert!(is_wildcard_media_type("text/*"));
+        assert!(!is_wildcard_media_type("image/*+json"));
+        assert!(!is_wildcard_media_type("application/json"));
+    }
+
+    #[test]
+    fn response_media_classifier_keeps_json_sse_and_text_distinct() {
+        for media_type in [
+            "application/json",
+            "APPLICATION/PROBLEM+JSON; charset=utf-8",
+        ] {
+            assert_eq!(
+                classify_response_media_type(media_type, None),
+                ResponseMediaKind::Json,
+                "{media_type}"
+            );
+        }
+
+        assert_eq!(
+            classify_response_media_type("Text/Event-Stream; charset=utf-8", None),
+            ResponseMediaKind::EventStream
+        );
+        for media_type in ["text/plain", "TEXT/HTML; charset=UTF-8"] {
+            assert_eq!(
+                classify_response_media_type(media_type, None),
+                ResponseMediaKind::Text,
+                "{media_type}"
+            );
+        }
+        assert_eq!(
+            classify_response_media_type("text/event-streaming", None),
+            ResponseMediaKind::Text
+        );
+        assert_eq!(
+            classify_response_media_type("text/*", None),
+            ResponseMediaKind::Unsupported,
+            "a media range is not a valid concrete response Content-Type"
+        );
+    }
+
+    #[test]
+    fn response_json_content_skips_schema_less_canonical_entry() {
+        let response: Response = serde_json::from_value(json!({
+            "description": "mixed JSON",
+            "content": {
+                "application/json": {},
+                "application/vnd.example+json": {
+                    "schema": { "type": "string" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let (media_type, schema) = response.json_content().expect("schema-bearing JSON");
+        assert_eq!(media_type, "application/vnd.example+json");
+        assert!(matches!(schema.schema_type(), Some(SchemaType::String)));
+    }
+
+    #[test]
+    fn response_media_classifier_recognizes_binary_formats_and_wildcards() {
+        for media_type in [
+            "image/png",
+            "IMAGE/*; version=1",
+            "audio/mpeg",
+            "video/mp4",
+            "application/octet-stream",
+            "APPLICATION/ZIP; version=1",
+            "application/*",
+            "*/*",
+        ] {
+            assert_eq!(
+                classify_response_media_type(media_type, None),
+                ResponseMediaKind::Binary,
+                "{media_type}"
+            );
+        }
+
+        let binary_schema: Schema = serde_json::from_value(json!({
+            "type": "string",
+            "format": "BINARY"
+        }))
+        .unwrap();
+        assert_eq!(
+            classify_response_media_type("application/x-custom", Some(&binary_schema)),
+            ResponseMediaKind::Binary
+        );
+        assert_eq!(
+            classify_response_media_type("text/plain", Some(&binary_schema)),
+            ResponseMediaKind::Binary,
+            "an explicit binary schema must prevent UTF-8 decoding"
+        );
+        assert!(is_binary_media_type(
+            "application/x-custom",
+            Some(&binary_schema)
+        ));
+    }
+
+    #[test]
+    fn response_media_classifier_leaves_ambiguous_formats_unsupported() {
+        let string_schema: Schema = serde_json::from_value(json!({ "type": "string" })).unwrap();
+        for media_type in ["application/xml", "application/pdf", "not-a-media-type"] {
+            assert_eq!(
+                classify_response_media_type(media_type, Some(&string_schema)),
+                ResponseMediaKind::Unsupported,
+                "{media_type}"
+            );
+        }
+        assert!(!is_binary_media_type("text/plain", None));
+    }
+
+    #[test]
     fn request_body_json_schema_finds_vnd_api_plus_json() {
         // Mirrors Latitude.sh: request body declared under
         // application/vnd.api+json without a sibling application/json.
@@ -1372,6 +1618,43 @@ mod tests {
         let body: RequestBody = serde_json::from_value(body_json).unwrap();
         let (ct, _) = body.best_content().expect("expected best_content");
         assert_eq!(ct, "application/vnd.api+json");
+    }
+
+    #[test]
+    fn request_body_best_content_does_not_select_wildcard_media_ranges() {
+        let body: RequestBody = serde_json::from_value(json!({
+            "required": true,
+            "content": {
+                "image/*": {
+                    "schema": { "type": "string", "format": "binary" }
+                },
+                "*/*": {
+                    "schema": { "type": "string", "format": "binary" }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(
+            body.best_content().is_none(),
+            "request media ranges require a runtime concrete Content-Type"
+        );
+    }
+
+    #[test]
+    fn request_body_best_content_matches_parameterized_text_plain_by_essence() {
+        let body: RequestBody = serde_json::from_value(json!({
+            "required": true,
+            "content": {
+                "Text/Plain; charset=utf-8": {
+                    "schema": { "type": "string" }
+                }
+            }
+        }))
+        .unwrap();
+
+        let (media_type, _) = body.best_content().expect("parameterized text body");
+        assert_eq!(media_type, "Text/Plain; charset=utf-8");
     }
 
     #[test]

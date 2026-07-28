@@ -11,10 +11,12 @@ fn api_error<E>(
     typed: Option<E>,
     parse_error: Option<&str>,
 ) -> ApiError<E> {
+    let body = body.into();
     ApiError {
         status: 422,
         headers: HeaderMap::new(),
-        body: body.into(),
+        raw_body: body.as_bytes().to_vec(),
+        body,
         typed,
         parse_error: parse_error.map(str::to_owned),
     }
@@ -74,6 +76,22 @@ fn test_api_error_display_normal_body() {
 }
 
 #[test]
+fn api_error_preserves_raw_non_utf8_body() {
+    let raw_body = vec![0, 159, 146, 150, 255];
+    let error = ApiError::<TypedApiError> {
+        status: 500,
+        headers: HeaderMap::new(),
+        body: String::from_utf8_lossy(&raw_body).into_owned(),
+        raw_body: raw_body.clone(),
+        typed: None,
+        parse_error: None,
+    };
+
+    assert_eq!(error.raw_body, raw_body);
+    assert!(error.body.contains('\u{fffd}'));
+}
+
+#[test]
 fn test_api_error_display_truncates_body_without_mutating_it() {
     let body = "é".repeat(600);
     let error = api_error::<TypedApiError>(body.clone(), None, None);
@@ -124,6 +142,12 @@ fn test_http_error_creation() {
     // Test timeout error
     let timeout_error = HttpError::Timeout;
     assert!(matches!(timeout_error, HttpError::Timeout));
+
+    let response_too_large = HttpError::ResponseTooLarge { limit: 1024 };
+    assert!(matches!(
+        response_too_large,
+        HttpError::ResponseTooLarge { limit: 1024 }
+    ));
 
     // Test config error
     let config_error = HttpError::Config("invalid config".to_string());
@@ -247,6 +271,9 @@ fn test_retryable_errors() {
 
     let config_error = HttpError::Config("invalid".to_string());
     assert!(!config_error.is_retryable());
+
+    let response_too_large = HttpError::ResponseTooLarge { limit: 1024 };
+    assert!(!response_too_large.is_retryable());
 }
 
 #[test]
@@ -394,6 +421,10 @@ fn test_generated_error_code() {
     assert!(
         client_content.contains("pub struct ApiError"),
         "Generated code should contain ApiError struct"
+    );
+    assert!(
+        client_content.contains("pub raw_body: Vec<u8>"),
+        "Generated ApiError should preserve exact response bytes"
     );
     assert!(
         client_content.contains("pub enum ApiOpError"),

@@ -98,7 +98,7 @@ fn round_trip_spec() -> Value {
                             "explode": true,
                             "schema": {
                                 "type": "array",
-                                "items": { "type": "integer", "format": "int64" }
+                                "items": { "$ref": "#/components/schemas/QueryId" }
                             }
                         },
                         {
@@ -118,8 +118,11 @@ fn round_trip_spec() -> Value {
                 "ScoresAlias": { "$ref": "#/components/schemas/Scores" },
                 "Scores": {
                     "type": "array",
-                    "items": { "type": "integer", "format": "int32" }
-                }
+                    "items": { "$ref": "#/components/schemas/PublicScore" }
+                },
+                "QueryId": { "type": "integer", "format": "int64" },
+                "PublicScore": { "$ref": "#/components/schemas/Score" },
+                "Score": { "type": "integer", "format": "int32" }
             }
         }
     })
@@ -215,8 +218,8 @@ mod tests {
             optional_expanded: Option<QueryRoundTripOptionalExpanded>,
             compact: QueryRoundTripCompact,
             deep_filter: Option<QueryRoundTripDeepFilter>,
-            ids: Vec<i64>,
-            scores: Option<Vec<i32>>,
+            ids: Vec<QueryId>,
+            scores: Option<Vec<PublicScore>>,
         ) -> QueryRoundTripResponse {
             self.captured
                 .send(json!({
