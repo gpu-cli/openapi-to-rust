@@ -1,0 +1,39 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Component request body reference",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/execute": {
+      "post": {
+        "operationId": "execute",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Execute"
+        },
+        "responses": {
+          "200": {
+            "description": "Executed"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "requestBodies": {
+      "Execute": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Program"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Program": {}
+    }
+  }
+}

@@ -4474,6 +4474,11 @@ impl SchemaAnalyzer {
             .as_ref()
             .and_then(|path_item| path_item.get(method.to_ascii_lowercase()))
             .cloned();
+        let request_body = operation
+            .request_body
+            .as_ref()
+            .map(|request_body| self.resolve_request_body(request_body))
+            .transpose()?;
         let mut op_info = OperationInfo {
             operation_id: operation_id.to_string(),
             method: method.to_uppercase(),
@@ -4482,8 +4487,7 @@ impl SchemaAnalyzer {
             description: operation.description.clone(),
             request_body: None,
             // Per OAS 3.x §"Request Body Object", `required` defaults to false.
-            request_body_required: operation
-                .request_body
+            request_body_required: request_body
                 .as_ref()
                 .and_then(|rb| rb.required)
                 .unwrap_or(false),
@@ -4496,7 +4500,7 @@ impl SchemaAnalyzer {
         let mut operation_responses = BTreeMap::new();
 
         // Extract request body schema with content-type awareness
-        if let Some(request_body) = &operation.request_body {
+        if let Some(request_body) = &request_body {
             use crate::openapi::{is_form_urlencoded_media_type, is_json_media_type};
             if let Some((content_type, maybe_schema)) = request_body.best_content() {
                 op_info.request_body = if is_json_media_type(content_type) {
@@ -4768,6 +4772,57 @@ impl SchemaAnalyzer {
         }
 
         Ok((op_info, operation_responses))
+    }
+
+    /// Resolve a local reusable Request Body Object through its JSON Pointer.
+    fn resolve_request_body(
+        &self,
+        request_body: &crate::openapi::RequestBody,
+    ) -> Result<crate::openapi::RequestBody> {
+        let mut current = request_body.clone();
+        let mut visited = HashSet::new();
+        while let Some(reference) = current.reference.clone() {
+            if !visited.insert(reference.clone()) {
+                return Err(GeneratorError::CircularDependency(format!(
+                    "request body reference {reference}"
+                )));
+            }
+
+            let pointer = reference.strip_prefix('#').ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "external request body reference `{reference}` is not supported"
+                ))
+            })?;
+            if !pointer.is_empty() && !pointer.starts_with('/') {
+                return Err(GeneratorError::UnresolvedReference(format!(
+                    "request body reference `{reference}` is not a local JSON Pointer"
+                )));
+            }
+            let value = self.openapi_spec.pointer(pointer).ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "request body reference `{reference}` does not exist"
+                ))
+            })?;
+            let object = value.as_object().ok_or_else(|| {
+                GeneratorError::InvalidSchema(format!(
+                    "request body reference `{reference}` must target an object"
+                ))
+            })?;
+            if !["$ref", "description", "required", "content"]
+                .iter()
+                .any(|field| object.contains_key(*field))
+            {
+                return Err(GeneratorError::InvalidSchema(format!(
+                    "request body reference `{reference}` does not target a structurally compatible OpenAPI Request Body Object"
+                )));
+            }
+            current = serde_json::from_value(value.clone()).map_err(|error| {
+                GeneratorError::InvalidSchema(format!(
+                    "request body reference `{reference}` is not a valid OpenAPI Request Body Object: {error}"
+                ))
+            })?;
+        }
+        Ok(current)
     }
 
     /// Resolve a local reusable Response Object through its JSON Pointer.
