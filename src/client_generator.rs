@@ -2035,11 +2035,13 @@ impl CodeGenerator {
 
     /// Generate request body serialization based on content type
     /// Emit statements that mutate `req` to apply the request body. Returns
-    /// `quote!{}` if the operation has no body. Optional bodies (T11) gate the
-    /// application on `Some(_)`; required bodies apply unconditionally.
+    /// explicit zero-length framing for bodyless POST, PUT, and PATCH requests.
+    /// Optional bodies (T11) gate the application on `Some(_)`; required bodies
+    /// apply unconditionally.
     fn generate_request_body(&self, op: &OperationInfo) -> TokenStream {
+        let empty_request_framing = Self::generate_empty_request_framing(op);
         let Some(rb) = op.request_body.as_ref() else {
-            return quote! {};
+            return empty_request_framing;
         };
         use crate::analysis::RequestBodyContent;
         let required = op.request_body_required;
@@ -2096,7 +2098,7 @@ impl CodeGenerator {
                     },
                 )
             }
-            RequestBodyContent::SchemaLess { .. } => return quote! {},
+            RequestBodyContent::SchemaLess { .. } => return empty_request_framing,
         };
         if required {
             apply
@@ -2104,8 +2106,27 @@ impl CodeGenerator {
             quote! {
                 if let Some(#ident) = #ident {
                     #apply
+                } else {
+                    #empty_request_framing
                 }
             }
+        }
+    }
+
+    /// Emit explicit HTTP/1.1 framing when an operation sends no request body.
+    /// RFC 9110 recommends `Content-Length: 0` for methods that define request
+    /// content semantics. Methods without those semantics intentionally remain
+    /// unchanged.
+    fn generate_empty_request_framing(op: &OperationInfo) -> TokenStream {
+        if ["POST", "PUT", "PATCH"]
+            .iter()
+            .any(|method| op.method.eq_ignore_ascii_case(method))
+        {
+            quote! {
+                req = req.header(reqwest::header::CONTENT_LENGTH, "0");
+            }
+        } else {
+            quote! {}
         }
     }
 
