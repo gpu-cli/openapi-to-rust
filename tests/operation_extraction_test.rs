@@ -1,4 +1,5 @@
 use openapi_to_rust::analysis::{RequestBodyContent, SchemaAnalyzer};
+use openapi_to_rust::{CodeGenerator, GeneratorConfig};
 
 #[test]
 fn test_extract_simple_get() {
@@ -66,6 +67,49 @@ fn test_extract_post_with_body() {
     assert!(!op.response_schemas.is_empty());
 
     insta::assert_yaml_snapshot!("post_with_body_operations", analysis.operations);
+}
+
+#[test]
+fn component_request_body_reference_is_resolved() {
+    let spec = std::fs::read_to_string(
+        "tests/fixtures/operation_extraction/component_request_body_ref.json",
+    )
+    .unwrap();
+    let spec_value: serde_json::Value = serde_json::from_str(&spec).unwrap();
+
+    let mut analyzer = SchemaAnalyzer::new(spec_value).unwrap();
+    let analysis = analyzer.analyze().unwrap();
+    let op = &analysis.operations["execute"];
+
+    assert!(op.request_body_required);
+    assert_eq!(
+        op.request_body.as_ref().and_then(|body| body.schema_name()),
+        Some("Program")
+    );
+    let body_schema = match op.request_body.as_ref().unwrap() {
+        RequestBodyContent::Json {
+            media_type,
+            validation_schema,
+            ..
+        } => {
+            assert_eq!(media_type, "application/json");
+            validation_schema
+        }
+        other => panic!("expected JSON body, got {other:?}"),
+    };
+    assert_eq!(body_schema["$ref"], "#/components/schemas/Program");
+
+    let generated = CodeGenerator::new(GeneratorConfig::default())
+        .generate_operation_methods(&analysis)
+        .to_string();
+    assert!(
+        generated.contains("request : Program"),
+        "generated client method must retain the referenced request body: {generated}"
+    );
+    assert!(
+        generated.contains("serde_json :: to_vec (& request)"),
+        "generated client must serialize the referenced request body: {generated}"
+    );
 }
 
 #[test]
