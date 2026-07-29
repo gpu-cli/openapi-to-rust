@@ -1,6 +1,6 @@
-use openapi_to_rust::config::ServerSection;
+use openapi_to_rust::config::{ServerSection, ServerValidationSection};
 use openapi_to_rust::streaming::{StreamingConfig, StreamingEndpoint};
-use openapi_to_rust::type_mapping::{DurationStrategy, TypeMappingConfig};
+use openapi_to_rust::type_mapping::{BinaryStrategy, DurationStrategy, TypeMappingConfig};
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, RetryConfig, SchemaAnalyzer, TypeMapper};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -49,9 +49,15 @@ fn requirements_spec() -> serde_json::Value {
                     "responses": { "204": { "description": "ok" } }
                 }
             },
-            "/upload": {
+            "/upload/{id}.json": {
                 "post": {
                     "operationId": "uploadPayload",
+                    "parameters": [{
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": { "type": "string" }
+                    }],
                     "requestBody": {
                         "required": true,
                         "content": {
@@ -264,6 +270,62 @@ fn disabled_sse_feature_does_not_emit_streaming_code_or_dependencies() {
     );
     assert!(!dependency_names(&result).contains("reqwest-eventsource"));
     assert!(!dependency_names(&result).contains("futures-util"));
+}
+
+#[test]
+fn multipart_server_enables_axum_multipart_feature() {
+    let result = compile_case(
+        "multipart-server",
+        GeneratorConfig {
+            enable_async_client: false,
+            enable_sse_client: false,
+            tracing_enabled: false,
+            server: Some(ServerSection {
+                framework: "axum".into(),
+                operations: vec!["uploadPayload".into()],
+                prune_models: false,
+                validation: Default::default(),
+            }),
+            ..Default::default()
+        },
+    );
+    let axum = result
+        .required_deps
+        .iter()
+        .find(|dependency| dependency.crate_name == "axum")
+        .expect("axum dependency");
+    assert_eq!(axum.features, vec!["json", "multipart"]);
+}
+
+#[test]
+fn multipart_client_and_server_compile_for_every_binary_strategy() {
+    for (name, binary) in [
+        ("multipart-binary-bytes", BinaryStrategy::Bytes),
+        ("multipart-binary-vec", BinaryStrategy::VecU8),
+        ("multipart-binary-string", BinaryStrategy::String),
+    ] {
+        compile_case(
+            name,
+            GeneratorConfig {
+                enable_sse_client: false,
+                tracing_enabled: false,
+                types: TypeMappingConfig {
+                    binary,
+                    ..Default::default()
+                },
+                server: Some(ServerSection {
+                    framework: "axum".into(),
+                    operations: vec!["uploadPayload".into()],
+                    prune_models: false,
+                    validation: ServerValidationSection {
+                        enabled: false,
+                        ..Default::default()
+                    },
+                }),
+                ..Default::default()
+            },
+        );
+    }
 }
 
 #[test]

@@ -283,9 +283,10 @@ impl CodeGenerator {
                             quote! { BodyContentType::FormUrlEncoded },
                             quote! { Some(#schema_name) },
                         ),
-                        RequestBodyContent::Multipart => {
-                            (quote! { BodyContentType::Multipart }, quote! { None })
-                        }
+                        RequestBodyContent::Multipart { schema_name, .. } => (
+                            quote! { BodyContentType::Multipart },
+                            quote! { Some(#schema_name) },
+                        ),
                         RequestBodyContent::OctetStream { .. } => {
                             (quote! { BodyContentType::OctetStream }, quote! { None })
                         }

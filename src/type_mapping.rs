@@ -373,6 +373,9 @@ pub fn collect_generated_dep_requirements<'a>(
     }
     if uses("axum::") {
         let mut features = vec!["json"];
+        if uses("axum::extract::Multipart") {
+            features.push("multipart");
+        }
         if uses("axum::response::sse::") {
             features.push("tokio");
         }

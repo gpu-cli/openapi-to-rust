@@ -111,6 +111,9 @@ pub(crate) fn prepare_validation_bundle(
                 }
                 | RequestBodyContent::FormUrlEncoded {
                     validation_schema, ..
+                }
+                | RequestBodyContent::Multipart {
+                    validation_schema, ..
                 } => Some(validation_schema),
                 _ => None,
             };

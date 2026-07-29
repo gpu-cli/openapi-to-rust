@@ -169,6 +169,14 @@ struct BodyFieldPlan {
 }
 
 #[derive(Clone, Copy)]
+enum MultipartClientFieldKind {
+    RawBytes,
+    Base64,
+    Base64UrlUnpadded,
+    Text,
+}
+
+#[derive(Clone, Copy)]
 enum ClientSuccessBody<'a> {
     Json(&'a str),
     Text,
@@ -914,6 +922,7 @@ impl CodeGenerator {
             Some(
                 crate::analysis::QuerySerialization::FormExplodedArray { .. }
                     | crate::analysis::QuerySerialization::FormArray { .. }
+                    | crate::analysis::QuerySerialization::SimpleHeaderArray { .. },
             )
         ) && Self::param_uses_as_ref_str(parameter)
     }
@@ -928,16 +937,9 @@ impl CodeGenerator {
         let request_body = operation.request_body.as_ref()?;
         let (body_name, body_ident) = match request_body {
             RequestBodyContent::Json { schema_name, .. }
-            | RequestBodyContent::FormUrlEncoded { schema_name, .. } => {
+            | RequestBodyContent::FormUrlEncoded { schema_name, .. }
+            | RequestBodyContent::Multipart { schema_name, .. } => {
                 (schema_name.as_str(), format_ident!("request"))
-            }
-            RequestBodyContent::Multipart => {
-                return Some(BodyModelPlan {
-                    body_ident: format_ident!("form"),
-                    body_type: quote! { reqwest::multipart::Form },
-                    required_construction: RequiredBodyConstruction::Whole,
-                    optional_fields: Vec::new(),
-                });
             }
             RequestBodyContent::OctetStream { .. }
             | RequestBodyContent::Binary { .. }
@@ -1334,7 +1336,7 @@ impl CodeGenerator {
         let http_method_call = self.http_method_call(op);
         let path = &op.path;
         let request_param = self.generate_request_param(op);
-        let request_body = self.generate_request_body(op);
+        let request_body = self.generate_request_body(op, analysis);
         let query_params = self.generate_query_params(op);
         let header_params = self.generate_header_params(op);
         let cookie_params = self.generate_cookie_params(op);
@@ -1475,6 +1477,27 @@ impl CodeGenerator {
             let param_name_snake = self.param_ident_str(param);
             let param_ident = Self::to_field_ident(&param_name_snake);
             let header_name = &param.name;
+            if matches!(
+                param.query_serialization,
+                Some(crate::analysis::QuerySerialization::SimpleHeaderArray { .. })
+            ) {
+                let encode = quote! {
+                    v.iter().map(::std::string::ToString::to_string).collect::<Vec<_>>().join(",")
+                };
+                if param.required {
+                    emit.push(quote! {
+                        let v = #param_ident;
+                        req = req.header(#header_name, #encode);
+                    });
+                } else {
+                    emit.push(quote! {
+                        if let Some(v) = #param_ident {
+                            req = req.header(#header_name, #encode);
+                        }
+                    });
+                }
+                continue;
+            }
             if param.required {
                 if Self::param_uses_as_ref_str(param) {
                     emit.push(quote! {
@@ -1567,6 +1590,142 @@ impl CodeGenerator {
             let param_key = &param.name;
 
             match &param.query_serialization {
+                Some(QuerySerialization::FormExplodedNestedObject { properties }) => {
+                    let emit_properties = properties.iter().map(|property| {
+                        let wire_name = property.wire_name.as_str();
+                        let field_ident = CodeGenerator::to_field_ident(
+                            &self.to_rust_field_name(wire_name),
+                        );
+                        match &property.value_type {
+                            crate::analysis::QueryStructPropertyType::Scalar(_) => quote! {
+                                let value = serde_json::to_value(&v.#field_ident)
+                                    .map_err(HttpError::serialization_error)?;
+                                if !value.is_null() {
+                                    let value = match value {
+                                        serde_json::Value::String(value) => value,
+                                        serde_json::Value::Bool(value) => value.to_string(),
+                                        serde_json::Value::Number(value) => value.to_string(),
+                                        _ => return Err(HttpError::serialization_error(
+                                            format!("query field `{}` did not serialize as a scalar", #wire_name)
+                                        ).into()),
+                                    };
+                                    nested_params.push((format!("{}.{}", #param_key, #wire_name), value));
+                                }
+                            },
+                            crate::analysis::QueryStructPropertyType::Object { properties } => {
+                                let leaves = properties.iter().map(|property| property.wire_name.clone()).collect::<Vec<_>>();
+                                quote! {
+                                    let value = serde_json::to_value(&v.#field_ident)
+                                        .map_err(HttpError::serialization_error)?;
+                                    if !value.is_null() {
+                                        let serde_json::Value::Object(object) = value else {
+                                            return Err(HttpError::serialization_error(format!("query field `{}` did not serialize as an object", #wire_name)).into());
+                                        };
+                                        if object.is_empty() {
+                                            nested_params.push((format!("{}.{}[]", #param_key, #wire_name), String::new()));
+                                        } else {
+                                            for leaf in [#(#leaves),*] {
+                                                let Some(value) = object.get(leaf) else { continue };
+                                                if value.is_null() { continue; }
+                                                let value = match value {
+                                                    serde_json::Value::String(value) => value.clone(),
+                                                    serde_json::Value::Bool(value) => value.to_string(),
+                                                    serde_json::Value::Number(value) => value.to_string(),
+                                                    _ => return Err(HttpError::serialization_error(format!("query field `{}` contained a non-scalar leaf", #wire_name)).into()),
+                                                };
+                                                nested_params.push((format!("{}.{}.{}", #param_key, #wire_name, leaf), value));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            crate::analysis::QueryStructPropertyType::Array { item_type } => {
+                                let nested_properties = match item_type {
+                                    crate::analysis::ArrayItemType::FlatStructRef { properties, .. } => Some(
+                                        properties.iter().map(|property| property.wire_name.clone()).collect::<Vec<_>>()
+                                    ),
+                                    _ => None,
+                                };
+                                if let Some(nested_properties) = nested_properties {
+                                    quote! {
+                                        let values = serde_json::to_value(&v.#field_ident)
+                                            .map_err(HttpError::serialization_error)?;
+                                        if !values.is_null() {
+                                            let serde_json::Value::Array(values) = values else {
+                                                return Err(HttpError::serialization_error(
+                                                    format!("query field `{}` did not serialize as an array", #wire_name)
+                                                ).into());
+                                            };
+                                            if values.is_empty() {
+                                                nested_params.push((format!("{}.{}[]", #param_key, #wire_name), String::new()));
+                                            }
+                                            for (index, value) in values.into_iter().enumerate() {
+                                                let serde_json::Value::Object(object) = value else {
+                                                    return Err(HttpError::serialization_error(
+                                                        format!("query field `{}` contained a non-object item", #wire_name)
+                                                    ).into());
+                                                };
+                                                for leaf in [#(#nested_properties),*] {
+                                                    let Some(value) = object.get(leaf) else { continue };
+                                                    if value.is_null() { continue; }
+                                                    let value = match value {
+                                                        serde_json::Value::String(value) => value.clone(),
+                                                        serde_json::Value::Bool(value) => value.to_string(),
+                                                        serde_json::Value::Number(value) => value.to_string(),
+                                                        _ => return Err(HttpError::serialization_error(
+                                                            format!("query field `{}` contained a non-scalar leaf", #wire_name)
+                                                        ).into()),
+                                                    };
+                                                    nested_params.push((format!("{}.{}.{}.{}", #param_key, #wire_name, index + 1, leaf), value));
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    quote! {
+                                        let values = serde_json::to_value(&v.#field_ident)
+                                            .map_err(HttpError::serialization_error)?;
+                                        if !values.is_null() {
+                                            let serde_json::Value::Array(values) = values else {
+                                                return Err(HttpError::serialization_error(
+                                                    format!("query field `{}` did not serialize as an array", #wire_name)
+                                                ).into());
+                                            };
+                                            if values.is_empty() {
+                                                nested_params.push((format!("{}.{}[]", #param_key, #wire_name), String::new()));
+                                            }
+                                            for (index, value) in values.into_iter().enumerate() {
+                                                let value = match value {
+                                                    serde_json::Value::String(value) => value,
+                                                    serde_json::Value::Bool(value) => value.to_string(),
+                                                    serde_json::Value::Number(value) => value.to_string(),
+                                                    _ => return Err(HttpError::serialization_error(
+                                                        format!("query field `{}` contained a non-scalar item", #wire_name)
+                                                    ).into()),
+                                                };
+                                                nested_params.push((format!("{}.{}.{}", #param_key, #wire_name, index + 1), value));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }).collect::<Vec<_>>();
+                    let apply = quote! {
+                        let mut nested_params: Vec<(String, String)> = Vec::new();
+                        #(#emit_properties)*
+                        if nested_params.is_empty() {
+                            nested_params.push((format!("{}[]", #param_key), String::new()));
+                        }
+                        req = req.query(&nested_params);
+                    };
+                    if param.required {
+                        req_appends.push(quote! {{ let v = #param_name; #apply }});
+                    } else {
+                        req_appends.push(quote! { if let Some(v) = #param_name { #apply } });
+                    }
+                    continue;
+                }
                 Some(QuerySerialization::FormExplodedObject) => {
                     // Issue #27: reqwest serializes the struct through
                     // serde_urlencoded, so each property becomes its own
@@ -1706,34 +1865,159 @@ impl CodeGenerator {
                 Some(QuerySerialization::FormExplodedArray { item_type }) => {
                     // `?tags=a&tags=b` — one pair per element; flat structures
                     // expand AWS query-protocol style as `?tags.1.Key=k&tags.1.Value=v`.
-                    let flat_struct = match item_type {
-                        crate::analysis::ArrayItemType::FlatStructRef {
-                            property_names, ..
-                        } => Some(property_names.clone()),
+                    let struct_properties = match item_type {
+                        crate::analysis::ArrayItemType::FlatStructRef { properties, .. }
+                        | crate::analysis::ArrayItemType::NestedStructRef { properties, .. } => {
+                            Some(properties.clone())
+                        }
                         _ => None,
                     };
-                    let emit_items = if let Some(property_names) = flat_struct {
-                        let pushes = property_names
+                    let emit_items = if let Some(properties) = struct_properties {
+                        let pushes = properties
                             .iter()
-                            .map(|wire_name| {
+                            .map(|property| {
+                                let wire_name = &property.wire_name;
                                 // Wire names such as `Type` land on struct
                                 // fields via the same keyword-escaping the
                                 // model generator uses (`r#type`).
                                 let field_ident = CodeGenerator::to_field_ident(
                                     &self.to_rust_field_name(wire_name),
                                 );
-                                quote! {
-                                    query_params.push((
-                                        format!("{}.{}.{}", #param_key, index, #wire_name),
-                                        item.#field_ident.to_string(),
-                                    ));
+                                match &property.value_type {
+                                    crate::analysis::QueryStructPropertyType::Scalar(_) => quote! {
+                                        let value = serde_json::to_value(&item.#field_ident)
+                                            .map_err(HttpError::serialization_error)?;
+                                        if !value.is_null() {
+                                            let value = match value {
+                                                serde_json::Value::String(value) => value,
+                                                serde_json::Value::Bool(value) => value.to_string(),
+                                                serde_json::Value::Number(value) => value.to_string(),
+                                                _ => return Err(HttpError::serialization_error(
+                                                    format!("query field `{}.{}` did not serialize as a scalar", #param_key, #wire_name)
+                                                ).into()),
+                                            };
+                                            query_params.push((
+                                                format!("{}.{}.{}", #param_key, index, #wire_name),
+                                                value,
+                                            ));
+                                        }
+                                    },
+                                    crate::analysis::QueryStructPropertyType::Object { properties } => {
+                                        let leaves = properties.iter().map(|property| property.wire_name.clone()).collect::<Vec<_>>();
+                                        quote! {
+                                            let value = serde_json::to_value(&item.#field_ident)
+                                                .map_err(HttpError::serialization_error)?;
+                                            if !value.is_null() {
+                                                let serde_json::Value::Object(object) = value else {
+                                                    return Err(HttpError::serialization_error(format!("query field `{}.{}` did not serialize as an object", #param_key, #wire_name)).into());
+                                                };
+                                                if object.is_empty() {
+                                                    query_params.push((format!("{}.{}.{}[]", #param_key, index, #wire_name), String::new()));
+                                                }
+                                                for leaf in [#(#leaves),*] {
+                                                    let Some(value) = object.get(leaf) else { continue };
+                                                    if value.is_null() { continue; }
+                                                    let value = match value {
+                                                        serde_json::Value::String(value) => value.clone(),
+                                                        serde_json::Value::Bool(value) => value.to_string(),
+                                                        serde_json::Value::Number(value) => value.to_string(),
+                                                        _ => return Err(HttpError::serialization_error(format!("query field `{}.{}` contained a non-scalar leaf", #param_key, #wire_name)).into()),
+                                                    };
+                                                    query_params.push((format!("{}.{}.{}.{}", #param_key, index, #wire_name, leaf), value));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::analysis::QueryStructPropertyType::Array { item_type } => {
+                                        let nested_properties = match item_type {
+                                            crate::analysis::ArrayItemType::FlatStructRef { properties, .. } => {
+                                                Some(properties.iter().map(|property| property.wire_name.clone()).collect::<Vec<_>>())
+                                            }
+                                            _ => None,
+                                        };
+                                        if let Some(nested_properties) = nested_properties {
+                                            quote! {
+                                                let values = serde_json::to_value(&item.#field_ident)
+                                                    .map_err(HttpError::serialization_error)?;
+                                                if !values.is_null() {
+                                                    let serde_json::Value::Array(values) = values else {
+                                                        return Err(HttpError::serialization_error(
+                                                            format!("query field `{}.{}` did not serialize as an array", #param_key, #wire_name)
+                                                        ).into());
+                                                    };
+                                                    if values.is_empty() {
+                                                        query_params.push((format!("{}.{}.{}[]", #param_key, index, #wire_name), String::new()));
+                                                    }
+                                                    for (nested_index, value) in values.into_iter().enumerate() {
+                                                        let serde_json::Value::Object(object) = value else {
+                                                            return Err(HttpError::serialization_error(
+                                                                format!("query field `{}.{}` contained a non-object item", #param_key, #wire_name)
+                                                            ).into());
+                                                        };
+                                                        if object.is_empty() {
+                                                            query_params.push((format!("{}.{}.{}.{}[]", #param_key, index, #wire_name, nested_index + 1), String::new()));
+                                                        }
+                                                        for nested_wire_name in [#(#nested_properties),*] {
+                                                            let Some(value) = object.get(nested_wire_name) else { continue };
+                                                            if value.is_null() { continue; }
+                                                            let value = match value {
+                                                                serde_json::Value::String(value) => value.clone(),
+                                                                serde_json::Value::Bool(value) => value.to_string(),
+                                                                serde_json::Value::Number(value) => value.to_string(),
+                                                                _ => return Err(HttpError::serialization_error(
+                                                                    format!("query field `{}.{}` contained a non-scalar leaf", #param_key, #wire_name)
+                                                                ).into()),
+                                                            };
+                                                            query_params.push((
+                                                                format!("{}.{}.{}.{}.{}", #param_key, index, #wire_name, nested_index + 1, nested_wire_name),
+                                                                value,
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            quote! {
+                                                let values = serde_json::to_value(&item.#field_ident)
+                                                    .map_err(HttpError::serialization_error)?;
+                                                if !values.is_null() {
+                                                    let serde_json::Value::Array(values) = values else {
+                                                        return Err(HttpError::serialization_error(
+                                                            format!("query field `{}.{}` did not serialize as an array", #param_key, #wire_name)
+                                                        ).into());
+                                                    };
+                                                    if values.is_empty() {
+                                                        query_params.push((format!("{}.{}.{}[]", #param_key, index, #wire_name), String::new()));
+                                                    }
+                                                    for (nested_index, value) in values.into_iter().enumerate() {
+                                                        let value = match value {
+                                                            serde_json::Value::String(value) => value,
+                                                            serde_json::Value::Bool(value) => value.to_string(),
+                                                            serde_json::Value::Number(value) => value.to_string(),
+                                                            _ => return Err(HttpError::serialization_error(
+                                                                format!("query field `{}.{}` contained a non-scalar item", #param_key, #wire_name)
+                                                            ).into()),
+                                                        };
+                                                        query_params.push((
+                                                            format!("{}.{}.{}.{}", #param_key, index, #wire_name, nested_index + 1),
+                                                            value,
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             })
                             .collect::<Vec<_>>();
                         quote! {
                             for (index, item) in v.iter().enumerate() {
                                 let index = index + 1;
+                                let item_start_len = query_params.len();
                                 #(#pushes)*
+                                if query_params.len() == item_start_len {
+                                    query_params.push((format!("{}.{}[]", #param_key, index), String::new()));
+                                }
                             }
                         }
                     } else {
@@ -1816,7 +2100,10 @@ impl CodeGenerator {
                     }
                     continue;
                 }
-                Some(QuerySerialization::Unsupported { .. }) => {}
+                Some(
+                    QuerySerialization::Unsupported { .. }
+                    | QuerySerialization::SimpleHeaderArray { .. },
+                ) => {}
                 None => {}
             }
 
@@ -2051,13 +2338,14 @@ impl CodeGenerator {
             let required = op.request_body_required;
             let body_type = match rb {
                 RequestBodyContent::Json { schema_name, .. }
-                | RequestBodyContent::FormUrlEncoded { schema_name, .. } => {
+                | RequestBodyContent::FormUrlEncoded { schema_name, .. }
+                | RequestBodyContent::Multipart { schema_name, .. } => {
                     let rust_type_name = self.to_rust_type_name(schema_name);
                     let request_ident =
                         syn::Ident::new(&rust_type_name, proc_macro2::Span::call_site());
                     quote! { #request_ident }
                 }
-                RequestBodyContent::Multipart => quote! { reqwest::multipart::Form },
+
                 RequestBodyContent::OctetStream { .. } | RequestBodyContent::Binary { .. } => {
                     quote! { Vec<u8> }
                 }
@@ -2068,7 +2356,6 @@ impl CodeGenerator {
                 ),
             };
             let body_ident = match rb {
-                RequestBodyContent::Multipart => quote! { form },
                 RequestBodyContent::OctetStream { .. }
                 | RequestBodyContent::Binary { .. }
                 | RequestBodyContent::TextPlain { .. }
@@ -2116,7 +2403,8 @@ impl CodeGenerator {
         // (cloudflare has enum schemas like `resource-sharing_resource_type`).
         if let Some(
             QuerySerialization::FormExplodedArray { item_type }
-            | QuerySerialization::FormArray { item_type },
+            | QuerySerialization::FormArray { item_type }
+            | QuerySerialization::SimpleHeaderArray { item_type },
         ) = &param.query_serialization
         {
             use crate::analysis::ArrayItemType;
@@ -2132,6 +2420,11 @@ impl CodeGenerator {
                     let rust_name = self.to_rust_type_name(schema_name);
                     syn::parse_str(&rust_name)
                         .unwrap_or_else(|_| panic!("invalid struct item type `{rust_name}`"))
+                }
+                ArrayItemType::NestedStructRef { schema_name, .. } => {
+                    let rust_name = self.to_rust_type_name(schema_name);
+                    syn::parse_str(&rust_name)
+                        .unwrap_or_else(|_| panic!("invalid nested struct item type `{rust_name}`"))
                 }
             };
             return quote! { Vec<#item_ty> };
@@ -2160,12 +2453,212 @@ impl CodeGenerator {
         param.schema_ref.is_none() && param.rust_type == "String"
     }
 
+    fn resolve_multipart_wire_schema<'a>(
+        schema: &'a serde_json::Value,
+        analysis: &'a SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Option<&'a serde_json::Value> {
+        let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
+            return Some(schema);
+        };
+        let name = reference.strip_prefix("#/components/schemas/")?;
+        if !visited.insert(name.to_string()) {
+            return None;
+        }
+        let resolved = analysis.validation_context.component_schemas.get(name)?;
+        Self::resolve_multipart_wire_schema(resolved, analysis, visited)
+    }
+
+    fn multipart_client_field_kind(
+        schema_type: &crate::analysis::SchemaType,
+        analysis: &SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Option<MultipartClientFieldKind> {
+        match schema_type {
+            crate::analysis::SchemaType::Primitive {
+                rust_type,
+                serde_with,
+            } => {
+                let rust_type = rust_type.replace(' ', "");
+                if rust_type == "bytes::Bytes" {
+                    Some(MultipartClientFieldKind::RawBytes)
+                } else if serde_with
+                    .as_deref()
+                    .is_some_and(|codec| codec.contains("base64_url"))
+                {
+                    Some(MultipartClientFieldKind::Base64UrlUnpadded)
+                } else if serde_with
+                    .as_deref()
+                    .is_some_and(|codec| codec.contains("base64"))
+                    || rust_type == "Vec<u8>"
+                {
+                    Some(MultipartClientFieldKind::Base64)
+                } else {
+                    Some(MultipartClientFieldKind::Text)
+                }
+            }
+            crate::analysis::SchemaType::StringEnum { .. }
+            | crate::analysis::SchemaType::ExtensibleEnum { .. } => {
+                Some(MultipartClientFieldKind::Text)
+            }
+            crate::analysis::SchemaType::Reference { target } => {
+                if !visited.insert(target.clone()) {
+                    return None;
+                }
+                analysis.schemas.get(target).and_then(|schema| {
+                    Self::multipart_client_field_kind(&schema.schema_type, analysis, visited)
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn generate_typed_multipart_form(
+        &self,
+        schema_name: &str,
+        validation_schema: &serde_json::Value,
+        analysis: &SchemaAnalysis,
+    ) -> TokenStream {
+        use crate::analysis::{ObjectAdditionalProperties, SchemaType};
+
+        let Some((resolved_name, resolved_schema)) =
+            self.resolve_reference_schema(schema_name, analysis)
+        else {
+            let message = format!(
+                "multipart request schema `{schema_name}` could not be resolved during generation"
+            );
+            return quote! {
+                return Err(HttpError::Config(#message.to_string()).into());
+            };
+        };
+        let SchemaType::Object {
+            properties,
+            required,
+            additional_properties,
+        } = &resolved_schema.schema_type
+        else {
+            let message =
+                format!("multipart request schema `{schema_name}` must resolve to an object");
+            return quote! {
+                return Err(HttpError::Config(#message.to_string()).into());
+            };
+        };
+        let wire_schema = Self::resolve_multipart_wire_schema(
+            validation_schema,
+            analysis,
+            &mut std::collections::HashSet::new(),
+        );
+        let wire_properties = wire_schema
+            .and_then(|schema| schema.get("properties"))
+            .and_then(serde_json::Value::as_object);
+        let fields = self.emitted_object_properties(
+            resolved_name,
+            properties,
+            required,
+            additional_properties,
+            analysis,
+            None,
+        );
+        if matches!(
+            additional_properties,
+            ObjectAdditionalProperties::Typed { .. }
+        ) {
+            let message = format!(
+                "multipart request schema `{schema_name}` cannot contain typed additional properties"
+            );
+            return quote! {
+                return Err(HttpError::Config(#message.to_string()).into());
+            };
+        }
+
+        let mut parts = Vec::new();
+        for field in fields {
+            let wire_name = field.wire_name;
+            let ident = field.ident;
+            let wire_format = wire_properties
+                .and_then(|properties| properties.get(wire_name))
+                .and_then(|schema| {
+                    Self::resolve_multipart_wire_schema(
+                        schema,
+                        analysis,
+                        &mut std::collections::HashSet::new(),
+                    )
+                })
+                .and_then(|schema| schema.get("format"))
+                .and_then(serde_json::Value::as_str);
+            let kind = if wire_format == Some("binary") {
+                match self.config().types.binary {
+                    crate::type_mapping::BinaryStrategy::String => MultipartClientFieldKind::Text,
+                    crate::type_mapping::BinaryStrategy::Bytes
+                    | crate::type_mapping::BinaryStrategy::VecU8 => {
+                        MultipartClientFieldKind::RawBytes
+                    }
+                }
+            } else if let Some(kind) = Self::multipart_client_field_kind(
+                &field.property.schema_type,
+                analysis,
+                &mut std::collections::HashSet::new(),
+            ) {
+                kind
+            } else {
+                let message =
+                    format!("multipart field `{wire_name}` must be binary or a scalar text field");
+                return quote! {
+                    return Err(HttpError::Config(#message.to_string()).into());
+                };
+            };
+            let add_value = match kind {
+                MultipartClientFieldKind::RawBytes => quote! {
+                    form = form.part(
+                        #wire_name,
+                        reqwest::multipart::Part::bytes(value.to_vec()),
+                    );
+                },
+                MultipartClientFieldKind::Base64 => quote! {
+                    use base64::Engine as _;
+                    form = form.text(
+                        #wire_name,
+                        base64::engine::general_purpose::STANDARD.encode(value),
+                    );
+                },
+                MultipartClientFieldKind::Base64UrlUnpadded => quote! {
+                    use base64::Engine as _;
+                    form = form.text(
+                        #wire_name,
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value),
+                    );
+                },
+                MultipartClientFieldKind::Text => quote! {
+                    form = form.text(#wire_name, value.to_string());
+                },
+            };
+            parts.push(if field.is_required {
+                quote! {
+                    let value = &request.#ident;
+                    #add_value
+                }
+            } else {
+                quote! {
+                    if let Some(value) = &request.#ident {
+                        #add_value
+                    }
+                }
+            });
+        }
+
+        quote! {
+            let mut form = reqwest::multipart::Form::new();
+            #(#parts)*
+            req = req.multipart(form);
+        }
+    }
+
     /// Generate request body serialization based on content type
     /// Emit statements that mutate `req` to apply the request body. Returns
     /// explicit zero-length framing for bodyless POST, PUT, and PATCH requests.
     /// Optional bodies (T11) gate the application on `Some(_)`; required bodies
     /// apply unconditionally.
-    fn generate_request_body(&self, op: &OperationInfo) -> TokenStream {
+    fn generate_request_body(&self, op: &OperationInfo, analysis: &SchemaAnalysis) -> TokenStream {
         let empty_request_framing = Self::generate_empty_request_framing(op);
         let Some(rb) = op.request_body.as_ref() else {
             return empty_request_framing;
@@ -2189,11 +2682,13 @@ impl CodeGenerator {
                         .header("content-type", #media_type);
                 },
             ),
-            RequestBodyContent::Multipart => (
-                quote! { form },
-                quote! {
-                    req = req.multipart(form);
-                },
+            RequestBodyContent::Multipart {
+                schema_name,
+                validation_schema,
+                ..
+            } => (
+                quote! { request },
+                self.generate_typed_multipart_form(schema_name, validation_schema, analysis),
             ),
             RequestBodyContent::OctetStream { media_type } => (
                 quote! { body },
