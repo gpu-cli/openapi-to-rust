@@ -1122,7 +1122,11 @@ pub fn is_text_media_type(ct: &str) -> bool {
         return true;
     }
     top_level.eq_ignore_ascii_case("application")
-        && (subtype.eq_ignore_ascii_case("xml") || subtype.to_ascii_lowercase().ends_with("+xml"))
+        && (subtype.eq_ignore_ascii_case("xml")
+            || subtype.to_ascii_lowercase().ends_with("+xml")
+            // JWT (RFC 7519) compact serializations are ASCII text: three
+            // base64url segments joined by dots.
+            || subtype.eq_ignore_ascii_case("jwt"))
 }
 
 /// Returns true for OpenAPI media ranges with a wildcard subtype.
@@ -1640,6 +1644,11 @@ mod tests {
         );
         assert_eq!(
             classify_response_media_type("application/atom+xml", Some(&string_schema)),
+            ResponseMediaKind::Text
+        );
+        // JWT compact serializations (RFC 7519) are ASCII text.
+        assert_eq!(
+            classify_response_media_type("application/jwt", Some(&string_schema)),
             ResponseMediaKind::Text
         );
         assert!(!is_binary_media_type("text/plain", None));
