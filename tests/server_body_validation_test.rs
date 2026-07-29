@@ -123,6 +123,98 @@ fn xml_request_media_is_accepted_as_text_during_server_generation() {
 }
 
 #[test]
+fn typed_multipart_request_generates_axum_extraction() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "multipart body", "version": "1" },
+        "paths": { "/upload": { "post": {
+            "operationId": "uploadFile",
+            "requestBody": { "required": true, "content": {
+                "multipart/form-data": { "schema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["file", "count", "enabled"],
+                    "properties": {
+                        "file": { "type": "string", "format": "binary" },
+                        "count": { "type": "integer", "format": "uint64", "minimum": 1 },
+                        "enabled": { "type": "boolean" },
+                        "display-name": { "type": "string", "minLength": 2 }
+                    }
+                }}
+            }},
+            "responses": { "204": { "description": "accepted" } }
+        }}}
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["uploadFile".into()],
+        prune_models: true,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        server: Some(server.clone()),
+        ..Default::default()
+    };
+
+    let generated = ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .expect("flat typed multipart schemas should generate");
+    let api = &generated
+        .iter()
+        .find(|file| file.path.ends_with("api.rs"))
+        .expect("api.rs")
+        .content;
+    let router = &generated
+        .iter()
+        .find(|file| file.path.ends_with("router.rs"))
+        .expect("router.rs")
+        .content;
+    assert!(api.contains("UploadFileRequest"), "{api}");
+    assert!(router.contains("::axum::extract::Multipart"), "{router}");
+    assert!(router.contains("DefaultBodyLimit::max"), "{router}");
+    assert!(router.contains("display-name"), "{router}");
+    assert!(router.contains("parse::<u64>"), "{router}");
+    assert!(router.contains("__multipart_binary_file"), "{router}");
+    assert!(!router.contains("bytes.iter()"), "{router}");
+}
+
+#[test]
+fn typed_multipart_additional_properties_are_rejected() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "typed multipart map", "version": "1" },
+        "paths": { "/upload": { "post": {
+            "operationId": "uploadMap",
+            "requestBody": { "required": true, "content": {
+                "multipart/form-data": { "schema": {
+                    "type": "object",
+                    "properties": { "name": { "type": "string" } },
+                    "additionalProperties": { "type": "string" }
+                }}
+            }},
+            "responses": { "204": { "description": "accepted" } }
+        }}}
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["uploadMap".into()],
+        prune_models: true,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        server: Some(server.clone()),
+        ..Default::default()
+    };
+    let error = ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("additionalProperties"), "{error}");
+}
+
+#[test]
 fn unsupported_request_media_is_rejected_during_server_generation() {
     let spec = json!({
         "openapi": "3.1.0",
@@ -153,6 +245,41 @@ fn unsupported_request_media_is_rejected_during_server_generation() {
         .to_string();
     assert!(error.contains("postCustom"), "{error}");
     assert!(error.contains("application/x-proprietary"), "{error}");
+}
+
+#[test]
+fn cyclic_multipart_aliases_are_rejected_without_recursing() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "cyclic multipart", "version": "1" },
+        "paths": { "/upload": { "post": {
+            "operationId": "uploadCycle",
+            "requestBody": { "required": true, "content": {
+                "multipart/form-data": { "schema": { "$ref": "#/components/schemas/A" } }
+            }},
+            "responses": { "204": { "description": "unused" } }
+        }}},
+        "components": { "schemas": {
+            "A": { "$ref": "#/components/schemas/B" },
+            "B": { "$ref": "#/components/schemas/A" }
+        }}
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["uploadCycle".into()],
+        prune_models: true,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        server: Some(server.clone()),
+        ..Default::default()
+    };
+    let error = ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("reference cycle"), "{error}");
 }
 
 #[test]

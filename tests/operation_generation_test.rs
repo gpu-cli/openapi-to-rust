@@ -1,5 +1,7 @@
+use openapi_to_rust::SchemaAnalyzer;
 use openapi_to_rust::analysis::{OperationInfo, RequestBodyContent, SchemaAnalysis};
 use openapi_to_rust::generator::{CodeGenerator, GeneratorConfig};
+use serde_json::json;
 use std::collections::BTreeMap;
 
 fn create_test_config() -> GeneratorConfig {
@@ -815,28 +817,34 @@ fn test_generate_multipart_operation() {
     let config = create_test_config();
     let generator = CodeGenerator::new(config);
 
-    let operation = OperationInfo {
-        operation_id: "uploadFile".to_string(),
-        method: "POST".to_string(),
-        path: "/upload".to_string(),
-        summary: None,
-        description: None,
-        request_body: Some(RequestBodyContent::Multipart),
-        response_schemas: BTreeMap::new(),
-        parameters: vec![],
-        request_body_required: true,
-        supports_streaming: false,
-        stream_parameter: None,
-        tags: Vec::new(),
-    };
-
-    let analysis = create_test_analysis_with_operations(vec![operation]);
+    let analysis = SchemaAnalyzer::new(json!({
+        "openapi": "3.1.0",
+        "info": { "title": "multipart", "version": "1" },
+        "paths": { "/upload": { "post": {
+            "operationId": "uploadFile",
+            "requestBody": { "required": true, "content": {
+                "multipart/form-data": { "schema": {
+                    "type": "object",
+                    "required": ["file", "count"],
+                    "properties": {
+                        "file": { "type": "string", "format": "binary" },
+                        "count": { "type": "integer" },
+                        "display-name": { "type": "string" }
+                    }
+                }}
+            }},
+            "responses": { "204": { "description": "ok" } }
+        }}}
+    }))
+    .unwrap()
+    .analyze()
+    .unwrap();
     let result = generator.generate_operation_methods(&analysis);
     let result_str = result.to_string();
 
-    // Verify parameter is reqwest multipart form
-    assert!(result_str.contains("form : reqwest :: multipart :: Form"));
-    // Verify .multipart(form) call
+    assert!(result_str.contains("request : UploadFileRequest"));
+    assert!(result_str.contains("Part :: bytes"));
+    assert!(result_str.contains("\"display-name\""));
     assert!(result_str.contains(". multipart (form)"));
 }
 

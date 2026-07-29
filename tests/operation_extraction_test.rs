@@ -424,11 +424,22 @@ fn test_extract_multipart_body() {
         .operations
         .get("uploadFile")
         .expect("uploadFile operation not found");
-    assert!(op.request_body.is_some());
-    assert!(matches!(
-        op.request_body.as_ref().unwrap(),
-        RequestBodyContent::Multipart
-    ));
+    let request_body = op.request_body.as_ref().unwrap();
+    let RequestBodyContent::Multipart {
+        schema_name,
+        media_type,
+        validation_schema,
+    } = request_body
+    else {
+        panic!("expected typed multipart request body, got {request_body:?}");
+    };
+    assert_eq!(schema_name, "UploadFileRequest");
+    assert_eq!(media_type, "multipart/form-data");
+    assert_eq!(
+        validation_schema.pointer("/properties/file/format"),
+        Some(&serde_json::Value::String("binary".to_string()))
+    );
+    assert_eq!(request_body.schema_name(), Some("UploadFileRequest"));
 }
 
 #[test]

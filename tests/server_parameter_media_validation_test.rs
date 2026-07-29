@@ -198,6 +198,68 @@ mod tests {
 }
 
 #[test]
+fn simple_array_header_is_typed_for_client_and_server() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "array header", "version": "1" },
+        "paths": { "/attributes": { "get": {
+            "operationId": "getAttributes",
+            "parameters": [{
+                "name": "x-object-attributes",
+                "in": "header",
+                "required": true,
+                "schema": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/ObjectAttribute" }
+                }
+            }],
+            "responses": { "204": { "description": "ok" } }
+        }}},
+        "components": { "schemas": {
+            "ObjectAttribute": {
+                "type": "string",
+                "enum": ["ETag", "ObjectSize"]
+            }
+        }}
+    });
+    let mut analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["getAttributes".into()],
+        prune_models: true,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        server: Some(server.clone()),
+        ..Default::default()
+    };
+    let files = ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .expect("simple array headers should generate");
+    let joined = files
+        .into_iter()
+        .map(|file| file.content)
+        .collect::<String>();
+    assert!(joined.contains("Vec<ObjectAttribute>"), "{joined}");
+    assert!(joined.contains("split(',')"), "{joined}");
+
+    let generator = CodeGenerator::new(config);
+    let generated = generator.generate_all(&mut analysis).unwrap();
+    let client = generated
+        .files
+        .iter()
+        .find(|file| file.path.ends_with("client.rs"))
+        .expect("generated client");
+    assert!(
+        client
+            .content
+            .contains("x_object_attributes: Vec<ObjectAttribute>"),
+        "{}",
+        client.content
+    );
+}
+
+#[test]
 fn raw_parameter_schema_preserves_large_integer_constraints() {
     let maximum = 9_007_199_254_740_993_u64;
     let spec = json!({

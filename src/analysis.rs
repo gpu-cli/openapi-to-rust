@@ -392,7 +392,12 @@ pub enum RequestBodyContent {
         #[serde(skip)]
         validation_schema: Value,
     },
-    Multipart,
+    Multipart {
+        schema_name: String,
+        media_type: String,
+        #[serde(skip)]
+        validation_schema: Value,
+    },
     OctetStream {
         media_type: String,
     },
@@ -417,11 +422,10 @@ impl RequestBodyContent {
     /// Get the schema name if this content type has one
     pub fn schema_name(&self) -> Option<&str> {
         match self {
-            Self::Json { schema_name, .. } | Self::FormUrlEncoded { schema_name, .. } => {
-                Some(schema_name)
-            }
-            Self::Multipart
-            | Self::OctetStream { .. }
+            Self::Json { schema_name, .. }
+            | Self::FormUrlEncoded { schema_name, .. }
+            | Self::Multipart { schema_name, .. } => Some(schema_name),
+            Self::OctetStream { .. }
             | Self::Binary { .. }
             | Self::TextPlain { .. }
             | Self::SchemaLess { .. }
@@ -519,6 +523,14 @@ pub enum QuerySerialization {
     /// each property is its own pair — `?color=red&size=big`. The parameter
     /// name never appears in the query string (RFC 6570 form-explosion).
     FormExplodedObject,
+    /// AWS query-protocol form explosion for an object containing arrays:
+    /// `Parameter.Prop.1=value` or `Parameter.Prop.1.Leaf=value`. Unlike
+    /// ordinary RFC 6570 form explosion, AWS service models retain the outer
+    /// parameter wire name; client and server generation intentionally mirror
+    /// that protocol-specific representation.
+    FormExplodedNestedObject {
+        properties: Vec<QueryStructProperty>,
+    },
     /// style=form + explode=false object: one comma-joined key,value list —
     /// `?filter=color,red,size,big`.
     FormObject,
@@ -531,6 +543,9 @@ pub enum QuerySerialization {
     /// style=form + explode=false array: one comma-joined pair —
     /// `?tags=a,b,c`. Parameter typed `Vec<item_type>`.
     FormArray { item_type: ArrayItemType },
+    /// Header `style=simple, explode=false` array: one physical header value
+    /// containing comma-separated scalar items.
+    SimpleHeaderArray { item_type: ArrayItemType },
     /// A complex query shape whose wire representation is undefined by
     /// OpenAPI or not implemented symmetrically. Clients retain the explicit
     /// opaque-string escape hatch; server generation rejects it with this
@@ -557,8 +572,41 @@ pub enum ArrayItemType {
     /// keys without re-resolving the schema.
     FlatStructRef {
         schema_name: String,
-        property_names: Vec<String>,
+        properties: Vec<QueryStructProperty>,
     },
+    /// A referenced structure with scalar properties plus arrays whose items
+    /// are scalar or flat structures. This is the deepest unambiguous shape
+    /// used by AWS query protocols (`param.N.Prop.M.Leaf=value`).
+    NestedStructRef {
+        schema_name: String,
+        properties: Vec<QueryStructProperty>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct QueryStructProperty {
+    pub wire_name: String,
+    pub required: bool,
+    pub value_type: QueryStructPropertyType,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum QueryStructPropertyType {
+    Scalar(QueryScalarType),
+    Array {
+        item_type: ArrayItemType,
+    },
+    Object {
+        properties: Vec<QueryStructProperty>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum QueryScalarType {
+    String,
+    Integer,
+    Number,
+    Boolean,
 }
 
 impl Default for DependencyGraph {
@@ -1025,6 +1073,13 @@ pub struct SchemaAnalyzer {
 }
 
 impl SchemaAnalyzer {
+    fn uses_aws_query_conventions(&self) -> bool {
+        self.openapi_spec
+            .pointer("/info/x-providerName")
+            .and_then(Value::as_str)
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("amazonaws.com"))
+    }
+
     /// Construct an analyzer with a default [`TypeMapper`]. Pre-Q2.0
     /// callers (tests, simple bins) use this and get bit-identical
     /// behavior to the pre-refactor code.
@@ -4678,7 +4733,27 @@ impl SchemaAnalyzer {
                 } else if media_type_essence(content_type)
                     .eq_ignore_ascii_case("multipart/form-data")
                 {
-                    Some(RequestBodyContent::Multipart)
+                    match maybe_schema {
+                        Some(schema) => {
+                            let validation_schema = self
+                                .raw_request_body_schema(raw_operation.as_ref(), content_type)
+                                .unwrap_or(
+                                    serde_json::to_value(schema)
+                                        .map_err(GeneratorError::ParseError)?,
+                                );
+                            Some(
+                                self.resolve_or_inline_schema(schema, operation_id, "Request")
+                                    .map(|schema_name| RequestBodyContent::Multipart {
+                                        schema_name,
+                                        media_type: content_type.to_string(),
+                                        validation_schema,
+                                    })?,
+                            )
+                        }
+                        None => Some(RequestBodyContent::SchemaLess {
+                            media_type: content_type.to_string(),
+                        }),
+                    }
                 } else if is_binary_media_type(content_type, maybe_schema) {
                     if media_type_essence(content_type)
                         .eq_ignore_ascii_case("application/octet-stream")
@@ -5278,6 +5353,9 @@ impl SchemaAnalyzer {
         // per spec (issue #27). deepObject is only defined with explode=true;
         // an explicit explode=false there is undefined and keeps the fallback.
         let is_query = location == "query";
+        let is_simple_header = location == "header"
+            && matches!(param.style.as_deref(), None | Some("simple"))
+            && param.explode != Some(true);
         let form_style = matches!(param.style.as_deref(), None | Some("form"));
         let form_exploded = form_style && param.explode.unwrap_or(true);
         let deep_object =
@@ -5309,9 +5387,20 @@ impl SchemaAnalyzer {
                         && self.referenced_schema_is_object(name)
                     {
                         schema_ref = Some(name.to_string());
-                        query_serialization = object_serialization.clone();
-                    } else if is_query
-                        && form_style
+                        query_serialization = if form_exploded && self.uses_aws_query_conventions()
+                        {
+                            match self.referenced_array_struct_item_type(name, 1) {
+                                Some(ArrayItemType::NestedStructRef { properties, .. }) => {
+                                    Some(QuerySerialization::FormExplodedNestedObject {
+                                        properties,
+                                    })
+                                }
+                                _ => object_serialization.clone(),
+                            }
+                        } else {
+                            object_serialization.clone()
+                        };
+                    } else if (is_query && form_style || is_simple_header)
                         && let Some(item_type) = self.referenced_array_param_item_type(name)
                     {
                         // A parameter may reference a reusable array schema
@@ -5320,7 +5409,9 @@ impl SchemaAnalyzer {
                         // public parameter type to the same Vec<T> used by
                         // inline arrays.
                         schema_ref = Some(name.to_string());
-                        query_serialization = Some(if form_exploded {
+                        query_serialization = Some(if is_simple_header {
+                            QuerySerialization::SimpleHeaderArray { item_type }
+                        } else if form_exploded {
                             QuerySerialization::FormExplodedArray { item_type }
                         } else {
                             QuerySerialization::FormArray { item_type }
@@ -5337,10 +5428,18 @@ impl SchemaAnalyzer {
                 let synthetic_name = format!("{op_pascal}{param_pascal}");
                 let mut deps = HashSet::new();
                 self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
-                schema_ref = Some(synthetic_name);
-                query_serialization = object_serialization.clone();
-            } else if is_query
-                && form_style
+                schema_ref = Some(synthetic_name.clone());
+                query_serialization = if form_exploded && self.uses_aws_query_conventions() {
+                    match self.referenced_array_struct_item_type(&synthetic_name, 1) {
+                        Some(ArrayItemType::NestedStructRef { properties, .. }) => {
+                            Some(QuerySerialization::FormExplodedNestedObject { properties })
+                        }
+                        _ => object_serialization.clone(),
+                    }
+                } else {
+                    object_serialization.clone()
+                };
+            } else if (is_query && form_style || is_simple_header)
                 && matches!(
                     schema.schema_type(),
                     Some(crate::openapi::SchemaType::Array)
@@ -5354,7 +5453,9 @@ impl SchemaAnalyzer {
                 // is the authoritative Vec<T> projection. Arrays whose items
                 // don't type (objects, nested arrays) fall through to the
                 // explicit unsupported shape below.
-                query_serialization = Some(if form_exploded {
+                query_serialization = Some(if is_simple_header {
+                    QuerySerialization::SimpleHeaderArray { item_type }
+                } else if form_exploded {
                     QuerySerialization::FormExplodedArray { item_type }
                 } else {
                     QuerySerialization::FormArray { item_type }
@@ -5436,7 +5537,7 @@ impl SchemaAnalyzer {
                     ))
                 } else if is_array && form_style {
                     Some(
-                        "form array query parameters require scalar or string-enum items"
+                        "form array query parameter exceeds the supported nesting bound or contains a non-scalar leaf; supported shapes are scalar arrays, arrays of flat scalar objects, and one nested scalar-object array"
                             .to_string(),
                     )
                 } else if is_array {
@@ -5491,7 +5592,7 @@ impl SchemaAnalyzer {
             let name = self.extract_schema_name(ref_str)?;
             return self
                 .referenced_array_scalar_item_type(name)
-                .or_else(|| self.referenced_array_flat_struct_item_type(name));
+                .or_else(|| self.referenced_array_struct_item_type(name, 1));
         }
         let format = unwrapped.details().format.clone();
         let scalar = match unwrapped.schema_type()? {
@@ -5519,43 +5620,164 @@ impl SchemaAnalyzer {
     }
 
     fn analyzed_array_item_type(&self, item_type: &SchemaType) -> Option<ArrayItemType> {
-        match item_type {
-            SchemaType::Primitive { rust_type, .. } => {
-                Some(ArrayItemType::Scalar(rust_type.clone()))
-            }
-            SchemaType::Reference { target } => self
-                .referenced_array_scalar_item_type(target)
-                .or_else(|| self.referenced_array_flat_struct_item_type(target)),
-            _ => None,
-        }
+        self.analyzed_array_item_type_at_depth(item_type, 1)
     }
 
     /// Accept a referenced structure as a form-style array item when every
     /// property is scalar (AWS query-protocol flat structures such as
     /// `Tag { Key, Value }`). Nested objects, arrays, and maps are rejected
     /// because the wire shape below one level is service-specific.
-    fn referenced_array_flat_struct_item_type(&self, name: &str) -> Option<ArrayItemType> {
+    fn referenced_array_struct_item_type(
+        &self,
+        name: &str,
+        nested_array_depth: usize,
+    ) -> Option<ArrayItemType> {
         let resolved = self.resolve_cached_schema(name)?;
-        let SchemaType::Object { properties, .. } = &resolved.schema_type else {
+        let SchemaType::Object {
+            properties,
+            required,
+            additional_properties,
+        } = &resolved.schema_type
+        else {
             return None;
         };
-        if properties.is_empty() {
+        if properties.is_empty()
+            || !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
+        {
             return None;
         }
-        let all_scalar = properties
-            .values()
-            .all(|property| match &property.schema_type {
-                SchemaType::Primitive { .. } => true,
-                SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. } => true,
-                SchemaType::Reference { target } => {
-                    self.referenced_array_scalar_item_type(target).is_some()
+        let mut projected = Vec::with_capacity(properties.len());
+        let mut has_array = false;
+        for (wire_name, property) in properties {
+            let value_type = if let Some(scalar) = self.query_scalar_type(&property.schema_type) {
+                QueryStructPropertyType::Scalar(scalar)
+            } else {
+                if nested_array_depth == 0 {
+                    return None;
                 }
-                _ => false,
+                if let Some(array) = self.resolve_query_array_type(&property.schema_type) {
+                    let item_type =
+                        self.analyzed_array_item_type_at_depth(array, nested_array_depth - 1)?;
+                    if matches!(item_type, ArrayItemType::NestedStructRef { .. }) {
+                        return None;
+                    }
+                    has_array = true;
+                    QueryStructPropertyType::Array { item_type }
+                } else {
+                    has_array = true;
+                    QueryStructPropertyType::Object {
+                        properties: self.query_flat_object_properties(&property.schema_type)?,
+                    }
+                }
+            };
+            projected.push(QueryStructProperty {
+                wire_name: wire_name.clone(),
+                required: required.contains(wire_name),
+                value_type,
             });
-        all_scalar.then(|| ArrayItemType::FlatStructRef {
-            schema_name: name.to_string(),
-            property_names: properties.keys().cloned().collect(),
-        })
+        }
+        if has_array {
+            Some(ArrayItemType::NestedStructRef {
+                schema_name: name.to_string(),
+                properties: projected,
+            })
+        } else {
+            Some(ArrayItemType::FlatStructRef {
+                schema_name: name.to_string(),
+                properties: projected,
+            })
+        }
+    }
+
+    fn analyzed_array_item_type_at_depth(
+        &self,
+        item_type: &SchemaType,
+        nested_array_depth: usize,
+    ) -> Option<ArrayItemType> {
+        match item_type {
+            SchemaType::Primitive { rust_type, .. } => {
+                Some(ArrayItemType::Scalar(rust_type.clone()))
+            }
+            SchemaType::Reference { target } => self
+                .referenced_array_scalar_item_type(target)
+                .or_else(|| self.referenced_array_struct_item_type(target, nested_array_depth)),
+            _ => None,
+        }
+    }
+
+    fn resolve_query_array_type<'a>(
+        &'a self,
+        schema_type: &'a SchemaType,
+    ) -> Option<&'a SchemaType> {
+        match schema_type {
+            SchemaType::Array { item_type } => Some(item_type),
+            SchemaType::Reference { target } => {
+                let resolved = self.resolve_cached_schema(target)?;
+                let SchemaType::Array { item_type } = &resolved.schema_type else {
+                    return None;
+                };
+                Some(item_type)
+            }
+            _ => None,
+        }
+    }
+
+    fn query_flat_object_properties(
+        &self,
+        schema_type: &SchemaType,
+    ) -> Option<Vec<QueryStructProperty>> {
+        let schema_type = match schema_type {
+            SchemaType::Reference { target } => &self.resolve_cached_schema(target)?.schema_type,
+            other => other,
+        };
+        let SchemaType::Object {
+            properties,
+            required,
+            additional_properties,
+        } = schema_type
+        else {
+            return None;
+        };
+        if properties.is_empty()
+            || !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
+        {
+            return None;
+        }
+        properties
+            .iter()
+            .map(|(wire_name, property)| {
+                Some(QueryStructProperty {
+                    wire_name: wire_name.clone(),
+                    required: required.contains(wire_name),
+                    value_type: QueryStructPropertyType::Scalar(
+                        self.query_scalar_type(&property.schema_type)?,
+                    ),
+                })
+            })
+            .collect()
+    }
+
+    fn query_scalar_type(&self, schema_type: &SchemaType) -> Option<QueryScalarType> {
+        match schema_type {
+            SchemaType::Primitive { rust_type, .. } => match rust_type.as_str() {
+                "String" => Some(QueryScalarType::String),
+                "bool" => Some(QueryScalarType::Boolean),
+                value if value.starts_with('i') || value.starts_with('u') => {
+                    Some(QueryScalarType::Integer)
+                }
+                value if value.starts_with('f') => Some(QueryScalarType::Number),
+                "serde_json::Value" => None,
+                _ => Some(QueryScalarType::String),
+            },
+            SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. } => {
+                Some(QueryScalarType::String)
+            }
+            SchemaType::Reference { target } => {
+                let resolved = self.resolve_cached_schema(target)?;
+                self.query_scalar_type(&resolved.schema_type)
+            }
+            _ => None,
+        }
     }
 
     /// Resolve a referenced array item through any alias chain while

@@ -22,5 +22,6 @@ futures-util = "0.3"
 # Pulled in by the generated types — see src/gen/REQUIRED_DEPS.toml
 # after running `openapi-to-rust generate`.
 base64 = "0.22"
+bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 url = "2"

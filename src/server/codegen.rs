@@ -21,6 +21,23 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy)]
+enum MultipartFieldKind {
+    Binary,
+    String,
+    Integer,
+    UnsignedInteger,
+    Number,
+    Boolean,
+}
+
+struct MultipartFieldPlan {
+    wire_name: String,
+    field_ident: syn::Ident,
+    required: bool,
+    kind: MultipartFieldKind,
+}
+
 /// Compute the set of schema names transitively reachable from the
 /// request/response/parameter shapes of the given operations.
 ///
@@ -78,6 +95,9 @@ pub fn reachable_schemas_with_roots(
                 }
                 | QuerySerialization::FormArray {
                     item_type: crate::analysis::ArrayItemType::SchemaRef(name),
+                }
+                | QuerySerialization::SimpleHeaderArray {
+                    item_type: crate::analysis::ArrayItemType::SchemaRef(name),
                 },
             ) = &p.query_serialization
             {
@@ -85,10 +105,19 @@ pub fn reachable_schemas_with_roots(
             }
             if let Some(
                 QuerySerialization::FormExplodedArray {
-                    item_type: crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. },
+                    item_type:
+                        crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. }
+                        | crate::analysis::ArrayItemType::NestedStructRef { schema_name, .. },
                 }
                 | QuerySerialization::FormArray {
-                    item_type: crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. },
+                    item_type:
+                        crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. }
+                        | crate::analysis::ArrayItemType::NestedStructRef { schema_name, .. },
+                }
+                | QuerySerialization::SimpleHeaderArray {
+                    item_type:
+                        crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. }
+                        | crate::analysis::ArrayItemType::NestedStructRef { schema_name, .. },
                 },
             ) = &p.query_serialization
             {
@@ -267,6 +296,109 @@ pub struct ServerCodegen<'a> {
 }
 
 impl<'a> ServerCodegen<'a> {
+    fn resolve_multipart_schema<'b>(
+        &'b self,
+        schema: &'b serde_json::Value,
+    ) -> Result<&'b serde_json::Value, ServerCodegenError> {
+        self.resolve_multipart_schema_inner(schema, &mut std::collections::HashSet::new())
+    }
+
+    fn resolve_multipart_schema_inner<'b>(
+        &'b self,
+        schema: &'b serde_json::Value,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Result<&'b serde_json::Value, ServerCodegenError> {
+        let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
+            return Ok(schema);
+        };
+        let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+            return Ok(schema);
+        };
+        if !visited.insert(name.to_string()) {
+            return Err(ServerCodegenError::Validation(format!(
+                "multipart schema reference cycle includes `{name}`"
+            )));
+        }
+        let resolved = self
+            .analysis
+            .validation_context
+            .component_schemas
+            .get(name)
+            .ok_or_else(|| {
+                ServerCodegenError::Validation(format!(
+                    "multipart schema reference `{reference}` could not be resolved"
+                ))
+            })?;
+        self.resolve_multipart_schema_inner(resolved, visited)
+    }
+
+    fn multipart_field_plans(
+        &self,
+        schema: &serde_json::Value,
+    ) -> Result<Vec<MultipartFieldPlan>, ServerCodegenError> {
+        let schema = self.resolve_multipart_schema(schema)?;
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                ServerCodegenError::Validation(
+                    "multipart request schema must be a flat object with declared properties"
+                        .into(),
+                )
+            })?;
+        if schema
+            .get("additionalProperties")
+            .is_some_and(|value| value != &serde_json::Value::Bool(false))
+        {
+            return Err(ServerCodegenError::Validation(
+                "multipart request schema cannot use additionalProperties".into(),
+            ));
+        }
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        properties
+            .iter()
+            .map(|(wire_name, property)| {
+                let property = self.resolve_multipart_schema(property)?;
+                let kind = match (
+                    property.get("type").and_then(serde_json::Value::as_str),
+                    property.get("format").and_then(serde_json::Value::as_str),
+                ) {
+                    (Some("string"), Some("binary")) => match self.config.types.binary {
+                        crate::type_mapping::BinaryStrategy::String => MultipartFieldKind::String,
+                        crate::type_mapping::BinaryStrategy::Bytes
+                        | crate::type_mapping::BinaryStrategy::VecU8 => MultipartFieldKind::Binary,
+                    },
+                    (Some("string"), _) => MultipartFieldKind::String,
+                    (Some("integer"), Some("uint32" | "uint64" | "uint"))
+                        if self.config.types.unsigned =>
+                    {
+                        MultipartFieldKind::UnsignedInteger
+                    }
+                    (Some("integer"), _) => MultipartFieldKind::Integer,
+                    (Some("number"), _) => MultipartFieldKind::Number,
+                    (Some("boolean"), _) => MultipartFieldKind::Boolean,
+                    _ => {
+                        return Err(ServerCodegenError::Validation(format!(
+                            "multipart field `{wire_name}` must be binary or a scalar text field"
+                        )));
+                    }
+                };
+                Ok(MultipartFieldPlan {
+                    wire_name: wire_name.clone(),
+                    field_ident: CodeGenerator::to_field_ident(&wire_name.to_snake_case()),
+                    required: required.contains(wire_name.as_str()),
+                    kind,
+                })
+            })
+            .collect()
+    }
+
     pub fn new(
         config: &'a GeneratorConfig,
         analysis: &'a SchemaAnalysis,
@@ -360,6 +492,7 @@ impl<'a> ServerCodegen<'a> {
             .collect::<Result<_, _>>()?;
         validate_tag_identifier_collisions(&ops)?;
         validate_custom_method_route_groups(&ops)?;
+        validate_normalized_route_collisions(&ops)?;
         self.validate_query_parameters(&ops)?;
         self.validate_supported_server_inputs(&ops)?;
         self.validate_supported_server_outputs(&ops)?;
@@ -396,6 +529,12 @@ impl<'a> ServerCodegen<'a> {
                 Some(RequestBodyContent::TextPlain { .. })
             )
         });
+        let has_embedded_path_affixes = ops.iter().any(|operation| {
+            operation.parameters.iter().any(|parameter| {
+                parameter.location == "path"
+                    && path_parameter_affixes(&operation.path, &parameter.name).is_some()
+            })
+        });
 
         let validation_bundle = if self.server.validation.enabled {
             Some(
@@ -413,7 +552,8 @@ impl<'a> ServerCodegen<'a> {
         };
 
         let transport_validation = has_binary_body || has_text_body;
-        let validation_module_enabled = validation_bundle.is_some() || transport_validation;
+        let validation_module_enabled =
+            validation_bundle.is_some() || transport_validation || has_embedded_path_affixes;
         let api_rs = self.emit_api(&groups, &response_enum_names);
         let errors_rs = self.emit_errors(&ops, validation_module_enabled, &response_enum_names);
         let router_rs = self.emit_router(&groups, validation_bundle.as_ref())?;
@@ -447,7 +587,7 @@ impl<'a> ServerCodegen<'a> {
                     has_text_body,
                 )),
             });
-        } else if transport_validation {
+        } else if transport_validation || has_embedded_path_affixes {
             files.push(GeneratedFile {
                 path: PathBuf::from("server").join("validation.rs"),
                 content: format_or_raw(super::validation::emit_transport_validation_module(
@@ -580,6 +720,10 @@ impl<'a> ServerCodegen<'a> {
                     });
                 }
                 if matches!(parameter.location.as_str(), "path" | "header" | "cookie")
+                    && !matches!(
+                        parameter.query_serialization,
+                        Some(QuerySerialization::SimpleHeaderArray { .. })
+                    )
                     && parameter
                         .validation_schema
                         .as_ref()
@@ -596,12 +740,10 @@ impl<'a> ServerCodegen<'a> {
                 Some(RequestBodyContent::FormUrlEncoded { .. }) => {
                     self.form_field_names(operation)?;
                 }
-                Some(RequestBodyContent::Multipart) => {
-                    return Err(ServerCodegenError::UnsupportedRequestBody {
-                        operation_id: operation.operation_id.clone(),
-                        media_type: "multipart/form-data".to_string(),
-                        reason: "typed multipart server extraction is not implemented".to_string(),
-                    });
+                Some(RequestBodyContent::Multipart {
+                    validation_schema, ..
+                }) => {
+                    self.multipart_field_plans(validation_schema)?;
                 }
                 Some(RequestBodyContent::SchemaLess { media_type }) => {
                     return Err(ServerCodegenError::UnsupportedRequestBody {
@@ -910,9 +1052,13 @@ impl<'a> ServerCodegen<'a> {
                             vec![parameter.name.clone()]
                         }
                     }
+                    Some(QuerySerialization::FormExplodedNestedObject { .. }) => {
+                        vec![parameter.name.clone()]
+                    }
                     Some(
                         QuerySerialization::FormExplodedArray { .. }
-                        | QuerySerialization::FormArray { .. },
+                        | QuerySerialization::FormArray { .. }
+                        | QuerySerialization::SimpleHeaderArray { .. },
                     )
                     | None => vec![parameter.name.clone()],
                 };
@@ -920,6 +1066,7 @@ impl<'a> ServerCodegen<'a> {
                     &parameter.query_serialization,
                     Some(
                         QuerySerialization::FormExplodedObject
+                            | QuerySerialization::FormExplodedNestedObject { .. }
                             | QuerySerialization::FormObject
                             | QuerySerialization::DeepObject
                             | QuerySerialization::FormExplodedArray { .. }
@@ -1218,6 +1365,7 @@ impl<'a> ServerCodegen<'a> {
             .collect::<Result<_, _>>()?;
 
         let doc = format!(" Build an axum::Router for the `{trait_ident}` trait.");
+        let max_body_bytes = self.server.validation.max_body_bytes;
 
         Ok(quote! {
             #[doc = #doc]
@@ -1227,6 +1375,7 @@ impl<'a> ServerCodegen<'a> {
             {
                 ::axum::Router::new()
                     #(#routes)*
+                    .layer(::axum::extract::DefaultBodyLimit::max(#max_body_bytes))
                     .with_state(api)
             }
 
@@ -1258,8 +1407,11 @@ impl<'a> ServerCodegen<'a> {
             .iter()
             .filter(|p| p.location == "path")
             .collect();
+        let path_has_affixes = path_params
+            .iter()
+            .any(|parameter| path_parameter_affixes(&op.path, &parameter.name).is_some());
         let mut path_decode = TokenStream::new();
-        if !path_params.is_empty() && validation_bundle.is_some() {
+        if !path_params.is_empty() && (validation_bundle.is_some() || path_has_affixes) {
             extractors.push(quote! {
                 __path_result: ::std::result::Result<
                     ::axum::extract::Path<::std::collections::HashMap<String, String>>,
@@ -1272,25 +1424,51 @@ impl<'a> ServerCodegen<'a> {
                 let ty = self.query_parameter_type(parameter);
                 let wire = parameter.name.as_str();
                 let location = parameter_location("path", wire);
-                let target = self
-                    .validation_target(validation_bundle, op, "path", Some(wire))?
-                    .ok_or_else(|| {
-                        ServerCodegenError::Validation(format!(
-                            "validation target unexpectedly disabled for operation `{}` path `{wire}`",
-                            op.operation_id
-                        ))
-                    })?;
+                let target = self.validation_target(validation_bundle, op, "path", Some(wire))?;
                 let string_wire = self.parameter_schema_is_string(parameter);
-                decoders.push(quote! {
-                    let #ident: #ty = match __path_values.remove(#wire) {
-                        Some(raw) => match super::validation::decode_parameter(
+                let strip_affixes = match path_parameter_affixes(&op.path, wire) {
+                    Some((prefix, suffix)) => quote! {
+                        let raw = match raw
+                            .strip_prefix(#prefix)
+                            .and_then(|value| value.strip_suffix(#suffix))
+                        {
+                            Some(value) => value.to_string(),
+                            None => return ::axum::response::IntoResponse::into_response(
+                                ::axum::http::StatusCode::NOT_FOUND
+                            ),
+                        };
+                    },
+                    None => TokenStream::new(),
+                };
+                let decode = if let Some(target) = target {
+                    quote! {
+                        match super::validation::decode_parameter(
                             &raw, #target, #location, #string_wire,
                         ) {
                             Ok(value) => value,
                             Err(rejection) => return ::axum::response::IntoResponse::into_response(rejection),
+                        }
+                    }
+                } else {
+                    quote! {
+                        match ::serde_json::from_value(::serde_json::Value::String(raw.clone()))
+                            .or_else(|_| ::serde_json::from_str(&raw))
+                        {
+                            Ok(value) => value,
+                            Err(_) => return ::axum::response::IntoResponse::into_response(
+                                ::axum::http::StatusCode::BAD_REQUEST
+                            ),
+                        }
+                    }
+                };
+                decoders.push(quote! {
+                    let #ident: #ty = match __path_values.remove(#wire) {
+                        Some(raw) => {
+                            #strip_affixes
+                            #decode
                         },
                         None => return ::axum::response::IntoResponse::into_response(
-                            super::validation::generated_contract_error()
+                            ::axum::http::StatusCode::INTERNAL_SERVER_ERROR
                         ),
                     };
                 });
@@ -1300,7 +1478,7 @@ impl<'a> ServerCodegen<'a> {
                 let ::axum::extract::Path(mut __path_values) = match __path_result {
                     Ok(path) => path,
                     Err(_) => return ::axum::response::IntoResponse::into_response(
-                        super::validation::malformed_parameter("/path")
+                        ::axum::http::StatusCode::BAD_REQUEST
                     ),
                 };
                 #(#decoders)*
@@ -1463,6 +1641,84 @@ impl<'a> ServerCodegen<'a> {
                 let location = parameter_location("header", wire);
                 let target = self.validation_target(validation_bundle, op, "header", Some(wire))?;
                 let string_wire = self.parameter_schema_is_string(p);
+                if matches!(
+                    p.query_serialization,
+                    Some(QuerySerialization::SimpleHeaderArray { .. })
+                ) {
+                    let decode_array = quote! {
+                        raw.split(',')
+                            .map(|item| __decode_query_scalar(item, #wire))
+                            .collect::<::std::result::Result<#ty, _>>()
+                    };
+                    if p.required {
+                        parameter_decode_checks.push(quote! {
+                            let mut __values = __headers.get_all(#wire).iter();
+                            let #ident: #ty = match (__values.next(), __values.next()) {
+                                (Some(value), None) => match value.to_str() {
+                                    Ok(raw) => match #decode_array {
+                                        Ok(value) => value,
+                                        Err(_) => return ::axum::response::IntoResponse::into_response(
+                                            super::validation::malformed_parameter(#location)
+                                        ),
+                                    },
+                                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                                        super::validation::malformed_parameter(#location)
+                                    ),
+                                },
+                                (None, _) => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::missing_parameter(#location)
+                                ),
+                                _ => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::malformed_parameter(#location)
+                                ),
+                            };
+                        });
+                        if let Some(target) = target {
+                            parameter_decode_checks.push(quote! {
+                                if let Err(rejection) = super::validation::validate_parameter(
+                                    #target, #location, &#ident,
+                                ) {
+                                    return ::axum::response::IntoResponse::into_response(rejection);
+                                }
+                            });
+                        }
+                        call_args.push(quote! { #ident });
+                    } else {
+                        parameter_decode_checks.push(quote! {
+                            let mut __values = __headers.get_all(#wire).iter();
+                            let #ident: ::std::option::Option<#ty> = match (__values.next(), __values.next()) {
+                                (Some(value), None) => match value.to_str() {
+                                    Ok(raw) => match #decode_array {
+                                        Ok(value) => Some(value),
+                                        Err(_) => return ::axum::response::IntoResponse::into_response(
+                                            super::validation::malformed_parameter(#location)
+                                        ),
+                                    },
+                                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                                        super::validation::malformed_parameter(#location)
+                                    ),
+                                },
+                                (None, _) => None,
+                                _ => return ::axum::response::IntoResponse::into_response(
+                                    super::validation::malformed_parameter(#location)
+                                ),
+                            };
+                        });
+                        if let Some(target) = target {
+                            parameter_decode_checks.push(quote! {
+                                if let Some(value) = &#ident {
+                                    if let Err(rejection) = super::validation::validate_parameter(
+                                        #target, #location, value,
+                                    ) {
+                                        return ::axum::response::IntoResponse::into_response(rejection);
+                                    }
+                                }
+                            });
+                        }
+                        call_args.push(quote! { #ident });
+                    }
+                    continue;
+                }
                 if p.required {
                     if let Some(target) = target {
                         parameter_decode_checks.push(quote! {
@@ -1602,6 +1858,8 @@ impl<'a> ServerCodegen<'a> {
                 &op.request_body,
                 Some(RequestBodyContent::FormUrlEncoded { .. })
             ) && validation_bundle.is_some();
+            let typed_multipart =
+                matches!(&op.request_body, Some(RequestBodyContent::Multipart { .. }));
             if let Some((decoder, media_type)) = transport_body {
                 extractors.push(quote! { __request: ::axum::extract::Request });
                 let required = op.request_body_required;
@@ -1624,6 +1882,234 @@ impl<'a> ServerCodegen<'a> {
                             Some(body) => body,
                             None => return ::axum::response::IntoResponse::into_response(
                                 super::validation::generated_contract_error()
+                            ),
+                        };
+                    });
+                }
+                call_args.push(quote! { body });
+            } else if typed_multipart {
+                extractors.push(quote! { __request: ::axum::extract::Request });
+                let Some(RequestBodyContent::Multipart {
+                    validation_schema, ..
+                }) = &op.request_body
+                else {
+                    return Err(ServerCodegenError::Internal(
+                        "typed multipart body lost its schema".to_string(),
+                    ));
+                };
+                let plans = self.multipart_field_plans(validation_schema)?;
+                let multipart_validation = self
+                    .validation_target(validation_bundle, op, "body", None)?
+                    .map(|target| {
+                        quote! {
+                            if let Err(rejection) = super::validation::validate_parameter(
+                                #target,
+                                "/body",
+                                &::serde_json::Value::Object(validation_object),
+                            ) {
+                                return ::axum::response::IntoResponse::into_response(rejection);
+                            }
+                        }
+                    })
+                    .unwrap_or_default();
+                let mut binary_locals = Vec::new();
+                let mut binary_validation_arms = Vec::new();
+                let mut binary_patches = Vec::new();
+                for plan in plans
+                    .iter()
+                    .filter(|plan| matches!(plan.kind, MultipartFieldKind::Binary))
+                {
+                    let wire_name = &plan.wire_name;
+                    let field_ident = &plan.field_ident;
+                    let slot = format_ident!("__multipart_binary_{}", field_ident);
+                    binary_locals.push(quote! {
+                        let mut #slot: ::std::option::Option<::bytes::Bytes> = None;
+                    });
+                    binary_validation_arms.push(quote! {
+                        #wire_name => ::serde_json::Value::String(
+                            "x".repeat(#slot.as_ref().map_or(0, ::bytes::Bytes::len))
+                        ),
+                    });
+                    binary_patches.push(match (self.config.types.binary, plan.required) {
+                        (crate::type_mapping::BinaryStrategy::Bytes, true) => quote! {
+                            body.#field_ident = match #slot {
+                                Some(bytes) => bytes,
+                                None => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "missing required multipart field")
+                                ),
+                            };
+                        },
+                        (crate::type_mapping::BinaryStrategy::Bytes, false) => quote! {
+                            body.#field_ident = #slot;
+                        },
+                        (crate::type_mapping::BinaryStrategy::VecU8, true) => quote! {
+                            body.#field_ident = match #slot {
+                                Some(bytes) => bytes.to_vec(),
+                                None => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "missing required multipart field")
+                                ),
+                            };
+                        },
+                        (crate::type_mapping::BinaryStrategy::VecU8, false) => quote! {
+                            body.#field_ident = #slot.map(|bytes| bytes.to_vec());
+                        },
+                        (crate::type_mapping::BinaryStrategy::String, _) => unreachable!(
+                            "string-backed binary fields must use multipart text extraction"
+                        ),
+                    });
+                }
+                let mut field_arms = Vec::new();
+                for plan in plans {
+                    let wire_name = plan.wire_name;
+                    let binary_slot = format_ident!("__multipart_binary_{}", plan.field_ident);
+                    let decode = match plan.kind {
+                        MultipartFieldKind::Binary => quote! {
+                            let bytes = match field.bytes().await {
+                                Ok(bytes) => bytes,
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart field")
+                                ),
+                            };
+                            #binary_slot = Some(bytes);
+                            ::serde_json::Value::Array(Vec::new())
+                        },
+                        MultipartFieldKind::String => quote! {
+                            match field.text().await {
+                                Ok(text) => ::serde_json::Value::String(text),
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart text field")
+                                ),
+                            }
+                        },
+                        MultipartFieldKind::Integer => quote! {
+                            let text = match field.text().await {
+                                Ok(text) => text,
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart integer field")
+                                ),
+                            };
+                            match text.parse::<i64>() {
+                                Ok(value) => ::serde_json::Value::Number(value.into()),
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart integer field")
+                                ),
+                            }
+                        },
+                        MultipartFieldKind::UnsignedInteger => quote! {
+                            let text = match field.text().await {
+                                Ok(text) => text,
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart unsigned integer field")
+                                ),
+                            };
+                            match text.parse::<u64>() {
+                                Ok(value) => ::serde_json::Value::Number(value.into()),
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart unsigned integer field")
+                                ),
+                            }
+                        },
+                        MultipartFieldKind::Number => quote! {
+                            let text = match field.text().await {
+                                Ok(text) => text,
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart number field")
+                                ),
+                            };
+                            match text.parse::<f64>().ok().and_then(::serde_json::Number::from_f64) {
+                                Some(value) => ::serde_json::Value::Number(value),
+                                None => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart number field")
+                                ),
+                            }
+                        },
+                        MultipartFieldKind::Boolean => quote! {
+                            let text = match field.text().await {
+                                Ok(text) => text,
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart boolean field")
+                                ),
+                            };
+                            match text.parse::<bool>() {
+                                Ok(value) => ::serde_json::Value::Bool(value),
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart boolean field")
+                                ),
+                            }
+                        },
+                    };
+                    field_arms.push(quote! {
+                        #wire_name => { #decode }
+                    });
+                }
+                let required = op.request_body_required;
+                body_decode = quote! {
+                    let __has_multipart_content_type = __request.headers()
+                        .get(::axum::http::header::CONTENT_TYPE)
+                        .is_some();
+                    let body: ::std::option::Option<#body_ty_tokens> =
+                        if !__has_multipart_content_type && !#required {
+                            None
+                        } else {
+                            let mut multipart = match <::axum::extract::Multipart as ::axum::extract::FromRequest<T>>::from_request(__request, &api).await {
+                                Ok(multipart) => multipart,
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE, "invalid multipart request")
+                                ),
+                            };
+                            let mut object = ::serde_json::Map::new();
+                            let mut validation_object = ::serde_json::Map::new();
+                            #(#binary_locals)*
+                            loop {
+                                let field = match multipart.next_field().await {
+                                    Ok(Some(field)) => field,
+                                    Ok(None) => break,
+                                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                                        (::axum::http::StatusCode::BAD_REQUEST, "malformed multipart request")
+                                    ),
+                                };
+                                let name = match field.name() {
+                                    Some(name) => name.to_string(),
+                                    None => return ::axum::response::IntoResponse::into_response(
+                                        (::axum::http::StatusCode::BAD_REQUEST, "multipart field has no name")
+                                    ),
+                                };
+                                if object.contains_key(&name) {
+                                    return ::axum::response::IntoResponse::into_response(
+                                        (::axum::http::StatusCode::BAD_REQUEST, "duplicate multipart field")
+                                    );
+                                }
+                                let value = match name.as_str() {
+                                    #(#field_arms,)*
+                                    _ => return ::axum::response::IntoResponse::into_response(
+                                        (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "unknown multipart field")
+                                    ),
+                                };
+                                let validation_value = match name.as_str() {
+                                    #(#binary_validation_arms)*
+                                    _ => value.clone(),
+                                };
+                                object.insert(name.clone(), value);
+                                validation_object.insert(name, validation_value);
+                            }
+                            #multipart_validation
+                            match ::serde_json::from_value::<#body_ty_tokens>(::serde_json::Value::Object(object)) {
+                                Ok(mut body) => {
+                                    #(#binary_patches)*
+                                    Some(body)
+                                },
+                                Err(_) => return ::axum::response::IntoResponse::into_response(
+                                    (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "invalid multipart body")
+                                ),
+                            }
+                        };
+                };
+                if required {
+                    body_decode.extend(quote! {
+                        let body = match body {
+                            Some(body) => body,
+                            None => return ::axum::response::IntoResponse::into_response(
+                                (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "missing required multipart body")
                             ),
                         };
                     });
@@ -1960,10 +2446,13 @@ impl<'a> ServerCodegen<'a> {
 
             let decoder = match &parameter.query_serialization {
                 Some(QuerySerialization::FormExplodedArray { item_type }) => {
-                    if let crate::analysis::ArrayItemType::FlatStructRef {
-                        property_names, ..
-                    } = item_type
+                    if let crate::analysis::ArrayItemType::FlatStructRef { properties, .. } =
+                        item_type
                     {
+                        let property_names = properties
+                            .iter()
+                            .map(|property| property.wire_name.clone())
+                            .collect::<Vec<_>>();
                         // AWS query-protocol flat structures arrive as
                         // `param.N.Prop=value`; group by N and decode each
                         // group as one JSON object so serde fills the struct.
@@ -1971,16 +2460,21 @@ impl<'a> ServerCodegen<'a> {
                             let #field_ident = {
                                 let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
                                 let prefix = concat!(#wire_name, ".");
-                                let mut groups: ::std::collections::BTreeMap<String, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                let mut groups: ::std::collections::BTreeMap<usize, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
                                 let allowed = [#(#property_names),*];
                                 for (key, value) in &__pairs {
                                     let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                    if let Some(index) = rest.strip_suffix("[]").and_then(|index| index.parse::<usize>().ok()) {
+                                        groups.entry(index).or_default();
+                                        continue;
+                                    }
                                     let Some((index, property)) = rest.split_once('.') else { continue };
+                                    let Ok(index) = index.parse::<usize>() else { continue };
                                     if !allowed.contains(&property) {
                                         continue;
                                     }
                                     groups
-                                        .entry(index.to_string())
+                                        .entry(index)
                                         .or_default()
                                         .insert(property.to_string(), ::serde_json::Value::String(value.clone()));
                                 }
@@ -2000,6 +2494,238 @@ impl<'a> ServerCodegen<'a> {
                                         values.push(
                                             ::serde_json::from_value(::serde_json::Value::Object(object))
                                                 .map_err(|error| format!("invalid query structure for `{}`: {error}", #wire_name))?,
+                                        );
+                                    }
+                                    Some(values)
+                                }
+                            };
+                        }
+                    } else if let crate::analysis::ArrayItemType::NestedStructRef {
+                        properties,
+                        ..
+                    } = item_type
+                    {
+                        let scalar_json = |kind: crate::analysis::QueryScalarType| match kind {
+                            crate::analysis::QueryScalarType::String => {
+                                quote! { ::serde_json::Value::String(value.clone()) }
+                            }
+                            crate::analysis::QueryScalarType::Boolean => quote! {
+                                ::serde_json::Value::Bool(value.parse::<bool>().map_err(|error| {
+                                    format!("invalid boolean query value `{value}`: {error}")
+                                })?)
+                            },
+                            crate::analysis::QueryScalarType::Integer
+                            | crate::analysis::QueryScalarType::Number => quote! {
+                                match ::serde_json::from_str::<::serde_json::Value>(value)
+                                    .map_err(|error| format!("invalid numeric query value `{value}`: {error}"))?
+                                {
+                                    parsed @ ::serde_json::Value::Number(_) => parsed,
+                                    _ => return Err(format!("invalid numeric query value `{value}`")),
+                                }
+                            },
+                        };
+                        let property_decoders = properties
+                            .iter()
+                            .enumerate()
+                            .map(|(property_index, property)| {
+                                let property_name = property.wire_name.as_str();
+                                match &property.value_type {
+                                    crate::analysis::QueryStructPropertyType::Scalar(kind) => {
+                                        let parsed = scalar_json(*kind);
+                                        quote! {
+                                            for (key, value) in &__pairs {
+                                                let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                                let Some((index, tail)) = rest.split_once('.') else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                if tail != #property_name { continue; }
+                                                let parsed = #parsed;
+                                                groups.entry(index).or_default()
+                                                    .insert(#property_name.to_string(), parsed);
+                                            }
+                                        }
+                                    }
+                                    crate::analysis::QueryStructPropertyType::Object { properties } => {
+                                        let nested_groups = format_ident!("nested_objects_{property_index}");
+                                        let leaf_parsers = properties.iter().map(|leaf_property| {
+                                            let leaf = leaf_property.wire_name.as_str();
+                                            let crate::analysis::QueryStructPropertyType::Scalar(kind) = leaf_property.value_type else {
+                                                unreachable!("flat query object cannot contain nested values");
+                                            };
+                                            let parsed = scalar_json(kind);
+                                            quote! { #leaf => #parsed, }
+                                        }).collect::<Vec<_>>();
+                                        quote! {
+                                            let mut #nested_groups: ::std::collections::BTreeMap<usize, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                            for (key, value) in &__pairs {
+                                                let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                                let Some((index, tail)) = rest.split_once('.') else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                if tail == concat!(#property_name, "[]") {
+                                                    groups.entry(index).or_default().insert(
+                                                        #property_name.to_string(),
+                                                        ::serde_json::Value::Object(::serde_json::Map::new()),
+                                                    );
+                                                    continue;
+                                                }
+                                                let Some(leaf) = tail.strip_prefix(concat!(#property_name, ".")) else { continue };
+                                                let parsed = match leaf { #(#leaf_parsers)* _ => continue };
+                                                #nested_groups.entry(index).or_default().insert(leaf.to_string(), parsed);
+                                            }
+                                            for (index, value) in #nested_groups {
+                                                groups.entry(index).or_default().insert(#property_name.to_string(), ::serde_json::Value::Object(value));
+                                            }
+                                        }
+                                    }
+                                    crate::analysis::QueryStructPropertyType::Array { item_type } => {
+                                        let nested_groups = format_ident!("nested_groups_{property_index}");
+                                        match item_type {
+                                            crate::analysis::ArrayItemType::Scalar(rust_type) => {
+                                                let kind = if rust_type == "String" {
+                                                    crate::analysis::QueryScalarType::String
+                                                } else if rust_type == "bool" {
+                                                    crate::analysis::QueryScalarType::Boolean
+                                                } else if rust_type.starts_with('i') || rust_type.starts_with('u') {
+                                                    crate::analysis::QueryScalarType::Integer
+                                                } else {
+                                                    crate::analysis::QueryScalarType::Number
+                                                };
+                                                let parsed = scalar_json(kind);
+                                                quote! {
+                                                    let mut #nested_groups: ::std::collections::BTreeMap<usize, ::std::collections::BTreeMap<usize, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                                    for (key, value) in &__pairs {
+                                                        let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                                        let Some((index, tail)) = rest.split_once('.') else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                if tail == concat!(#property_name, "[]") {
+                                                    groups.entry(index).or_default().insert(
+                                                        #property_name.to_string(),
+                                                        ::serde_json::Value::Array(Vec::new()),
+                                                    );
+                                                    continue;
+                                                }
+                                                let Some(nested_index) = tail.strip_prefix(concat!(#property_name, ".")) else { continue };
+                                                        let Ok(nested_index) = nested_index.parse::<usize>() else { continue };
+                                                        let parsed = #parsed;
+                                                        #nested_groups.entry(index).or_default().insert(nested_index, parsed);
+                                                    }
+                                                    for (index, values) in #nested_groups {
+                                                        groups.entry(index).or_default().insert(
+                                                            #property_name.to_string(),
+                                                            ::serde_json::Value::Array(values.into_values().collect()),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            crate::analysis::ArrayItemType::SchemaRef(_) => quote! {
+                                                let mut #nested_groups: ::std::collections::BTreeMap<usize, ::std::collections::BTreeMap<usize, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                                for (key, value) in &__pairs {
+                                                    let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                                    let Some((index, tail)) = rest.split_once('.') else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                if tail == concat!(#property_name, "[]") {
+                                                    groups.entry(index).or_default().insert(
+                                                        #property_name.to_string(),
+                                                        ::serde_json::Value::Array(Vec::new()),
+                                                    );
+                                                    continue;
+                                                }
+                                                let Some(nested_index) = tail.strip_prefix(concat!(#property_name, ".")) else { continue };
+                                                    let Ok(nested_index) = nested_index.parse::<usize>() else { continue };
+                                                    #nested_groups.entry(index).or_default().insert(
+                                                        nested_index,
+                                                        ::serde_json::Value::String(value.clone()),
+                                                    );
+                                                }
+                                                for (index, values) in #nested_groups {
+                                                    groups.entry(index).or_default().insert(
+                                                        #property_name.to_string(),
+                                                        ::serde_json::Value::Array(values.into_values().collect()),
+                                                    );
+                                                }
+                                            },
+                                            crate::analysis::ArrayItemType::FlatStructRef { properties, .. } => {
+                                                let allowed = properties.iter().map(|property| property.wire_name.clone()).collect::<Vec<_>>();
+                                                let leaf_kinds = properties.iter().map(|property| match property.value_type {
+                                                    crate::analysis::QueryStructPropertyType::Scalar(kind) => kind,
+                                                    crate::analysis::QueryStructPropertyType::Array { .. }
+                                                    | crate::analysis::QueryStructPropertyType::Object { .. } => unreachable!("flat query struct cannot contain nested values"),
+                                                }).collect::<Vec<_>>();
+                                                let leaf_parsers = allowed.iter().zip(leaf_kinds).map(|(leaf, kind)| {
+                                                    let parsed = scalar_json(kind);
+                                                    quote! {
+                                                        #leaf => #parsed,
+                                                    }
+                                                }).collect::<Vec<_>>();
+                                                quote! {
+                                                    let mut #nested_groups: ::std::collections::BTreeMap<usize, ::std::collections::BTreeMap<usize, ::serde_json::Map<String, ::serde_json::Value>>> = ::std::collections::BTreeMap::new();
+                                                    for (key, value) in &__pairs {
+                                                        let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                                        let Some((index, tail)) = rest.split_once('.') else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                if tail == concat!(#property_name, "[]") {
+                                                    groups.entry(index).or_default().insert(
+                                                        #property_name.to_string(),
+                                                        ::serde_json::Value::Array(Vec::new()),
+                                                    );
+                                                    continue;
+                                                }
+                                                let Some(tail) = tail.strip_prefix(concat!(#property_name, ".")) else { continue };
+                                                if let Some(nested_index) = tail.strip_suffix("[]").and_then(|index| index.parse::<usize>().ok()) {
+                                                    #nested_groups.entry(index).or_default().entry(nested_index).or_default();
+                                                    continue;
+                                                }
+                                                        let Some((nested_index, leaf)) = tail.split_once('.') else { continue };
+                                                        let Ok(nested_index) = nested_index.parse::<usize>() else { continue };
+                                                        let parsed = match leaf {
+                                                            #(#leaf_parsers)*
+                                                            _ => continue,
+                                                        };
+                                                        #nested_groups.entry(index).or_default()
+                                                            .entry(nested_index).or_default()
+                                                            .insert(leaf.to_string(), parsed);
+                                                    }
+                                                    for (index, values) in #nested_groups {
+                                                        groups.entry(index).or_default().insert(
+                                                            #property_name.to_string(),
+                                                            ::serde_json::Value::Array(values.into_values().map(::serde_json::Value::Object).collect()),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            crate::analysis::ArrayItemType::NestedStructRef { .. } => unreachable!("analysis rejects query nesting deeper than two levels"),
+                                        }
+                                    }
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        quote! {
+                            let #field_ident = {
+                                let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                                let prefix = concat!(#wire_name, ".");
+                                let mut groups: ::std::collections::BTreeMap<usize, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                for (key, _) in &__pairs {
+                                    let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                    if let Some(index) = rest.strip_suffix("[]").and_then(|index| index.parse::<usize>().ok()) {
+                                        groups.entry(index).or_default();
+                                    }
+                                }
+                                #(#property_decoders)*
+                                if empty_marker && !groups.is_empty() {
+                                    return Err(format!(
+                                        "query array `{}` cannot combine values with its empty marker",
+                                        #wire_name,
+                                    ));
+                                }
+                                if empty_marker {
+                                    Some(Vec::new())
+                                } else if groups.is_empty() {
+                                    None
+                                } else {
+                                    let mut values = Vec::with_capacity(groups.len());
+                                    for (_, object) in groups {
+                                        values.push(
+                                            ::serde_json::from_value(::serde_json::Value::Object(object))
+                                                .map_err(|error| format!("invalid nested query structure for `{}`: {error}", #wire_name))?,
                                         );
                                     }
                                     Some(values)
@@ -2056,6 +2782,160 @@ impl<'a> ServerCodegen<'a> {
                         (None, false) => None,
                     };
                 },
+                Some(QuerySerialization::FormExplodedNestedObject { properties }) => {
+                    let scalar_json = |kind: crate::analysis::QueryScalarType| match kind {
+                        crate::analysis::QueryScalarType::String => {
+                            quote! { ::serde_json::Value::String(value.clone()) }
+                        }
+                        crate::analysis::QueryScalarType::Boolean => quote! {
+                            ::serde_json::Value::Bool(value.parse::<bool>().map_err(|error| format!("invalid boolean query value `{value}`: {error}"))?)
+                        },
+                        crate::analysis::QueryScalarType::Integer
+                        | crate::analysis::QueryScalarType::Number => quote! {
+                            match ::serde_json::from_str::<::serde_json::Value>(value)
+                                .map_err(|error| format!("invalid numeric query value `{value}`: {error}"))?
+                            {
+                                parsed @ ::serde_json::Value::Number(_) => parsed,
+                                _ => return Err(format!("invalid numeric query value `{value}`")),
+                            }
+                        },
+                    };
+                    let property_decoders = properties.iter().enumerate().map(|(property_index, property)| {
+                        let property_name = property.wire_name.as_str();
+                        match &property.value_type {
+                            crate::analysis::QueryStructPropertyType::Scalar(kind) => {
+                                let parsed = scalar_json(*kind);
+                                quote! {
+                                    if let Some((_, value)) = __pairs.iter().find(|(key, _)| key == concat!(#wire_name, ".", #property_name)) {
+                                        let parsed = #parsed;
+                                        object.insert(#property_name.to_string(), parsed);
+                                    }
+                                }
+                            }
+                            crate::analysis::QueryStructPropertyType::Object { properties } => {
+                                let property_wire_name = format!("{wire_name}.{property_name}");
+                                let leaf_parsers = properties.iter().map(|leaf_property| {
+                                    let leaf = leaf_property.wire_name.as_str();
+                                    let crate::analysis::QueryStructPropertyType::Scalar(kind) = leaf_property.value_type else {
+                                        unreachable!("flat query object cannot contain nested values");
+                                    };
+                                    let parsed = scalar_json(kind);
+                                    quote! { #leaf => #parsed, }
+                                }).collect::<Vec<_>>();
+                                quote! {
+                                    let mut nested = ::serde_json::Map::new();
+                                    for (key, value) in &__pairs {
+                                        let Some(leaf) = key.strip_prefix(concat!(#wire_name, ".", #property_name, ".")) else { continue };
+                                        let parsed = match leaf { #(#leaf_parsers)* _ => continue };
+                                        nested.insert(leaf.to_string(), parsed);
+                                    }
+                                    let nested_empty_marker = __query_empty_marker(&__pairs, #property_wire_name)?;
+                                    if nested_empty_marker && !nested.is_empty() {
+                                        return Err(format!("query object `{}` cannot combine properties with its empty marker", #property_wire_name));
+                                    }
+                                    if nested_empty_marker || !nested.is_empty() {
+                                        object.insert(#property_name.to_string(), ::serde_json::Value::Object(nested));
+                                    }
+                                }
+                            }
+                            crate::analysis::QueryStructPropertyType::Array { item_type } => {
+                                let values_ident = format_ident!("property_values_{property_index}");
+                                let property_wire_name = format!("{wire_name}.{property_name}");
+                                match item_type {
+                                    crate::analysis::ArrayItemType::Scalar(rust_type) => {
+                                        let kind = if rust_type == "String" {
+                                            crate::analysis::QueryScalarType::String
+                                        } else if rust_type == "bool" {
+                                            crate::analysis::QueryScalarType::Boolean
+                                        } else if rust_type.starts_with('i') || rust_type.starts_with('u') {
+                                            crate::analysis::QueryScalarType::Integer
+                                        } else {
+                                            crate::analysis::QueryScalarType::Number
+                                        };
+                                        let parsed = scalar_json(kind);
+                                        quote! {
+                                            let mut #values_ident: ::std::collections::BTreeMap<usize, ::serde_json::Value> = ::std::collections::BTreeMap::new();
+                                            for (key, value) in &__pairs {
+                                                let Some(index) = key.strip_prefix(concat!(#wire_name, ".", #property_name, ".")) else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                let parsed = #parsed;
+                                                #values_ident.insert(index, parsed);
+                                            }
+                                            let property_empty_marker = __query_empty_marker(&__pairs, #property_wire_name)?;
+                                            if property_empty_marker && !#values_ident.is_empty() {
+                                                return Err(format!("query array `{}` cannot combine values with its empty marker", #property_wire_name));
+                                            }
+                                            if property_empty_marker || !#values_ident.is_empty() {
+                                                object.insert(#property_name.to_string(), ::serde_json::Value::Array(#values_ident.into_values().collect()));
+                                            }
+                                        }
+                                    }
+                                    crate::analysis::ArrayItemType::SchemaRef(_) => quote! {
+                                        let mut #values_ident: ::std::collections::BTreeMap<usize, ::serde_json::Value> = ::std::collections::BTreeMap::new();
+                                        for (key, value) in &__pairs {
+                                            let Some(index) = key.strip_prefix(concat!(#wire_name, ".", #property_name, ".")) else { continue };
+                                            let Ok(index) = index.parse::<usize>() else { continue };
+                                            #values_ident.insert(index, ::serde_json::Value::String(value.clone()));
+                                        }
+                                        let property_empty_marker = __query_empty_marker(&__pairs, #property_wire_name)?;
+                                        if property_empty_marker && !#values_ident.is_empty() {
+                                            return Err(format!("query array `{}` cannot combine values with its empty marker", #property_wire_name));
+                                        }
+                                        if property_empty_marker || !#values_ident.is_empty() {
+                                            object.insert(#property_name.to_string(), ::serde_json::Value::Array(#values_ident.into_values().collect()));
+                                        }
+                                    },
+                                    crate::analysis::ArrayItemType::FlatStructRef { properties, .. } => {
+                                        let leaf_parsers = properties.iter().map(|leaf_property| {
+                                            let leaf = leaf_property.wire_name.as_str();
+                                            let crate::analysis::QueryStructPropertyType::Scalar(kind) = leaf_property.value_type else {
+                                                unreachable!("flat query struct cannot contain arrays");
+                                            };
+                                            let parsed = scalar_json(kind);
+                                            quote! { #leaf => #parsed, }
+                                        }).collect::<Vec<_>>();
+                                        quote! {
+                                            let mut #values_ident: ::std::collections::BTreeMap<usize, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                            for (key, value) in &__pairs {
+                                                let Some(tail) = key.strip_prefix(concat!(#wire_name, ".", #property_name, ".")) else { continue };
+                                                let Some((index, leaf)) = tail.split_once('.') else { continue };
+                                                let Ok(index) = index.parse::<usize>() else { continue };
+                                                let parsed = match leaf { #(#leaf_parsers)* _ => continue };
+                                                #values_ident.entry(index).or_default().insert(leaf.to_string(), parsed);
+                                            }
+                                            let property_empty_marker = __query_empty_marker(&__pairs, #property_wire_name)?;
+                                            if property_empty_marker && !#values_ident.is_empty() {
+                                                return Err(format!("query array `{}` cannot combine values with its empty marker", #property_wire_name));
+                                            }
+                                            if property_empty_marker || !#values_ident.is_empty() {
+                                                object.insert(#property_name.to_string(), ::serde_json::Value::Array(
+                                                    #values_ident.into_values().map(::serde_json::Value::Object).collect()
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    crate::analysis::ArrayItemType::NestedStructRef { .. } => unreachable!("analysis rejects query nesting deeper than two levels"),
+                                }
+                            }
+                        }
+                    }).collect::<Vec<_>>();
+                    quote! {
+                        let #field_ident = {
+                            let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                            let mut object = ::serde_json::Map::new();
+                            #(#property_decoders)*
+                            if empty_marker && !object.is_empty() {
+                                return Err(format!("query object `{}` cannot combine properties with its empty marker", #wire_name));
+                            }
+                            if object.is_empty() && !empty_marker {
+                                None
+                            } else {
+                                Some(::serde_json::from_value(::serde_json::Value::Object(object))
+                                    .map_err(|error| format!("invalid nested query object for `{}`: {error}", #wire_name))?)
+                            }
+                        };
+                    }
+                }
                 Some(QuerySerialization::FormExplodedObject) => {
                     let property_names = self
                         .query_object_properties(parameter)
@@ -2193,7 +3073,11 @@ impl<'a> ServerCodegen<'a> {
                         };
                     }
                 }
-                Some(QuerySerialization::Unsupported { .. }) | None => quote! {
+                Some(
+                    QuerySerialization::Unsupported { .. }
+                    | QuerySerialization::SimpleHeaderArray { .. },
+                )
+                | None => quote! {
                     let #field_ident = __query_one(&__pairs, #wire_name)?
                         .map(|raw| __decode_query_scalar(&raw, #wire_name))
                         .transpose()?;
@@ -2701,6 +3585,22 @@ fn axum_custom_route(
     (route, dispatcher_fn)
 }
 
+fn path_parameter_affixes<'a>(path: &'a str, parameter_name: &str) -> Option<(&'a str, &'a str)> {
+    let marker = format!("{{{parameter_name}}}");
+    for segment in path.split('/') {
+        let Some(start) = segment.find(&marker) else {
+            continue;
+        };
+        let prefix = &segment[..start];
+        let suffix = &segment[start + marker.len()..];
+        if prefix.is_empty() && suffix.is_empty() {
+            return None;
+        }
+        return Some((prefix, suffix));
+    }
+    None
+}
+
 /// Validate and convert an OpenAPI path template into Axum 0.8 route syntax.
 ///
 /// Both formats use `{parameter}` for a dynamic segment. Axum only supports a
@@ -2716,8 +3616,10 @@ fn openapi_to_axum_path(path: &str) -> Result<String, ServerCodegenError> {
     if !path.starts_with('/') {
         return Err(invalid("paths must start with `/`"));
     }
+    let mut route_segments = Vec::new();
     for segment in path.split('/').skip(1) {
         if segment.is_empty() {
+            route_segments.push(String::new());
             continue;
         }
         if segment.starts_with(':') || segment.starts_with('*') {
@@ -2729,29 +3631,44 @@ fn openapi_to_axum_path(path: &str) -> Result<String, ServerCodegenError> {
         let has_open = segment.contains('{');
         let has_close = segment.contains('}');
         if has_open || has_close {
-            let Some(name) = segment
-                .strip_prefix('{')
-                .and_then(|value| value.strip_suffix('}'))
-            else {
+            let Some(open) = segment.find('{') else {
                 return Err(invalid(
-                    "path parameters must occupy a complete segment such as `{pet_id}`",
+                    "path parameter has a closing brace without an opening brace",
                 ));
             };
+            let Some(relative_close) = segment[open + 1..].find('}') else {
+                return Err(invalid(
+                    "path parameter has an opening brace without a closing brace",
+                ));
+            };
+            let close = open + 1 + relative_close;
+            let name = &segment[open + 1..close];
+            let prefix = &segment[..open];
+            let suffix = &segment[close + 1..];
             if name.is_empty() || name.contains(['{', '}']) {
                 return Err(invalid(
                     "path parameter names must be non-empty and cannot contain braces",
                 ));
             }
+            if prefix.contains(['{', '}']) || suffix.contains(['{', '}']) {
+                return Err(invalid(
+                    "embedded path segments may contain exactly one parameter",
+                ));
+            }
+            route_segments.push(format!("{{{name}}}"));
+        } else {
+            route_segments.push(segment.to_string());
         }
     }
 
-    Ok(path.to_string())
+    Ok(format!("/{}", route_segments.join("/")))
 }
 
 fn body_type(op: &OperationInfo) -> Option<String> {
     match &op.request_body {
         Some(RequestBodyContent::Json { schema_name, .. })
-        | Some(RequestBodyContent::FormUrlEncoded { schema_name, .. }) => Some(schema_name.clone()),
+        | Some(RequestBodyContent::FormUrlEncoded { schema_name, .. })
+        | Some(RequestBodyContent::Multipart { schema_name, .. }) => Some(schema_name.clone()),
         Some(RequestBodyContent::OctetStream { .. } | RequestBodyContent::Binary { .. }) => {
             Some("bytes::Bytes".to_string())
         }
@@ -2808,6 +3725,41 @@ fn validate_custom_method_route_groups(ops: &[&OperationInfo]) -> Result<(), Ser
             path: path.to_string(),
             tags: tags.into_iter().collect::<Vec<_>>().join(", "),
         });
+    }
+    Ok(())
+}
+
+fn canonical_axum_route_shape(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                "{}"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn validate_normalized_route_collisions(ops: &[&OperationInfo]) -> Result<(), ServerCodegenError> {
+    let mut seen: BTreeMap<(String, String), &str> = BTreeMap::new();
+    for op in ops {
+        let normalized = openapi_to_axum_path(&op.path)?;
+        let key = (
+            canonical_axum_route_shape(&normalized),
+            op.method.to_ascii_uppercase(),
+        );
+        if let Some(previous) = seen.insert(key, &op.path)
+            && previous != op.path
+        {
+            return Err(ServerCodegenError::InvalidRoutePath {
+                path: op.path.clone(),
+                reason: format!(
+                    "normalizes to the same Axum route and method as `{previous}`; embedded path affixes must remain unambiguous"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -2955,6 +3907,24 @@ mod tests {
     }
 
     #[test]
+    fn embedded_path_affix_route_collisions_are_rejected() {
+        let json = OperationInfo {
+            operation_id: "json".into(),
+            method: "get".into(),
+            path: "/specs/{id}.json".into(),
+            ..Default::default()
+        };
+        let yaml = OperationInfo {
+            operation_id: "yaml".into(),
+            method: "get".into(),
+            path: "/specs/{name}.yaml".into(),
+            ..Default::default()
+        };
+        let error = validate_normalized_route_collisions(&[&json, &yaml]).unwrap_err();
+        assert!(error.to_string().contains("same Axum route"), "{error}");
+    }
+
+    #[test]
     fn untagged_falls_back_to_server_api() {
         let id = trait_ident_for_tag("");
         assert_eq!(id.to_string(), "ServerApi");
@@ -3018,13 +3988,30 @@ mod tests {
             "/pets/{pet_id}"
         );
         assert_eq!(openapi_to_axum_path("/").unwrap(), "/");
+        assert_eq!(
+            openapi_to_axum_path("/specs/{provider}/{api}.json").unwrap(),
+            "/specs/{provider}/{api}"
+        );
+    }
+
+    #[test]
+    fn embedded_path_parameter_affixes_are_preserved_for_extraction() {
+        assert_eq!(
+            path_parameter_affixes("/specs/{provider}/{api}.json", "api"),
+            Some(("", ".json"))
+        );
+        assert_eq!(
+            path_parameter_affixes("/{provider}.json", "provider"),
+            Some(("", ".json"))
+        );
+        assert_eq!(path_parameter_affixes("/pets/{id}", "id"), None);
     }
 
     #[test]
     fn malformed_or_unsupported_route_templates_are_rejected() {
         for path in [
             "pets/{pet_id}",
-            "/pets/{pet_id}.json",
+            "/pets/{first}-{second}",
             "/pets/{}",
             "/pets/:id",
         ] {

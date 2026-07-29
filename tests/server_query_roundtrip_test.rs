@@ -4,6 +4,7 @@
 //! a generated `HttpClient` sends requests to a real generated Axum router and
 //! the trait implementation observes the original typed values.
 
+use openapi_to_rust::analysis::QuerySerialization;
 use openapi_to_rust::config::ServerSection;
 use openapi_to_rust::server::codegen::ServerCodegen;
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
@@ -13,7 +14,7 @@ use std::process::Command;
 fn round_trip_spec() -> Value {
     json!({
         "openapi": "3.1.0",
-        "info": { "title": "query round trip", "version": "1.0.0" },
+        "info": { "title": "query round trip", "version": "1.0.0", "x-providerName": "amazonaws.com" },
         "paths": {
             "/round-trip/{scope}": {
                 "get": {
@@ -62,6 +63,13 @@ fn round_trip_spec() -> Value {
                                     "archived": { "type": "boolean" }
                                 }
                             }
+                        },
+                        {
+                            "name": "export_configuration",
+                            "in": "query",
+                            "style": "form",
+                            "explode": true,
+                            "schema": { "$ref": "#/components/schemas/ExportConfiguration" }
                         },
                         {
                             "name": "compact",
@@ -117,6 +125,16 @@ fn round_trip_spec() -> Value {
                                 "type": "array",
                                 "items": { "$ref": "#/components/schemas/Tag" }
                             }
+                        },
+                        {
+                            "name": "tag_specifications",
+                            "in": "query",
+                            "style": "form",
+                            "explode": true,
+                            "schema": {
+                                "type": "array",
+                                "items": { "$ref": "#/components/schemas/TagSpecification" }
+                            }
                         }
                     ],
                     "responses": { "204": { "description": "captured" } }
@@ -140,10 +158,109 @@ fn round_trip_spec() -> Value {
                         "Key": { "type": "string" },
                         "Value": { "type": "string" }
                     }
+                },
+                "ResourceType": {
+                    "type": "string",
+                    "enum": ["instance", "volume"]
+                },
+                "TagSpecification": {
+                    "type": "object",
+                    "required": ["Type", "Tags"],
+                    "properties": {
+                        "Type": { "$ref": "#/components/schemas/ResourceType" },
+                        "Tags": {
+                            "type": "array",
+                            "items": { "$ref": "#/components/schemas/Tag" }
+                        }
+                    }
+                },
+                "ExportConfiguration": {
+                    "type": "object",
+                    "required": ["EnableLogTypes", "Settings"],
+                    "properties": {
+                        "EnableLogTypes": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "Settings": { "$ref": "#/components/schemas/ExportSettings" }
+                    }
+                },
+                "ExportSettings": {
+                    "type": "object",
+                    "required": ["Enabled"],
+                    "properties": { "Enabled": { "type": "boolean" } }
                 }
             }
         }
     })
+}
+
+#[test]
+fn nested_aws_query_shape_requires_explicit_provider_metadata() {
+    let mut spec = round_trip_spec();
+    spec.pointer_mut("/info")
+        .and_then(Value::as_object_mut)
+        .unwrap()
+        .remove("x-providerName");
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let parameter = analysis.operations["queryRoundTrip"]
+        .parameters
+        .iter()
+        .find(|parameter| parameter.name == "export_configuration")
+        .unwrap();
+    assert!(matches!(
+        parameter.query_serialization,
+        Some(QuerySerialization::FormExplodedObject)
+    ));
+}
+
+#[test]
+fn query_shapes_beyond_the_explicit_nesting_bound_are_rejected() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "too deep query", "version": "1", "x-providerName": "amazonaws.com" },
+        "paths": { "/too-deep": { "get": {
+            "operationId": "tooDeep",
+            "parameters": [{
+                "name": "items",
+                "in": "query",
+                "style": "form",
+                "explode": true,
+                "schema": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/Outer" }
+                }
+            }],
+            "responses": { "204": { "description": "ok" } }
+        }}},
+        "components": { "schemas": {
+            "Outer": {
+                "type": "object",
+                "properties": {
+                    "Middle": {
+                        "type": "array",
+                        "items": { "$ref": "#/components/schemas/Middle" }
+                    }
+                }
+            },
+            "Middle": {
+                "type": "object",
+                "properties": {
+                    "Deeper": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                }
+            }
+        }}
+    });
+    let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let parameter = &analysis.operations["tooDeep"].parameters[0];
+    assert!(matches!(
+        &parameter.query_serialization,
+        Some(QuerySerialization::Unsupported { reason })
+            if reason.contains("supported nesting bound")
+    ));
 }
 
 #[test]
@@ -234,11 +351,13 @@ mod tests {
             active: Option<bool>,
             required_expanded: QueryRoundTripRequiredExpanded,
             optional_expanded: Option<QueryRoundTripOptionalExpanded>,
+            export_configuration: Option<ExportConfiguration>,
             compact: QueryRoundTripCompact,
             deep_filter: Option<QueryRoundTripDeepFilter>,
             ids: Vec<QueryId>,
             scores: Option<Vec<PublicScore>>,
             tags: Option<Vec<Tag>>,
+            tag_specifications: Option<Vec<TagSpecification>>,
         ) -> QueryRoundTripResponse {
             self.captured
                 .send(json!({
@@ -247,11 +366,13 @@ mod tests {
                     "active": active,
                     "required_expanded": required_expanded,
                     "optional_expanded": optional_expanded,
+                    "export_configuration": export_configuration,
                     "compact": compact,
                     "deep_filter": deep_filter,
                     "ids": ids,
                     "scores": scores,
                     "tags": tags,
+                    "tag_specifications": tag_specifications,
                 }))
                 .unwrap();
             QueryRoundTripResponse::NoContent
@@ -286,6 +407,10 @@ mod tests {
                     term: Some("rust sdk".into()),
                     archived: Some(false),
                 }),
+                Some(ExportConfiguration {
+                    enable_log_types: vec!["audit".into(), "profiler".into()],
+                    settings: ExportSettings { enabled: true },
+                }),
                 QueryRoundTripCompact {
                     kind: Some("public".into()),
                     count: Some(3),
@@ -296,16 +421,14 @@ mod tests {
                 }),
                 vec![11, 12],
                 Some(vec![8, 9]),
-                Some(vec![
-                    Tag {
-                        key: "env".into(),
-                        value: "prod".into(),
-                    },
-                    Tag {
-                        key: "team".into(),
-                        value: "sdk".into(),
-                    },
-                ]),
+                Some((1..=10).map(|index| Tag {
+                    key: format!("key-{index}"),
+                    value: format!("value-{index}"),
+                }).collect()),
+                Some(vec![TagSpecification {
+                    r#type: ResourceType::Instance,
+                    tags: Vec::new(),
+                }]),
             )
             .await
             .unwrap();
@@ -324,14 +447,22 @@ mod tests {
                 "active": true,
                 "required_expanded": { "color": "red", "min_count": 2 },
                 "optional_expanded": { "term": "rust sdk", "archived": false },
+                "export_configuration": {
+                    "EnableLogTypes": ["audit", "profiler"],
+                    "Settings": { "Enabled": true }
+                },
                 "compact": { "kind": "public", "count": 3 },
                 "deep_filter": { "owner": "alice/bob", "open": true },
                 "ids": [11, 12],
                 "scores": [8, 9],
-                "tags": [
-                    { "Key": "env", "Value": "prod" },
-                    { "Key": "team", "Value": "sdk" }
-                ],
+                "tags": (1..=10).map(|index| json!({
+                    "Key": format!("key-{index}"),
+                    "Value": format!("value-{index}"),
+                })).collect::<Vec<_>>(),
+                "tag_specifications": [{
+                    "Type": "instance",
+                    "Tags": []
+                }],
             })
         );
 
@@ -342,9 +473,14 @@ mod tests {
                 None,
                 QueryRoundTripRequiredExpanded::default(),
                 Some(QueryRoundTripOptionalExpanded::default()),
+                Some(ExportConfiguration {
+                    enable_log_types: Vec::new(),
+                    settings: ExportSettings { enabled: false },
+                }),
                 QueryRoundTripCompact::default(),
                 Some(QueryRoundTripDeepFilter::default()),
                 Vec::new(),
+                Some(Vec::new()),
                 Some(Vec::new()),
                 Some(Vec::new()),
             )
@@ -365,11 +501,16 @@ mod tests {
                 "active": null,
                 "required_expanded": {},
                 "optional_expanded": {},
+                "export_configuration": {
+                    "EnableLogTypes": [],
+                    "Settings": { "Enabled": false }
+                },
                 "compact": {},
                 "deep_filter": {},
                 "ids": [],
                 "scores": [],
                 "tags": [],
+                "tag_specifications": [],
             })
         );
 
@@ -390,12 +531,14 @@ mod tests {
                 None,
                 QueryRoundTripRequiredExpanded::default(),
                 None,
+                None,
                 QueryRoundTripCompact {
                     kind: Some("public,private".into()),
                     count: None,
                 },
                 None,
                 vec![1],
+                None,
                 None,
                 None,
             )
@@ -437,7 +580,7 @@ fn bad_query_spec(parameter: Value, extra_parameter: Option<Value>) -> Value {
     parameters.extend(extra_parameter);
     json!({
         "openapi": "3.1.0",
-        "info": { "title": "bad query", "version": "1.0.0" },
+        "info": { "title": "bad query", "version": "1.0.0", "x-providerName": "amazonaws.com" },
         "paths": {
             "/bad": { "get": {
                 "operationId": "badQuery",
@@ -504,7 +647,15 @@ fn unsupported_query_wire_shapes_fail_server_generation_with_context() {
             "schema": {
                 "type": "object",
                 "properties": {
-                    "nested": { "type": "object", "properties": { "name": { "type": "string" } } }
+                    "nested": {
+                        "type": "object",
+                        "properties": {
+                            "deeper": {
+                                "type": "object",
+                                "properties": { "name": { "type": "string" } }
+                            }
+                        }
+                    }
                 }
             }
         }),
