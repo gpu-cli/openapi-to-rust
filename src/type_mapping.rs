@@ -353,9 +353,6 @@ pub fn collect_generated_dep_requirements<'a>(
     if uses("reqwest_tracing::") {
         dependencies.push(DepRequirement::new("reqwest-tracing", "0.5"));
     }
-    if uses("reqwest_eventsource::") {
-        dependencies.push(DepRequirement::new("reqwest-eventsource", "0.6"));
-    }
     if uses("thiserror::") || uses("use thiserror::") {
         dependencies.push(DepRequirement::new("thiserror", "1"));
     }

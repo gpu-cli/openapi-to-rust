@@ -138,8 +138,13 @@ fn generated_clients_bound_chunked_responses_without_content_length() {
         .find(|file| file.path == std::path::Path::new("streaming.rs"))
         .unwrap();
     assert!(streaming.content.contains("with_max_response_body_bytes"));
-    assert!(streaming.content.contains("ResponseTooLarge"));
-    assert!(!streaming.content.contains("response.text().await"));
+    let sse = result
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("sse.rs"))
+        .unwrap();
+    assert!(sse.content.contains("ResponseTooLarge"));
+    assert!(!sse.content.contains("response.text().await"));
 
     std::fs::write(
         temp.path().join("src/lib.rs"),
@@ -151,6 +156,7 @@ mod tests {
     use super::generated::streaming::{
         StreamEventsStreamingClient, StreamingClient, StreamingError,
     };
+    use super::generated::sse::SseClient;
     use futures_util::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -158,7 +164,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            for _ in 0..8 {
+            for _ in 0..9 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 loop {
@@ -191,6 +197,17 @@ mod tests {
                         "500 Internal Server Error",
                         "application/json",
                         vec![b"12345", b"67890"],
+                    ),
+                    "/sse-chunks" => (
+                        "200 OK",
+                        "text/event-stream; charset=utf-8",
+                        vec![
+                            b": keepalive\r",
+                            b"\nevent: ping\r\ndata: {\"type\":\"ping\"}\r\n\r\n",
+                            b"event: message\ndata: {\"message\":\"fir",
+                            b"st\"}\n\ndata: [DONE]\n\n",
+                            b"data: {\"message\":\"ignored\"}\n\n",
+                        ],
                     ),
                     "/oversized-text" => ("200 OK", "text/plain", vec![b"12345", b"67890"]),
                     "/oversized-binary" => (
@@ -252,6 +269,18 @@ mod tests {
             StreamingError::ResponseTooLarge { limit } => assert_eq!(limit, 8),
             other => panic!("unexpected streaming error: {other:?}"),
         }
+
+        let sse_client = SseClient::new();
+        let request = sse_client.get(format!("http://{address}/sse-chunks"));
+        let mut stream = sse_client
+            .stream::<serde_json::Value>(request)
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            serde_json::json!({ "message": "first" })
+        );
+        assert!(stream.next().await.is_none());
     }
 }
 "#,

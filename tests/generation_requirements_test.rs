@@ -268,6 +268,12 @@ fn disabled_sse_feature_does_not_emit_streaming_code_or_dependencies() {
             .iter()
             .all(|file| file.path != std::path::Path::new("streaming.rs"))
     );
+    assert!(
+        result
+            .files
+            .iter()
+            .all(|file| file.path != std::path::Path::new("sse.rs"))
+    );
     assert!(!dependency_names(&result).contains("reqwest-eventsource"));
     assert!(!dependency_names(&result).contains("futures-util"));
 }
@@ -412,7 +418,6 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "chrono",
             "futures-util",
             "reqwest",
-            "reqwest-eventsource",
             "serde",
             "serde_json",
             "thiserror",
@@ -426,8 +431,22 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .iter()
         .find(|dependency| dependency.crate_name == "reqwest")
         .expect("reqwest dependency");
-    assert_eq!(reqwest.features, vec!["json", "rustls-tls"]);
+    assert_eq!(reqwest.features, vec!["json", "rustls-tls", "stream"]);
     assert!(!reqwest.default_features);
+    let sse_runtime = sse
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("sse.rs"))
+        .expect("SSE runtime module");
+    assert!(sse_runtime.content.contains("pub struct SseClient"));
+    let streaming = sse
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("streaming.rs"))
+        .expect("API-specific streaming module");
+    assert!(streaming.content.contains("use super::sse::SseClient"));
+    assert!(sse.mod_file.content.contains("pub mod sse;"));
+    assert!(!sse.mod_file.content.contains("pub use sse::*;"));
 
     let server = compile_case(
         "server",
@@ -504,7 +523,6 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "jsonschema",
             "mime",
             "reqwest",
-            "reqwest-eventsource",
             "reqwest-middleware",
             "reqwest-retry",
             "reqwest-tracing",

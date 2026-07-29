@@ -424,6 +424,12 @@ impl CodeGenerator {
                             .to_string(),
                     ));
                 }
+                if streaming_config.event_parser_helpers {
+                    files.push(GeneratedFile {
+                        path: "sse.rs".into(),
+                        content: self.generate_sse_runtime()?,
+                    });
+                }
                 let streaming_content =
                     self.generate_streaming_client(streaming_config, analysis)?;
                 files.push(GeneratedFile {
@@ -762,6 +768,10 @@ impl CodeGenerator {
     ) -> Result<String> {
         let mut client_code = TokenStream::new();
         let provenance_attribute = self.provenance_attribute();
+        let duration_import = streaming_config
+            .reconnection_config
+            .as_ref()
+            .map(|_| quote! { use std::time::Duration; });
 
         // Generate imports
         let imports = quote! {
@@ -776,18 +786,19 @@ impl CodeGenerator {
 
             use super::types::*;
             use async_trait::async_trait;
-            use futures_util::{Stream, StreamExt};
+            use futures_util::Stream;
             use std::pin::Pin;
-            use std::time::Duration;
             use reqwest::header::{HeaderMap, HeaderValue};
-            use tracing::{debug, error, info, warn, instrument};
+            use tracing::{debug, info, instrument};
+            #duration_import
         };
         client_code.extend(imports);
 
-        // Generate error types
         if streaming_config.generate_client {
-            let error_types = self.generate_streaming_error_types()?;
-            client_code.extend(error_types);
+            client_code.extend(quote! {
+                use super::sse::SseClient;
+                pub use super::sse::StreamingError;
+            });
         }
 
         // Generate client trait for each endpoint
@@ -800,12 +811,6 @@ impl CodeGenerator {
         if streaming_config.generate_client {
             let client_impl = self.generate_streaming_client_impl(streaming_config, analysis)?;
             client_code.extend(client_impl);
-        }
-
-        // Generate SSE parsing utilities
-        if streaming_config.event_parser_helpers {
-            let parser_code = self.generate_sse_parser_utilities(streaming_config)?;
-            client_code.extend(parser_code);
         }
 
         // Generate reconnection utilities if configured
@@ -1285,6 +1290,9 @@ impl CodeGenerator {
             .collect::<Vec<_>>();
         let pub_uses = module_names
             .iter()
+            // The SSE runtime intentionally keeps transport-level names under
+            // `sse::` so they cannot collide with API-specific streaming types.
+            .filter(|name| name.as_str() != "sse")
             .map(|name| format!("pub use {name}::*;"))
             .collect::<Vec<_>>();
 
@@ -3682,9 +3690,8 @@ impl CodeGenerator {
         let mut struct_fields = vec![
             quote! { base_url: String },
             quote! { api_key: Option<String> },
-            quote! { http_client: reqwest::Client },
+            quote! { sse_client: SseClient },
             quote! { custom_headers: std::collections::BTreeMap<String, String> },
-            quote! { max_response_body_bytes: usize },
         ];
 
         let has_optional_headers = !streaming_config
@@ -3720,18 +3727,18 @@ impl CodeGenerator {
             quote! {
                 base_url: #default_base_url.to_string(),
                 api_key: None,
-                http_client: reqwest::Client::new(),
+                sse_client: SseClient::new()
+                    .with_max_error_body_bytes(#max_response_body_bytes),
                 custom_headers: std::collections::BTreeMap::new(),
-                max_response_body_bytes: #max_response_body_bytes,
                 optional_headers: std::collections::BTreeMap::new(),
             }
         } else {
             quote! {
                 base_url: #default_base_url.to_string(),
                 api_key: None,
-                http_client: reqwest::Client::new(),
+                sse_client: SseClient::new()
+                    .with_max_error_body_bytes(#max_response_body_bytes),
                 custom_headers: std::collections::BTreeMap::new(),
-                max_response_body_bytes: #max_response_body_bytes,
             }
         };
 
@@ -3770,7 +3777,7 @@ impl CodeGenerator {
 
                 /// Set the maximum number of error-response bytes buffered in memory.
                 pub fn with_max_response_body_bytes(mut self, limit: usize) -> Self {
-                    self.max_response_body_bytes = limit;
+                    self.sse_client = self.sse_client.with_max_error_body_bytes(limit);
                     self
                 }
 
@@ -3786,7 +3793,7 @@ impl CodeGenerator {
 
                 /// Set the HTTP client
                 pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
-                    self.http_client = client;
+                    self.sse_client = self.sse_client.with_http_client(client);
                     self
                 }
 
@@ -3987,17 +3994,17 @@ impl CodeGenerator {
                     let url_str = url.to_string();
                     debug!("Making streaming GET request to: {}", url_str);
 
-                    let request_builder = self.http_client
+                    let request_builder = self.sse_client
                         .get(url_str)
                         .headers(headers);
 
                     debug!("Creating SSE stream from request");
-                    let stream = parse_sse_stream_with_limit::<#event_type>(
-                        request_builder,
-                        self.max_response_body_bytes,
-                    ).await?;
+                    let stream = self
+                        .sse_client
+                        .stream::<#event_type>(request_builder)
+                        .await?;
                     info!("SSE stream created successfully");
-                    Ok(Box::pin(stream))
+                    Ok(stream)
                 }
             }
         })
@@ -4079,28 +4086,104 @@ impl CodeGenerator {
                     #url_construction
                     debug!("Making streaming POST request to: {}", url);
 
-                    let request_builder = self.http_client
+                    let request_builder = self.sse_client
                         .post(&url)
                         .headers(headers)
                         .json(&streaming_request);
 
                     debug!("Creating SSE stream from request");
-                    let stream = parse_sse_stream_with_limit::<#event_type>(
-                        request_builder,
-                        self.max_response_body_bytes,
-                    ).await?;
+                    let stream = self
+                        .sse_client
+                        .stream::<#event_type>(request_builder)
+                        .await?;
                     info!("SSE stream created successfully");
-                    Ok(Box::pin(stream))
+                    Ok(stream)
                 }
             }
         })
     }
 
-    /// Generate SSE parsing utilities using reqwest-eventsource
-    fn generate_sse_parser_utilities(
-        &self,
-        _streaming_config: &crate::streaming::StreamingConfig,
-    ) -> Result<TokenStream> {
+    /// Generate the reusable SSE transport module emitted as `sse.rs`.
+    fn generate_sse_runtime(&self) -> Result<String> {
+        let provenance_attribute = self.provenance_attribute();
+        let error_types = self.generate_streaming_error_types()?;
+        let parser = self.generate_sse_parser_utilities()?;
+        let tokens = quote! {
+            //! Generated SSE transport, framing, and JSON decoding support.
+            //!
+            //! This module is emitted only when SSE generation is enabled.
+            #provenance_attribute
+            #![allow(clippy::format_in_format_args)]
+
+            use futures_util::{Stream, StreamExt};
+            use std::pin::Pin;
+            use tracing::debug;
+
+            #error_types
+
+            /// Reusable transport client for generated SSE operations.
+            #[derive(Debug, Clone)]
+            pub struct SseClient {
+                http_client: reqwest::Client,
+                max_error_body_bytes: usize,
+            }
+
+            impl SseClient {
+                pub fn new() -> Self {
+                    Self {
+                        http_client: reqwest::Client::new(),
+                        max_error_body_bytes: DEFAULT_MAX_SSE_ERROR_BODY_BYTES,
+                    }
+                }
+
+                pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+                    self.http_client = client;
+                    self
+                }
+
+                pub fn with_max_error_body_bytes(mut self, limit: usize) -> Self {
+                    self.max_error_body_bytes = limit;
+                    self
+                }
+
+                pub fn get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+                    self.http_client.get(url)
+                }
+
+                pub fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+                    self.http_client.post(url)
+                }
+
+                pub async fn stream<T>(
+                    &self,
+                    request_builder: reqwest::RequestBuilder,
+                ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
+                where
+                    T: serde::de::DeserializeOwned + Send + 'static,
+                {
+                    parse_sse_stream_with_limit(
+                        request_builder,
+                        self.max_error_body_bytes,
+                    ).await
+                }
+            }
+
+            impl Default for SseClient {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+
+            #parser
+        };
+        let syntax_tree = syn::parse2::<syn::File>(tokens).map_err(|error| {
+            GeneratorError::CodeGenError(format!("Failed to parse generated sse.rs: {error}"))
+        })?;
+        Ok(prettyplease::unparse(&syntax_tree))
+    }
+
+    /// Generate the standalone SSE framing and JSON parsing utilities.
+    fn generate_sse_parser_utilities(&self) -> Result<TokenStream> {
         Ok(quote! {
             /// Default upper bound for an SSE error response buffered in memory.
             pub const DEFAULT_MAX_SSE_ERROR_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -4120,10 +4203,160 @@ impl CodeGenerator {
                 Ok(body)
             }
 
-            /// Parse SSE stream from HTTP request using reqwest-eventsource
+            #[derive(Debug)]
+            struct __SseMessage {
+                event: String,
+                data: String,
+            }
+
+            #[derive(Default)]
+            struct __SseDecoder {
+                line: Vec<u8>,
+                event: String,
+                data: Vec<String>,
+                saw_carriage_return: bool,
+            }
+
+            impl __SseDecoder {
+                fn feed(
+                    &mut self,
+                    chunk: &[u8],
+                ) -> Vec<Result<__SseMessage, StreamingError>> {
+                    let mut messages = Vec::new();
+                    for &byte in chunk {
+                        if self.saw_carriage_return {
+                            self.saw_carriage_return = false;
+                            if byte == b'\n' {
+                                continue;
+                            }
+                        }
+
+                        match byte {
+                            b'\n' => self.finish_line(&mut messages),
+                            b'\r' => {
+                                self.finish_line(&mut messages);
+                                self.saw_carriage_return = true;
+                            }
+                            _ => self.line.push(byte),
+                        }
+                    }
+                    messages
+                }
+
+                fn finish(mut self) -> Vec<Result<__SseMessage, StreamingError>> {
+                    let mut messages = Vec::new();
+                    if !self.line.is_empty() {
+                        self.finish_line(&mut messages);
+                    }
+                    self.dispatch(&mut messages);
+                    messages
+                }
+
+                fn finish_line(
+                    &mut self,
+                    messages: &mut Vec<Result<__SseMessage, StreamingError>>,
+                ) {
+                    let line = std::mem::take(&mut self.line);
+                    let line = match String::from_utf8(line) {
+                        Ok(line) => line,
+                        Err(error) => {
+                            messages.push(Err(StreamingError::Parsing(format!(
+                                "SSE line is not valid UTF-8: {}",
+                                error
+                            ))));
+                            return;
+                        }
+                    };
+
+                    if line.is_empty() {
+                        self.dispatch(messages);
+                        return;
+                    }
+                    if line.starts_with(':') {
+                        return;
+                    }
+
+                    let (field, value) = line
+                        .split_once(':')
+                        .map_or((line.as_str(), ""), |(field, value)| {
+                            (field, value.strip_prefix(' ').unwrap_or(value))
+                        });
+                    match field {
+                        "event" => self.event = value.to_string(),
+                        "data" => self.data.push(value.to_string()),
+                        // `id` and `retry` are transport metadata. Generated
+                        // clients expose typed JSON events and currently do not
+                        // reconnect, so neither field changes the public stream.
+                        _ => {}
+                    }
+                }
+
+                fn dispatch(
+                    &mut self,
+                    messages: &mut Vec<Result<__SseMessage, StreamingError>>,
+                ) {
+                    if self.data.is_empty() {
+                        self.event.clear();
+                        return;
+                    }
+                    messages.push(Ok(__SseMessage {
+                        event: if self.event.is_empty() {
+                            "message".to_string()
+                        } else {
+                            std::mem::take(&mut self.event)
+                        },
+                        data: std::mem::take(&mut self.data).join("\n"),
+                    }));
+                    self.event.clear();
+                }
+            }
+
+            fn __deserialize_sse_message<T>(
+                message: __SseMessage,
+            ) -> Option<Result<T, StreamingError>>
+            where
+                T: serde::de::DeserializeOwned,
+            {
+                if message.event == "ping" {
+                    debug!("Received SSE ping event, skipping");
+                    return None;
+                }
+                if message.data.trim().is_empty() {
+                    debug!("Empty SSE data, skipping");
+                    return None;
+                }
+
+                let json_value = match serde_json::from_str::<serde_json::Value>(&message.data) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Some(Err(StreamingError::Parsing(format!(
+                            "SSE event is not valid JSON: {} ({})",
+                            message.data, error
+                        ))));
+                    }
+                };
+                let is_ping = json_value
+                    .get("event")
+                    .or_else(|| json_value.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|event| event == "ping");
+                if is_ping {
+                    debug!("Received ping event in JSON data, skipping");
+                    return None;
+                }
+
+                Some(serde_json::from_value::<T>(json_value).map_err(|error| {
+                    StreamingError::Parsing(format!(
+                        "Failed to parse SSE event: {} (raw: {}, event: {})",
+                        error, message.data, message.event
+                    ))
+                }))
+            }
+
+            /// Parse an SSE response without an external EventSource wrapper.
             pub async fn parse_sse_stream<T>(
                 request_builder: reqwest::RequestBuilder
-            ) -> Result<impl Stream<Item = Result<T, StreamingError>>, StreamingError>
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
             where
                 T: serde::de::DeserializeOwned + Send + 'static,
             {
@@ -4133,111 +4366,105 @@ impl CodeGenerator {
             async fn parse_sse_stream_with_limit<T>(
                 request_builder: reqwest::RequestBuilder,
                 max_response_body_bytes: usize,
-            ) -> Result<impl Stream<Item = Result<T, StreamingError>>, StreamingError>
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
             where
                 T: serde::de::DeserializeOwned + Send + 'static,
             {
-                let mut event_source = reqwest_eventsource::EventSource::new(request_builder).map_err(|e| {
-                    StreamingError::Connection(format!("Failed to create event source: {}", e))
-                })?;
+                let response = request_builder.send().await?;
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let error = match __read_bounded_streaming_error_body(
+                        response,
+                        max_response_body_bytes,
+                    ).await {
+                        Ok(body) => StreamingError::Connection(format!(
+                            "HTTP {} error: {}",
+                            status.as_u16(),
+                            String::from_utf8_lossy(&body)
+                        )),
+                        Err(error) => error,
+                    };
+                    return Ok(Box::pin(futures_util::stream::once(async move { Err(error) })));
+                }
 
-                let stream = event_source.filter_map(move |event_result| async move {
-                    match event_result {
-                        Ok(reqwest_eventsource::Event::Open) => {
-                            debug!("SSE connection opened");
-                            None
-                        }
-                        Ok(reqwest_eventsource::Event::Message(message)) => {
-                            // Check if this is a ping event by SSE event type
-                            if message.event == "ping" {
-                                debug!("Received SSE ping event, skipping");
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if !content_type
+                    .split(';')
+                    .next()
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
+                {
+                    let error = StreamingError::Parsing(format!(
+                        "Expected text/event-stream response, received {}",
+                        if content_type.is_empty() { "no Content-Type" } else { content_type }
+                    ));
+                    return Ok(Box::pin(futures_util::stream::once(async move { Err(error) })));
+                }
+
+                debug!("SSE connection opened");
+                let bytes = Box::pin(response.bytes_stream());
+                let stream = futures_util::stream::unfold(
+                    (
+                        bytes,
+                        __SseDecoder::default(),
+                        std::collections::VecDeque::<Result<T, StreamingError>>::new(),
+                        false,
+                    ),
+                    |(mut bytes, mut decoder, mut pending, mut done)| async move {
+                        loop {
+                            if let Some(item) = pending.pop_front() {
+                                return Some((item, (bytes, decoder, pending, done)));
+                            }
+                            if done {
+                                debug!("SSE stream completed normally");
                                 return None;
                             }
 
-                            // Special handling for empty data
-                            if message.data.trim().is_empty() {
-                                debug!("Empty SSE data, skipping");
-                                return None;
-                            }
-
-                            // Check if this is a ping event in the JSON data
-                            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&message.data) {
-                                if let Some(event_type) = json_value.get("event").and_then(|v| v.as_str()) {
-                                    if event_type == "ping" {
-                                        debug!("Received ping event in JSON data, skipping");
-                                        return None;
-                                    }
-                                }
-
-                                // Try to parse the full event normally
-                                match serde_json::from_value::<T>(json_value) {
-                                    Ok(parsed_event) => {
-                                        Some(Ok(parsed_event))
-                                    }
-                                    Err(e) => {
-                                        if message.data.contains("ping") || message.event.contains("ping") {
-                                            debug!("Ignoring ping-related event: {}", message.data);
-                                            None
-                                        } else {
-                                            Some(Err(StreamingError::Parsing(
-                                                format!("Failed to parse SSE event: {} (raw: {})", e, message.data)
-                                            )))
+                            match bytes.next().await {
+                                Some(Ok(chunk)) => {
+                                    for message in decoder.feed(&chunk) {
+                                        match message {
+                                            Ok(message) if message.data.trim() == "[DONE]" => {
+                                                done = true;
+                                                break;
+                                            }
+                                            Ok(message) => {
+                                                if let Some(item) = __deserialize_sse_message(message) {
+                                                    pending.push_back(item);
+                                                }
+                                            }
+                                            Err(error) => pending.push_back(Err(error)),
                                         }
                                     }
                                 }
-                            } else {
-                                // Not valid JSON at all
-                                Some(Err(StreamingError::Parsing(
-                                    format!("SSE event is not valid JSON: {}", message.data)
-                                )))
-                            }
-                        }
-                        Err(e) => {
-                            // Check if this is a normal stream end vs actual error
-                            match e {
-                                reqwest_eventsource::Error::StreamEnded => {
-                                    debug!("SSE stream completed normally");
-                                    None // Normal stream end, not an error
+                                Some(Err(error)) => {
+                                    done = true;
+                                    pending.push_back(Err(error.into()));
                                 }
-                                reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
-                                    // We have access to the response body for error details
-                                    let status_code = status.as_u16();
-
-                                    // Read the response body to get error details
-                                    let error_body = match __read_bounded_streaming_error_body(
-                                        response,
-                                        max_response_body_bytes,
-                                    ).await {
-                                        Ok(body) => String::from_utf8_lossy(&body).into_owned(),
-                                        Err(error) => return Some(Err(error)),
-                                    };
-
-                                    error!("SSE connection error - HTTP {}: {}", status_code, error_body);
-
-                                    let detailed_error = format!(
-                                        "HTTP {} error: {}",
-                                        status_code,
-                                        error_body
-                                    );
-
-                                    Some(Err(StreamingError::Connection(detailed_error)))
-                                }
-                                _ => {
-                                    let error_str = e.to_string();
-                                    if error_str.contains("stream closed") {
-                                        debug!("SSE stream closed");
-                                        None
-                                    } else {
-                                        error!("SSE connection error: {}", e);
-                                        Some(Err(StreamingError::Connection(error_str)))
+                                None => {
+                                    done = true;
+                                    for message in decoder.finish() {
+                                        match message {
+                                            Ok(message) if message.data.trim() == "[DONE]" => {}
+                                            Ok(message) => {
+                                                if let Some(item) = __deserialize_sse_message(message) {
+                                                    pending.push_back(item);
+                                                }
+                                            }
+                                            Err(error) => pending.push_back(Err(error)),
+                                        }
                                     }
+                                    decoder = __SseDecoder::default();
                                 }
                             }
                         }
                     }
-                });
+                );
 
-                Ok(stream)
+                Ok(Box::pin(stream))
             }
         })
     }
