@@ -57,6 +57,31 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn client_check_json_keeps_cargo_output_off_stdout() {
+    let output = run(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        &[
+            "clients",
+            "check",
+            "--manifest",
+            "tests/fixtures/client-sync/openapi-clients.yml",
+            "--json",
+        ],
+    );
+    assert_success(&output);
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "client report was not clean JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert_eq!(report["mode"], "check");
+    assert_eq!(report["clients"][0]["compiled"], true);
+}
+
+#[test]
 fn direct_generation_supports_client_types_only_dry_run_check_quiet_and_json() {
     let temp = TempDir::new().unwrap();
     std::fs::write(temp.path().join("api.yaml"), SPEC).unwrap();

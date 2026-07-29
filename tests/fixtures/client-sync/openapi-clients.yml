@@ -9,3 +9,4 @@ clients:
       package: client-sync-fixture
       all_features: false
       locked: true
+      test: true

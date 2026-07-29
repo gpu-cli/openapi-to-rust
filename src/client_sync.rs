@@ -9,6 +9,7 @@ use crate::spec_source::{parse_spec, sanitize_source_provenance, validate_oas_do
 use crate::{CodeGenerator, ConfigFile, SchemaAnalyzer, TypeMapper};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -501,12 +502,20 @@ fn run_cargo_command(
     if cargo.locked {
         command.arg("--locked");
     }
-    let status = command.status()?;
-    if status.success() {
+    // Keep the CLI's stdout available for its JSON report. Cargo test harnesses
+    // write regular output to stdout, which would otherwise corrupt `--json`
+    // when a caller redirects the command's stdout to a report file.
+    let output = command.output()?;
+    let mut stderr = std::io::stderr().lock();
+    stderr.write_all(&output.stdout)?;
+    stderr.write_all(&output.stderr)?;
+    stderr.flush()?;
+    if output.status.success() {
         Ok(())
     } else {
         Err(format!(
-            "cargo {subcommand} failed for '{}' with {status}",
+            "cargo {subcommand} failed for '{}' with {}",
+            output.status,
             manifest_path.display()
         )
         .into())
