@@ -409,10 +409,9 @@ fn normalize_ecma_unicode_escapes(pattern: &str) -> String {
             normalized.push('}');
             index += 6;
         } else {
-            let ch = pattern[index..]
-                .chars()
-                .next()
-                .expect("index is within the pattern");
+            let Some(ch) = pattern[index..].chars().next() else {
+                break;
+            };
             normalized.push(ch);
             index += ch.len_utf8();
         }
@@ -475,10 +474,9 @@ fn normalize_java_posix_classes(pattern: &str) -> String {
                 }
             }
         }
-        let ch = pattern[index..]
-            .chars()
-            .next()
-            .expect("index is within the pattern");
+        let Some(ch) = pattern[index..].chars().next() else {
+            break;
+        };
         normalized.push(ch);
         index += ch.len_utf8();
     }
@@ -512,10 +510,9 @@ fn normalize_ecma_octal_escapes(pattern: &str) -> String {
             normalized.push_str(&format!("\\x{value:02X}"));
             index += 4;
         } else {
-            let ch = pattern[index..]
-                .chars()
-                .next()
-                .expect("index is within the pattern");
+            let Some(ch) = pattern[index..].chars().next() else {
+                break;
+            };
             normalized.push(ch);
             index += ch.len_utf8();
         }

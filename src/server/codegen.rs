@@ -502,9 +502,9 @@ impl<'a> ServerCodegen<'a> {
         !matches!(
             schema.get("type").and_then(serde_json::Value::as_str),
             Some("array" | "object")
-        ) && !schema.get("oneOf").is_some()
-            && !schema.get("anyOf").is_some()
-            && !schema.get("allOf").is_some()
+        ) && schema.get("oneOf").is_none()
+            && schema.get("anyOf").is_none()
+            && schema.get("allOf").is_none()
     }
 
     fn form_field_names(
