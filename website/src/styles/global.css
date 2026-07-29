@@ -347,10 +347,14 @@
   }
 
   .prose { max-width: var(--reading); }
-  .prose-wide { min-width: 0; max-width: none; }
+  .prose-wide {
+    --wide-content-inset: clamp(0px, calc((100vw - var(--shell) - 2rem) / 2), 130px);
+    min-width: 0;
+    max-width: none;
+  }
+  .prose-wide > * { margin-inline-start: var(--wide-content-inset); }
   .prose-wide > :where(h2, h3, p, ul, ol, blockquote, .callout, .verification-note) {
     max-width: var(--reading);
-    margin-inline-start: clamp(0px, calc((100vw - var(--shell) - 2rem) / 2), 130px);
   }
   .prose > * + * { margin-top: 1.2rem; }
   .prose h2 { margin-top: 3.5rem; font-size: clamp(1.9rem, 4vw, 2.8rem); }
