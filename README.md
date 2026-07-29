@@ -55,6 +55,26 @@ Release history and breaking changes live in the [changelog](CHANGELOG.md).
 - **Snapshot testing** — `insta` snapshots for generated output.
 - **Optional `specta::Type` derives** for cross-language type sharing.
 
+## Compared with Progenitor
+
+[Progenitor](https://github.com/oxidecomputer/progenitor) is an established,
+opinionated OpenAPI 3.0.x client generator developed by Oxide, with particular
+alignment to Dropshot-generated APIs. It supports procedural-macro,
+build-script, and static-crate workflows, plus pagination streams, generated
+CLI support, and typed mocking helpers.
+
+openapi-to-rust grew around consuming large third-party specifications. Its
+focus includes OpenAPI 3.1 schema forms, ahead-of-time generated source,
+selected Reqwest client operations, SSE, and Axum server scaffolding with shared
+models. In one reproducible 120-operation benchmark, its normal ahead-of-time
+workflow had 26.5% lower median clean `cargo check` wall time; no-op builds were
+effectively identical. This is a version- and machine-specific observation, not
+a universal performance guarantee.
+
+See the [dated, source-linked Progenitor comparison](https://openapi-to-rust.dev/compare/progenitor)
+and the [benchmark methodology](benchmarks/progenitor-builds/README.md) for the
+relevant tradeoffs and limitations.
+
 ## Install
 
 Rust users with Rust 1.88 or newer can install the CLI from crates.io:

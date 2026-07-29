@@ -1,0 +1,150 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+
+const toc = [
+  { id: "short-answer", label: "Short answer" },
+  { id: "comparison", label: "Scope comparison" },
+  { id: "build-times", label: "Build benchmark" },
+  { id: "strengths", label: "Project strengths" },
+  { id: "choose", label: "Which should you choose?" },
+  { id: "sources", label: "Sources" },
+];
+---
+
+<DocsLayout
+  title="openapi-to-rust vs Progenitor | Rust OpenAPI Generator Comparison"
+  description="Compare openapi-to-rust 0.11 with Progenitor 0.14 across target APIs, OpenAPI versions, generated surfaces, integration modes, and measured build workflows."
+  h1="openapi-to-rust vs Progenitor"
+  lead="Both are opinionated Rust generators. Progenitor is an established client generator aligned with Dropshot-produced OpenAPI 3.0.x documents; openapi-to-rust grew around complex third-party specifications and a combined client, SSE, and Axum workflow."
+  canonicalPath="/compare/progenitor"
+  category="Comparison"
+  updated="2026-07-28"
+  {toc}
+>
+  <div class="callout">
+    <strong>Independent projects, different goals</strong>
+    <p>openapi-to-rust is not affiliated with Oxide Computer Company or Progenitor. Progenitor is named here to help Rust teams choose by use case, not to imply that one project should serve every OpenAPI workflow.</p>
+  </div>
+
+  <h2 id="short-answer">The short answer</h2>
+  <p>
+    Start with <strong>Progenitor</strong> when your API is produced by Dropshot, you want its procedural-macro or build-script integration,
+    or its pagination streams, generated CLI, and typed <code>httpmock</code> helpers match your workflow. Oxide describes Dropshot-generated APIs as Progenitor’s primary target.
+  </p>
+  <p>
+    Start with <strong>openapi-to-rust</strong> when you consume modern third-party specifications, need OpenAPI 3.1 schema forms,
+    generate SSE clients or selected Axum operations, or want checked-in source generation outside the downstream Cargo build.
+  </p>
+  <p>Neither recommendation replaces a compile test. Run both against the unions, parameters, authentication, and response bodies that make your document difficult.</p>
+
+  <h2 id="comparison">Different centers of gravity</h2>
+  <p>
+    This table compares documented project scope as reviewed on July 28, 2026. “Not a documented project goal” is intentionally different from “unsupported.”
+  </p>
+  <p class="scroll-hint" id="comparison-scroll-hint">Scroll horizontally to compare both generators.</p>
+  <div class="table-wrap comparison-table" tabindex="0" aria-describedby="comparison-scroll-hint">
+    <table>
+      <caption>Rust generator comparison: openapi-to-rust 0.11.0 and Progenitor 0.14.0</caption>
+      <thead>
+        <tr><th scope="col">Dimension</th><th scope="col">openapi-to-rust</th><th scope="col">Progenitor</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row">Primary scope</th><td>Rust models, Reqwest clients, SSE clients, Axum servers, and operation registries</td><td>Opinionated async Rust client generation</td></tr>
+        <tr><th scope="row">Primary API environment</th><td>Large third-party and service-provider specifications</td><td>Dropshot-generated APIs, while accepting other compatible documents</td></tr>
+        <tr><th scope="row">Documented OpenAPI input</th><td>3.0 and 3.1; experimental 3.2 parsing</td><td>3.0.x</td></tr>
+        <tr><th scope="row">Client interface</th><td>Flat typed methods; opt-in builders above a configurable threshold</td><td>Positional or builder style</td></tr>
+        <tr><th scope="row">Generation workflow</th><td>CLI, Rust library, or browser; normal CLI flow writes ordinary Rust before compilation</td><td>Procedural macro, <code>build.rs</code>, or a generated static crate</td></tr>
+        <tr><th scope="row">Generated server</th><td>Selected Axum operations with shared models, routing, typed responses, and request validation</td><td>Not a documented project goal; Progenitor describes itself as a client generator</td></tr>
+        <tr><th scope="row">Streaming focus</th><td>SSE parsing, typed events, reconnection, and Axum SSE responses</td><td>Streams for paginated interfaces; WebSocket channel support is also documented</td></tr>
+        <tr><th scope="row">Generated support tools</th><td>Operation registry and browser-downloadable crate; no equivalent generated Clap or <code>httpmock</code> surface</td><td>Generated Clap CLI and strongly typed <code>httpmock</code> helpers through the generator API</td></tr>
+        <tr><th scope="row">Schema adaptation</th><td>Overlay files, type strategies, aliases, extensible-enum settings, and per-format mapping</td><td>Type patches, replacements, conversions, additional derives, and <code>x-rust-type</code> crate policies</td></tr>
+        <tr><th scope="row">Project posture</th><td>Pre-1.0, Rust-only generator tested against a maintained real-world corpus</td><td>Established pre-1.0 generator maintained by Oxide and used for its API ecosystem</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="build-times">What the build benchmark actually shows</h2>
+  <p>
+    We measured each project’s normal client workflow against the same synthetic OpenAPI 3.0.3 document with 120 operations and 120 models.
+    Results below are median wall times on an Apple M4 Max using Rust and Cargo 1.97.0. Dependencies were downloaded before timing.
+  </p>
+  <div class="table-wrap benchmark-table">
+    <table>
+      <caption>Observed median wall time; lower is better</caption>
+      <thead><tr><th scope="col">Scenario</th><th scope="col">Ahead-of-time source</th><th scope="col">Progenitor macro</th><th scope="col">Observed result</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Clean <code>cargo check</code></th><td>5.91 s</td><td>8.04 s</td><td>26.5% lower in this run</td></tr>
+        <tr><th scope="row">No-op <code>cargo check</code></th><td>0.08 s</td><td>0.08 s</td><td>No meaningful difference</td></tr>
+        <tr><th scope="row">Rust source touched</th><td>0.445 s</td><td>0.58 s</td><td>23.3% lower in this run</td></tr>
+        <tr><th scope="row">Schema changed + checked</th><td>0.54 s</td><td>0.64 s</td><td>15.6% lower in this run</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The clean result includes each client’s current dependency graph—Reqwest 0.12 for openapi-to-rust and 0.13 for Progenitor—so it does not isolate procedural-macro overhead.
+    The fixture is synthetic, and the generated clients are not feature-equivalent. Treat these numbers as evidence that ahead-of-time generation can reduce build overhead in this setup, not as a universal speed guarantee.
+  </p>
+  <p>
+    Review the <a href="https://github.com/gpu-cli/openapi-to-rust/tree/main/benchmarks/progenitor-builds">reproducible harness, raw samples, and full methodology</a> before quoting the result.
+  </p>
+
+  <h2 id="strengths">Where each project is particularly compelling</h2>
+  <div class="decision-grid">
+    <div>
+      <h3>Progenitor’s strengths</h3>
+      <ul>
+        <li>Established alignment with Dropshot and Oxide’s API conventions.</li>
+        <li>Macro, build-script, and static-crate integration choices.</li>
+        <li>First-class pagination streams and request/response hooks.</li>
+        <li>Generated CLI and typed mocking helpers.</li>
+        <li>Fine-grained generated-type replacement and patching.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>openapi-to-rust’s strengths</h3>
+      <ul>
+        <li>OpenAPI 3.1 forms found in modern third-party documents.</li>
+        <li>One shared model surface for selected clients and Axum servers.</li>
+        <li>SSE-specific clients, reconnection, and server responses.</li>
+        <li>Operation selection, model pruning, and overlay-based repair.</li>
+        <li>Inspectable, checkable source generated before downstream builds.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="choose">Which should you choose?</h2>
+  <p>
+    Choose based on your specification and delivery model. Progenitor is a strong default for a Dropshot-centered client ecosystem and for teams that value compile-integrated generation or its testing tools.
+    openapi-to-rust is aimed at teams consuming varied external contracts or generating both sides of a Rust boundary.
+  </p>
+  <p>
+    Pin both versions, generate against the same document, and compile the result. Then inspect the five hardest operations rather than counting table rows.
+    A minimized fixture is stronger evidence than either project’s marketing copy.
+  </p>
+
+  <h2 id="sources">Primary sources</h2>
+  <ul>
+    <li><a href="https://github.com/oxidecomputer/progenitor#progenitor">Progenitor README: scope and primary Dropshot target</a></li>
+    <li><a href="https://github.com/oxidecomputer/progenitor#using-progenitor">Progenitor README: macro, build.rs, and static-crate workflows</a></li>
+    <li><a href="https://docs.rs/progenitor/0.14.0/progenitor/macro.generate_api.html">Progenitor 0.14.0 macro options</a></li>
+    <li><a href="https://docs.rs/progenitor/0.14.0/progenitor/struct.Generator.html">Progenitor 0.14.0 generator API</a></li>
+    <li><a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/README.md">openapi-to-rust README and feature documentation</a></li>
+    <li><a href="https://github.com/gpu-cli/openapi-to-rust/tree/main/benchmarks/progenitor-builds">Build benchmark harness and raw result</a></li>
+  </ul>
+  <p class="verification-note">Last source review: July 28, 2026. If a claim is stale or incomplete, please <a href="https://github.com/gpu-cli/openapi-to-rust/issues">report it with a primary source or minimized fixture</a>.</p>
+</DocsLayout>
+
+<style>
+  .comparison-table, .benchmark-table { margin-block: 2rem; }
+  .comparison-table table { min-width: 860px; }
+  .benchmark-table table { min-width: 700px; }
+  .comparison-table th:first-child { position: sticky; z-index: 1; left: 0; box-shadow: 1px 0 0 var(--line); }
+  .comparison-table thead th:first-child { z-index: 2; }
+  .scroll-hint { margin-bottom: -1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; }
+  .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-block: 2rem; }
+  .decision-grid > div { border: 1px solid var(--ink); border-radius: 5px; background: var(--white); padding: 1.3rem; }
+  .decision-grid h3 { margin-top: 0; font-size: 1.25rem; }
+  .decision-grid ul { margin-top: 1rem; }
+  .verification-note { max-width: var(--reading); border-top: 1px solid var(--line); padding-top: 1rem; font-family: var(--font-mono); font-size: 0.76rem; }
+  @media (max-width: 720px) { .decision-grid { grid-template-columns: 1fr; } }
+</style>

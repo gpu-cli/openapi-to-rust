@@ -1,0 +1,46 @@
+---
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import Breadcrumbs from "../../components/Breadcrumbs.astro";
+
+const title = "Compare Rust OpenAPI Generators | Source-Linked Guides";
+const description = "Compare openapi-to-rust with Progenitor and OpenAPI Generator using dated, source-linked evidence about features, scope, and build workflows.";
+---
+
+<BaseLayout {title} {description} canonicalPath="/compare">
+  <div class="shell"><Breadcrumbs items={[{ label: "Comparisons" }]} /></div>
+  <header class="page-hero shell">
+    <p class="eyebrow">Comparisons</p>
+    <h1>Choose by the API you actually have.</h1>
+    <p class="lead">These dated comparisons describe project scope, documented capabilities, and tradeoffs. They do not turn different engineering goals into a feature-count contest.</p>
+  </header>
+
+  <section class="shell comparison-list" aria-label="Generator comparisons">
+    <a href="/compare/progenitor">
+      <span>Rust client generator</span>
+      <div>
+        <h2>Progenitor</h2>
+        <p>Compare Oxide’s established, Dropshot-aligned client generator with openapi-to-rust’s third-party-spec, SSE, and client/server workflow.</p>
+      </div>
+      <b aria-hidden="true">→</b>
+    </a>
+    <a href="/compare/openapi-generator">
+      <span>Multi-language generator</span>
+      <div>
+        <h2>OpenAPI Generator</h2>
+        <p>Compare its Rust client and rust-axum targets with a Cargo-installed generator focused exclusively on modern Rust.</p>
+      </div>
+      <b aria-hidden="true">→</b>
+    </a>
+  </section>
+</BaseLayout>
+
+<style>
+  .comparison-list { margin-bottom: clamp(5rem, 10vw, 9rem); border-top: 1px solid var(--ink); }
+  .comparison-list a { display: grid; grid-template-columns: 180px minmax(0, 1fr) auto; align-items: start; gap: clamp(1.5rem, 5vw, 5rem); border-bottom: 1px solid var(--line); padding: clamp(1.75rem, 4vw, 3rem) 0; color: inherit; text-decoration: none; }
+  .comparison-list a > span { padding-top: 0.4rem; color: var(--rust-dark); font-family: var(--font-mono); font-size: 0.72rem; }
+  .comparison-list h2 { margin: 0; font-size: clamp(1.8rem, 4vw, 3rem); }
+  .comparison-list p { max-width: 68ch; margin-top: 0.65rem; color: var(--muted); }
+  .comparison-list b { color: var(--rust-dark); font-size: 1.6rem; }
+  .comparison-list a:hover h2 { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.15em; }
+  @media (max-width: 680px) { .comparison-list a { grid-template-columns: 1fr auto; } .comparison-list a > span { grid-column: 1 / -1; } }
+</style>

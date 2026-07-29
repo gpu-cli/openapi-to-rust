@@ -74,7 +74,9 @@ const docsOrder = [
   { href: "/openapi-to-axum", label: "Axum Server Generation" },
   { href: "/guides/openapi-3-1-rust", label: "OpenAPI 3.1 Support" },
   { href: "/compatibility", label: "Compatibility Evidence" },
-  { href: "/compare/openapi-generator", label: "Generator Comparison" },
+  { href: "/compare", label: "Generator Comparisons" },
+  { href: "/compare/progenitor", label: "Progenitor Comparison" },
+  { href: "/compare/openapi-generator", label: "OpenAPI Generator Comparison" },
 ];
 const currentIndex = docsOrder.findIndex((item) => item.href === canonicalPath);
 const previous = currentIndex > 0 ? docsOrder[currentIndex - 1] : undefined;

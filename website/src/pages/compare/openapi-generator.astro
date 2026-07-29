@@ -49,7 +49,7 @@ const toc = [
     <table>
       <caption>Rust code generator comparison, last verified July 15, 2026</caption>
       <thead>
-        <tr><th scope="col">Capability</th><th scope="col">openapi-to-rust 0.6</th><th scope="col">OpenAPI Generator rust</th><th scope="col">OpenAPI Generator rust-axum</th></tr>
+        <tr><th scope="col">Capability</th><th scope="col">openapi-to-rust 0.11</th><th scope="col">OpenAPI Generator rust</th><th scope="col">OpenAPI Generator rust-axum</th></tr>
       </thead>
       <tbody>
         <tr><th scope="row">Primary scope</th><td>Rust-focused client + server codegen</td><td>Rust client generator</td><td>Rust Axum server generator</td></tr>
@@ -63,7 +63,7 @@ const toc = [
         <tr><th scope="row">SSE-specific generation</th><td>Client reconnection + Axum response variants</td><td>Not documented on the Rust generator page</td><td>Not documented on the rust-axum page</td></tr>
         <tr><th scope="row">Per-operation typed API errors</th><td>Yes</td><td>Multiple 2xx response option documented; equivalent typed error surface not documented</td><td>Typed server responses</td></tr>
         <tr><th scope="row">Runtime request validation</th><td>No; constraints become docs</td><td>Not documented as a client feature</td><td>Yes by default; can be disabled</td></tr>
-        <tr><th scope="row">Real-world corpus policy</th><td>54 supported OpenAPI docs; two compile per PR, all weekly</td><td colspan="2">Large upstream project test suite; no equivalent claim made here</td></tr>
+        <tr><th scope="row">Real-world corpus policy</th><td>55 supported OpenAPI docs; two compile per PR, all in the scheduled/manual tier</td><td colspan="2">Large upstream project test suite; no equivalent claim made here</td></tr>
       </tbody>
     </table>
   </div>

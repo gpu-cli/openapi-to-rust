@@ -9,6 +9,8 @@
 - [Rust client generation](https://openapi-to-rust.dev/docs/rust-client-generator)
 - [Axum server generation](https://openapi-to-rust.dev/openapi-to-axum)
 - [Compatibility](https://openapi-to-rust.dev/compatibility)
+- [Generator comparisons](https://openapi-to-rust.dev/compare)
+- [Progenitor comparison](https://openapi-to-rust.dev/compare/progenitor)
 - [OpenAPI Generator comparison](https://openapi-to-rust.dev/compare/openapi-generator)
 - [Source repository](https://github.com/gpu-cli/openapi-to-rust)
 - [Rust API documentation](https://docs.rs/openapi-to-rust)
