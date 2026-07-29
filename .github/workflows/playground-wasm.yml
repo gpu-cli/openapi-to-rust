@@ -1,22 +1,13 @@
 name: Playground WASM
 
-# Builds the website playground's WASM bundle whenever the generator changes,
-# publishes it as a public release asset, and bumps website/playground-wasm.lock.
+# Builds the website playground's WASM bundle for each release tag, publishes it
+# as a public release asset, and bumps website/playground-wasm.lock on main.
 # The lock-bump commit triggers Vercel's git auto-deploy, whose build fetches
 # the asset via website/scripts/fetch-playground-wasm.mjs. No Vercel secrets.
-#
-# Self-retrigger is impossible by construction: the lock file lives under
-# website/, outside this workflow's path filter.
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "wasm/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "scripts/build-playground-wasm.sh"
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -46,6 +37,7 @@ jobs:
         run: ./scripts/build-playground-wasm.sh
 
       - name: Package and publish release asset
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -58,13 +50,22 @@ jobs:
             --prerelease \
             --title "Playground WASM $version (${GITHUB_SHA::7})" \
             --notes "WASM bundle for openapi-to-rust.dev/playground, built from ${GITHUB_SHA}."
-          echo "$tag" > website/playground-wasm.lock
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Commit lock bump
-        # Pushes back to the ref the workflow ran on: main for the normal
-        # push-triggered flow, the dispatched branch for pre-merge test runs.
+        # Tag-triggered runs update main. Manual pre-merge runs update the
+        # branch they were dispatched from.
+        env:
+          WASM_RELEASE_TAG: ${{ steps.publish.outputs.tag }}
         run: |
           set -euo pipefail
+          target_branch="$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            target_branch="main"
+          fi
+          git fetch origin "$target_branch"
+          git checkout -B "$target_branch" "origin/$target_branch"
+          echo "$WASM_RELEASE_TAG" > website/playground-wasm.lock
           if git diff --quiet -- website/playground-wasm.lock; then
             echo "lock unchanged; nothing to deploy"
             exit 0
@@ -73,5 +74,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add website/playground-wasm.lock
           git commit -m "chore: bump playground wasm to $(cat website/playground-wasm.lock) [skip ci]"
-          git pull --rebase origin "$GITHUB_REF_NAME"
-          git push origin "HEAD:$GITHUB_REF_NAME"
+          git push origin "HEAD:$target_branch"

@@ -32,10 +32,10 @@ committed output.
 
 We originally built this internally at [GPU CLI](https://gpu-cli.sh) to generate typed Rust clients for OpenAI, Anthropic, Cloudflare, and other large APIs. After battle-testing it against real-world specs with complex union types, discriminated enums, streaming endpoints, and the occasional spec/API drift, we decided to open source it.
 
-The repository contains **55 real-world specs**. The supported OpenAPI corpus is
-54 specs (one Gitea document is Swagger 2.0 and intentionally skipped). Pull
+The repository contains **56 real-world specs**. The supported OpenAPI corpus is
+55 specs (one Gitea document is Swagger 2.0 and intentionally skipped). Pull
 requests compile-check the OpenAI and Anthropic production specs; a scheduled
-and manually runnable CI tier checks all 54 OpenAPI specs.
+and manually runnable CI tier checks all 55 OpenAPI specs.
 
 Release history and breaking changes live in the [changelog](CHANGELOG.md).
 
@@ -110,6 +110,7 @@ enable_async_client = true
 [http_client]
 base_url = "https://api.example.com"
 timeout_seconds = 30
+max_response_body_bytes = 8388608
 
 [http_client.retry]
 max_retries = 3
@@ -261,6 +262,7 @@ use crate::generated::types::*;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = HttpClient::new()
         .with_base_url("https://api.example.com")
+        .with_max_response_body_bytes(8 * 1024 * 1024)
         .with_api_key(std::env::var("API_KEY")?);
 
     let req = CreateResourceRequest { /* … */ };
@@ -268,6 +270,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+Generated clients cap every response they buffer in memory at 8 MiB by
+default. Set `http_client.max_response_body_bytes` when generating, or use the
+runtime builder above for a particular client. If a cumulative chunked or
+fixed-length body crosses the limit, the call returns
+`HttpError::ResponseTooLarge { limit }` before appending the chunk that would
+exceed it. Successful SSE responses remain streaming; only SSE error responses
+are buffered under the same cap.
 
 ## What the generated types look like
 
@@ -572,6 +582,7 @@ registry_only = false                   # only generate the registry (skip types
 [http_client]
 base_url = "https://api.example.com"
 timeout_seconds = 30                    # 1-3600
+max_response_body_bytes = 8388608       # buffered responses; 8 MiB default
 
 [http_client.retry]
 max_retries = 3                         # 0-10
@@ -665,10 +676,10 @@ scripts/spec-compile.sh   # generate + cargo-check every spec in specs/ (full co
 
 The compile tiers are intentionally different:
 
-- Every pull request and push to `main` generates all 54 supported OpenAPI
+- Every pull request and push to `main` generates all 55 supported OpenAPI
   specs, then compile-checks the Anthropic and OpenAI production specs against
   each generated `REQUIRED_DEPS.toml`.
-- Weekly scheduled CI and manual workflow runs compile-check all 54 supported
+- Weekly scheduled CI and manual workflow runs compile-check all 55 supported
   OpenAPI specs. The bundled Gitea Swagger 2.0 document is reported as skipped.
 - Local `scripts/spec-compile.sh` runs the same full tier; pass spec names as
   arguments for a smaller targeted run.

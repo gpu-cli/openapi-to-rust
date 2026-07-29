@@ -153,6 +153,39 @@ fn schema_less_request_content_preserves_client_operation_without_a_body() {
 }
 
 #[test]
+fn wildcard_only_request_content_is_non_sendable_without_a_concrete_media_type() {
+    let generator = CodeGenerator::new(create_test_config());
+    let operation = OperationInfo {
+        operation_id: "uploadAnyImage".to_string(),
+        method: "POST".to_string(),
+        path: "/images".to_string(),
+        summary: None,
+        description: None,
+        request_body: Some(RequestBodyContent::Unsupported {
+            media_types: vec!["*/*".to_string(), "image/*".to_string()],
+        }),
+        response_schemas: BTreeMap::new(),
+        parameters: vec![],
+        request_body_required: true,
+        supports_streaming: false,
+        stream_parameter: None,
+        tags: Vec::new(),
+    };
+
+    let analysis = create_test_analysis_with_operations(vec![operation]);
+    let generated = generator.generate_operation_methods(&analysis).to_string();
+
+    assert!(generated.contains("body : Vec < u8 >"), "{generated}");
+    assert!(
+        generated.contains("declares only wildcard media ranges"),
+        "{generated}"
+    );
+    assert!(generated.contains("HttpError :: Config"), "{generated}");
+    assert!(!generated.contains("header (\"content-type\" , \"*/*\")"));
+    assert!(!generated.contains("header (\"content-type\" , \"image/*\")"));
+}
+
+#[test]
 fn bodyless_content_methods_emit_zero_content_length() {
     let config = create_test_config();
     let generator = CodeGenerator::new(config);
@@ -505,12 +538,14 @@ fn test_error_handling_generation() {
     let result = generator.generate_operation_methods(&analysis);
     let result_str = result.to_string();
 
-    // Verify error handling logic — the new envelope reads the body to a
-    // string before deserializing and wraps non-2xx (and 2xx parse failures)
+    // Verify error handling logic — the new envelope reads the body as bytes,
+    // keeps exact bytes plus a lossy string, and wraps non-2xx (and 2xx parse failures)
     // in `ApiOpError::Api(ApiError { ... })`. See issue #8.
     assert!(result_str.contains("let status = response . status ()"));
     assert!(result_str.contains("if status . is_success ()"));
-    assert!(result_str.contains("response . text ()"));
+    assert!(result_str.contains("__read_bounded_response_body"));
+    assert!(result_str.contains("String :: from_utf8_lossy"));
+    assert!(result_str.contains("raw_body"));
     assert!(result_str.contains("ApiOpError :: Api (ApiError"));
 }
 
@@ -816,7 +851,9 @@ fn test_generate_octet_stream_operation() {
         path: "/data".to_string(),
         summary: None,
         description: None,
-        request_body: Some(RequestBodyContent::OctetStream),
+        request_body: Some(RequestBodyContent::OctetStream {
+            media_type: "application/octet-stream; profile=v2".to_string(),
+        }),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
@@ -834,7 +871,7 @@ fn test_generate_octet_stream_operation() {
     // Verify body is used directly
     assert!(result_str.contains(". body (body)"));
     // Verify content-type header
-    assert!(result_str.contains("application/octet-stream"));
+    assert!(result_str.contains("application/octet-stream; profile=v2"));
 }
 
 #[test]
@@ -848,7 +885,9 @@ fn test_generate_text_plain_operation() {
         path: "/echo".to_string(),
         summary: None,
         description: None,
-        request_body: Some(RequestBodyContent::TextPlain),
+        request_body: Some(RequestBodyContent::TextPlain {
+            media_type: "text/plain; charset=utf-8".to_string(),
+        }),
         response_schemas: BTreeMap::new(),
         parameters: vec![],
         request_body_required: true,
@@ -866,7 +905,7 @@ fn test_generate_text_plain_operation() {
     // Verify body is used directly
     assert!(result_str.contains(". body (body)"));
     // Verify content-type header
-    assert!(result_str.contains("text/plain"));
+    assert!(result_str.contains("text/plain; charset=utf-8"));
 }
 
 #[test]

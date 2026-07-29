@@ -27,6 +27,7 @@
 //! [http_client]
 //! base_url = "https://api.example.com"
 //! timeout_seconds = 30
+//! max_response_body_bytes = 8388608
 //!
 //! [http_client.retry]
 //! max_retries = 3
@@ -78,6 +79,7 @@
 //! [http_client]
 //! base_url = "https://api.example.com"
 //! timeout_seconds = 30
+//! max_response_body_bytes = 8388608 # 8 MiB default
 //!
 //! [http_client.retry]
 //! max_retries = 3                  # 0-10 retries
@@ -344,6 +346,7 @@ impl ServerSection {
 pub struct HttpClientSection {
     pub base_url: Option<String>,
     pub timeout_seconds: Option<u64>,
+    pub max_response_body_bytes: Option<usize>,
     pub auth: Option<AuthConfigSection>,
     #[serde(default)]
     pub headers: Vec<HeaderEntry>,
@@ -837,6 +840,7 @@ impl ConfigFile {
         let http_client_config = self.http_client.as_ref().map(|http| HttpClientConfig {
             base_url: http.base_url.clone(),
             timeout_seconds: http.timeout_seconds,
+            max_response_body_bytes: http.max_response_body_bytes,
             default_headers: http
                 .headers
                 .iter()
@@ -988,6 +992,7 @@ enable_async_client = true
 [http_client]
 base_url = "https://api.example.com"
 timeout_seconds = 30
+max_response_body_bytes = 8388608
 
 [http_client.retry]
 max_retries = 3

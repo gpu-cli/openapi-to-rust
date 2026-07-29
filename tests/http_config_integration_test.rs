@@ -32,6 +32,7 @@ enable_specta = false
 [http_client]
 base_url = "https://api.example.com"
 timeout_seconds = 30
+max_response_body_bytes = 4194304
 
 [[http_client.headers]]
 name = "content-type"
@@ -56,6 +57,7 @@ value = "rust-client"
         Some("https://api.example.com".to_string())
     );
     assert_eq!(http_config.timeout_seconds, Some(30));
+    assert_eq!(http_config.max_response_body_bytes, Some(4_194_304));
     assert_eq!(http_config.default_headers.len(), 2);
     assert_eq!(
         http_config.default_headers.get("content-type"),

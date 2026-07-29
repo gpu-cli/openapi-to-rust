@@ -247,6 +247,7 @@ impl GeneratorConfig {
                 self.http_client_config = Some(crate::http_config::HttpClientConfig {
                     base_url: Some(url.to_string()),
                     timeout_seconds: None,
+                    max_response_body_bytes: None,
                     default_headers: Default::default(),
                 })
             }
@@ -989,8 +990,8 @@ impl CodeGenerator {
                 }
             }
 
-            /// Transport-level errors: failures where we never received an
-            /// inspectable HTTP response from the server.
+            /// Transport-level errors: failures where no safely inspectable
+            /// HTTP response is available to the caller.
             ///
             /// HTTP responses with non-2xx status codes are surfaced as
             /// [`ApiError`] inside [`ApiOpError::Api`], not here, so callers can
@@ -1018,6 +1019,10 @@ impl CodeGenerator {
                 #[error("Request timeout")]
                 Timeout,
 
+                /// A response body exceeded the configured in-memory limit
+                #[error("Response body exceeded configured limit of {limit} bytes")]
+                ResponseTooLarge { limit: usize },
+
                 /// Invalid configuration
                 #[error("Configuration error: {0}")]
                 Config(String),
@@ -1044,9 +1049,9 @@ impl CodeGenerator {
             ///
             /// Includes both non-2xx responses and 2xx responses whose body
             /// failed to deserialize into the expected success type. `status`,
-            /// `headers`, and `body` are always populated so callers can
-            /// inspect what the server sent without modifying the generated
-            /// code. `typed` carries the parsed per-operation error variant
+            /// `headers`, and `raw_body` preserve what the server actually sent,
+            /// while `body` is a convenient lossy UTF-8 rendering. `typed`
+            /// carries the parsed per-operation error variant
             /// when the body matched a declared schema. Formatting the error
             /// limits only the displayed body preview; the public fields
             /// retain the complete response and parsing details.
@@ -1055,6 +1060,8 @@ impl CodeGenerator {
                 pub status: u16,
                 pub headers: reqwest::header::HeaderMap,
                 pub body: String,
+                /// Exact response bytes before lossy UTF-8 conversion.
+                pub raw_body: Vec<u8>,
                 pub typed: Option<E>,
                 pub parse_error: Option<String>,
             }
@@ -3578,6 +3585,8 @@ impl CodeGenerator {
                 Api(String),
                 #[error("Timeout error: {0}")]
                 Timeout(String),
+                #[error("Response body exceeded configured limit of {limit} bytes")]
+                ResponseTooLarge { limit: usize },
                 #[error("JSON serialization/deserialization error: {0}")]
                 Json(#[from] serde_json::Error),
                 #[error("Request error: {0}")]
@@ -3697,6 +3706,7 @@ impl CodeGenerator {
             quote! { api_key: Option<String> },
             quote! { http_client: reqwest::Client },
             quote! { custom_headers: std::collections::BTreeMap<String, String> },
+            quote! { max_response_body_bytes: usize },
         ];
 
         let has_optional_headers = !streaming_config
@@ -3720,6 +3730,12 @@ impl CodeGenerator {
         } else {
             "https://api.example.com"
         };
+        let max_response_body_bytes = self
+            .config()
+            .http_client_config
+            .as_ref()
+            .and_then(|http| http.max_response_body_bytes)
+            .unwrap_or(8 * 1024 * 1024);
 
         // Build constructor fields based on what the struct has
         let constructor_fields = if has_optional_headers {
@@ -3728,6 +3744,7 @@ impl CodeGenerator {
                 api_key: None,
                 http_client: reqwest::Client::new(),
                 custom_headers: std::collections::BTreeMap::new(),
+                max_response_body_bytes: #max_response_body_bytes,
                 optional_headers: std::collections::BTreeMap::new(),
             }
         } else {
@@ -3736,6 +3753,7 @@ impl CodeGenerator {
                 api_key: None,
                 http_client: reqwest::Client::new(),
                 custom_headers: std::collections::BTreeMap::new(),
+                max_response_body_bytes: #max_response_body_bytes,
             }
         };
 
@@ -3769,6 +3787,12 @@ impl CodeGenerator {
                 /// Set the API key for authentication
                 pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
                     self.api_key = Some(api_key.into());
+                    self
+                }
+
+                /// Set the maximum number of error-response bytes buffered in memory.
+                pub fn with_max_response_body_bytes(mut self, limit: usize) -> Self {
+                    self.max_response_body_bytes = limit;
                     self
                 }
 
@@ -3990,7 +4014,10 @@ impl CodeGenerator {
                         .headers(headers);
 
                     debug!("Creating SSE stream from request");
-                    let stream = parse_sse_stream::<#event_type>(request_builder).await?;
+                    let stream = parse_sse_stream_with_limit::<#event_type>(
+                        request_builder,
+                        self.max_response_body_bytes,
+                    ).await?;
                     info!("SSE stream created successfully");
                     Ok(Box::pin(stream))
                 }
@@ -4080,7 +4107,10 @@ impl CodeGenerator {
                         .json(&streaming_request);
 
                     debug!("Creating SSE stream from request");
-                    let stream = parse_sse_stream::<#event_type>(request_builder).await?;
+                    let stream = parse_sse_stream_with_limit::<#event_type>(
+                        request_builder,
+                        self.max_response_body_bytes,
+                    ).await?;
                     info!("SSE stream created successfully");
                     Ok(Box::pin(stream))
                 }
@@ -4094,9 +4124,37 @@ impl CodeGenerator {
         _streaming_config: &crate::streaming::StreamingConfig,
     ) -> Result<TokenStream> {
         Ok(quote! {
+            /// Default upper bound for an SSE error response buffered in memory.
+            pub const DEFAULT_MAX_SSE_ERROR_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+            async fn __read_bounded_streaming_error_body(
+                mut response: reqwest::Response,
+                limit: usize,
+            ) -> Result<Vec<u8>, StreamingError> {
+                let mut body = Vec::new();
+                while let Some(chunk) = response.chunk().await? {
+                    let next_len = body.len().checked_add(chunk.len());
+                    if next_len.is_none_or(|next_len| next_len > limit) {
+                        return Err(StreamingError::ResponseTooLarge { limit });
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(body)
+            }
+
             /// Parse SSE stream from HTTP request using reqwest-eventsource
             pub async fn parse_sse_stream<T>(
                 request_builder: reqwest::RequestBuilder
+            ) -> Result<impl Stream<Item = Result<T, StreamingError>>, StreamingError>
+            where
+                T: serde::de::DeserializeOwned + Send + 'static,
+            {
+                parse_sse_stream_with_limit(request_builder, DEFAULT_MAX_SSE_ERROR_BODY_BYTES).await
+            }
+
+            async fn parse_sse_stream_with_limit<T>(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
             ) -> Result<impl Stream<Item = Result<T, StreamingError>>, StreamingError>
             where
                 T: serde::de::DeserializeOwned + Send + 'static,
@@ -4105,7 +4163,7 @@ impl CodeGenerator {
                     StreamingError::Connection(format!("Failed to create event source: {}", e))
                 })?;
 
-                let stream = event_source.filter_map(|event_result| async move {
+                let stream = event_source.filter_map(move |event_result| async move {
                     match event_result {
                         Ok(reqwest_eventsource::Event::Open) => {
                             debug!("SSE connection opened");
@@ -4168,9 +4226,12 @@ impl CodeGenerator {
                                     let status_code = status.as_u16();
 
                                     // Read the response body to get error details
-                                    let error_body = match response.text().await {
-                                        Ok(body) => body,
-                                        Err(_) => "Failed to read error response body".to_string()
+                                    let error_body = match __read_bounded_streaming_error_body(
+                                        response,
+                                        max_response_body_bytes,
+                                    ).await {
+                                        Ok(body) => String::from_utf8_lossy(&body).into_owned(),
+                                        Err(error) => return Some(Err(error)),
                                     };
 
                                     error!("SSE connection error - HTTP {}: {}", status_code, error_body);

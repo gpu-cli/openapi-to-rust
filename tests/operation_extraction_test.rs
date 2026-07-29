@@ -447,7 +447,7 @@ fn test_extract_octet_stream_body() {
     assert!(op.request_body.is_some());
     assert!(matches!(
         op.request_body.as_ref().unwrap(),
-        RequestBodyContent::OctetStream
+        RequestBodyContent::OctetStream { .. }
     ));
 }
 
@@ -467,7 +467,7 @@ fn test_extract_text_plain_body() {
     assert!(op.request_body.is_some());
     assert!(matches!(
         op.request_body.as_ref().unwrap(),
-        RequestBodyContent::TextPlain
+        RequestBodyContent::TextPlain { .. }
     ));
 }
 

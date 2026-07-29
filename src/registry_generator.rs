@@ -286,10 +286,13 @@ impl CodeGenerator {
                         RequestBodyContent::Multipart => {
                             (quote! { BodyContentType::Multipart }, quote! { None })
                         }
-                        RequestBodyContent::OctetStream => {
+                        RequestBodyContent::OctetStream { .. } => {
                             (quote! { BodyContentType::OctetStream }, quote! { None })
                         }
-                        RequestBodyContent::TextPlain => {
+                        RequestBodyContent::Binary { .. } => {
+                            (quote! { BodyContentType::OctetStream }, quote! { None })
+                        }
+                        RequestBodyContent::TextPlain { .. } => {
                             (quote! { BodyContentType::TextPlain }, quote! { None })
                         }
                         RequestBodyContent::Unsupported { .. } => {

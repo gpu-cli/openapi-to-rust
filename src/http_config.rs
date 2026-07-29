@@ -12,6 +12,8 @@ pub struct HttpClientConfig {
     pub base_url: Option<String>,
     /// Request timeout in seconds
     pub timeout_seconds: Option<u64>,
+    /// Maximum response-body bytes buffered in memory
+    pub max_response_body_bytes: Option<usize>,
     /// Default headers to include in all requests
     pub default_headers: HashMap<String, String>,
 }
