@@ -34,7 +34,7 @@ or newer.
 ## Interpretation limits
 
 - Clean-build measurements include each generated client's current dependency
-  graph (`reqwest` 0.12 for `openapi-to-rust`, 0.13 for Progenitor). They do not
+  graph (`reqwest` 0.13 for both generators). They do not
   isolate procedural-macro overhead.
 - Filesystem and Cargo registry caches are warm, but every clean sample uses
   fresh compiled-artifact directories.

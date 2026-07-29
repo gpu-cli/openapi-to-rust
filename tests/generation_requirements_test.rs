@@ -141,6 +141,18 @@ fn assert_names(
     assert_eq!(dependency_names(result), expected.into_iter().collect());
 }
 
+fn assert_version(result: &openapi_to_rust::GenerationResult, crate_name: &str, expected: &str) {
+    let dependency = result
+        .required_deps
+        .iter()
+        .find(|dependency| dependency.crate_name == crate_name)
+        .unwrap_or_else(|| panic!("missing {crate_name} dependency"));
+    assert_eq!(
+        dependency.version, expected,
+        "unexpected {crate_name} version"
+    );
+}
+
 fn compile_case(name: &str, mut config: GeneratorConfig) -> openapi_to_rust::GenerationResult {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::TempDir::new().expect("scratch crate");
@@ -398,7 +410,8 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .iter()
         .find(|dependency| dependency.crate_name == "reqwest-middleware")
         .expect("middleware dependency");
-    assert_eq!(middleware.features, vec!["multipart"]);
+    assert_eq!(middleware.version, "0.5");
+    assert_eq!(middleware.features, vec!["multipart", "query"]);
 
     let sse = compile_case(
         "sse",
@@ -433,8 +446,10 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .iter()
         .find(|dependency| dependency.crate_name == "reqwest")
         .expect("reqwest dependency");
-    assert_eq!(reqwest.features, vec!["json", "rustls-tls", "stream"]);
+    assert_eq!(reqwest.version, "0.13");
+    assert_eq!(reqwest.features, vec!["json", "rustls", "stream"]);
     assert!(!reqwest.default_features);
+    assert_version(&sse, "thiserror", "2");
     let sse_runtime = sse
         .files
         .iter()
@@ -551,4 +566,9 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "uuid",
         ],
     );
+    assert_version(&combined, "reqwest", "0.13");
+    assert_version(&combined, "reqwest-middleware", "0.5");
+    assert_version(&combined, "reqwest-retry", "0.9");
+    assert_version(&combined, "reqwest-tracing", "0.7");
+    assert_version(&combined, "thiserror", "2");
 }

@@ -49,13 +49,13 @@ dependency_tree="$(cargo tree \
   --locked \
   --edges normal)"
 if printf '%s\n' "$dependency_tree" \
-  | grep -E 'reqwest v0\.11|hyper v0\.14|insta v|tempfile v' >/dev/null; then
+  | grep -E 'reqwest v0\.(11|12)|hyper v0\.14|insta v|tempfile v' >/dev/null; then
   echo "[install-smoke] default dependency tree contains a forbidden dependency" >&2
   printf '%s\n' "$dependency_tree" >&2
   exit 1
 fi
-if ! printf '%s\n' "$dependency_tree" | grep -E 'reqwest v0\.12' >/dev/null; then
-  echo "[install-smoke] expected reqwest 0.12 in the default dependency tree" >&2
+if ! printf '%s\n' "$dependency_tree" | grep -E 'reqwest v0\.13' >/dev/null; then
+  echo "[install-smoke] expected reqwest 0.13 in the default dependency tree" >&2
   exit 1
 fi
 

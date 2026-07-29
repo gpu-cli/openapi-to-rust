@@ -22,9 +22,9 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
-reqwest-middleware = { version = "0.4", features = ["multipart"] }
-thiserror = "1.0"
+reqwest = { version = "0.13", features = ["json", "multipart"] }
+reqwest-middleware = { version = "0.5", features = ["multipart", "query"] }
+thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 validator = { version = "0.20", features = ["derive"] }
 # Q2 typed-scalar deps (default-on; harmless when unused).

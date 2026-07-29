@@ -131,12 +131,12 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 http-body-util = "0.1"
 jsonschema = { version = "0.49", default-features = false }
 mime = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-middleware = "0.4"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest-middleware = { version = "0.5", features = ["query"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2"
 "#,

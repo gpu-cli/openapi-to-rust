@@ -346,13 +346,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {{
     println!("   1. Review the generated code in examples/generated/");
     println!("   2. Copy the generated files to your project");
     println!("   3. Add the required dependencies to your Cargo.toml:");
-    println!("      - reqwest = {{ version = \"0.12\", features = [\"json\"] }}");
+    println!("      - reqwest = {{ version = \"0.13\", features = [\"json\"] }}");
     println!("      - reqwest-middleware = \"0.3\"");
     println!("      - reqwest-retry = \"0.6\"");
-    println!("      - reqwest-tracing = \"0.5\"");
+    println!("      - reqwest-tracing = \"0.7\"");
     println!("      - serde = {{ version = \"1.0\", features = [\"derive\"] }}");
     println!("      - serde_json = \"1.0\"");
-    println!("      - thiserror = \"1.0\"");
+    println!("      - thiserror = \"2.0\"");
     println!("      - tokio = {{ version = \"1\", features = [\"full\"] }}");
 
     Ok(())
