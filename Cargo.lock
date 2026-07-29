@@ -1002,6 +1002,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

@@ -12,7 +12,7 @@ use crate::analysis::{
     ParameterInfo, QuerySerialization, RequestBodyContent, SchemaAnalysis, SchemaType,
 };
 use crate::config::ServerSection;
-use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig};
+use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig, rust_type_name};
 
 use super::{OperationIndex, Selector};
 use heck::{ToPascalCase, ToSnakeCase};
@@ -82,6 +82,17 @@ pub fn reachable_schemas_with_roots(
             ) = &p.query_serialization
             {
                 seed(name, &mut queue, &mut keep);
+            }
+            if let Some(
+                QuerySerialization::FormExplodedArray {
+                    item_type: crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. },
+                }
+                | QuerySerialization::FormArray {
+                    item_type: crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. },
+                },
+            ) = &p.query_serialization
+            {
+                seed(schema_name, &mut queue, &mut keep);
             }
         }
     }
@@ -288,6 +299,22 @@ impl<'a> ServerCodegen<'a> {
             .unwrap_or_default()
     }
 
+    /// Resolve a model type reference for emitted server modules. Names that
+    /// canonicalize to a different Rust identifier (e.g. `not-found`) cannot
+    /// be parsed from the raw component key and must be qualified explicitly;
+    /// already-canonical names resolve through the module's
+    /// `use super::super::types::*` glob like every other generated reference.
+    fn model_type(&self, ty: &str) -> TokenStream {
+        if self.analysis.schemas.contains_key(ty) {
+            let canonical = rust_type_name(ty);
+            if canonical != ty {
+                let ident = format_ident!("{}", canonical);
+                return quote! { super::super::types::#ident };
+            }
+        }
+        parse_type(ty)
+    }
+
     /// Resolve selectors and emit `server/{mod,api,errors}.rs`.
     pub fn generate(&self) -> Result<Vec<GeneratedFile>, ServerCodegenError> {
         if self.server.operations.is_empty() {
@@ -486,9 +513,9 @@ impl<'a> ServerCodegen<'a> {
         !matches!(
             schema.get("type").and_then(serde_json::Value::as_str),
             Some("array" | "object")
-        ) && !schema.get("oneOf").is_some()
-            && !schema.get("anyOf").is_some()
-            && !schema.get("allOf").is_some()
+        ) && schema.get("oneOf").is_none()
+            && schema.get("anyOf").is_none()
+            && schema.get("allOf").is_none()
     }
 
     fn form_field_names(
@@ -1556,7 +1583,7 @@ impl<'a> ServerCodegen<'a> {
         let mut body_decode = TokenStream::new();
         let body_ty_opt = body_type(op);
         if let Some(body_ty) = &body_ty_opt {
-            let body_ty_tokens = parse_type(body_ty);
+            let body_ty_tokens = self.model_type(body_ty);
             let transport_body = match &op.request_body {
                 Some(RequestBodyContent::OctetStream { media_type }) => {
                     Some((format_ident!("decode_binary_body"), media_type.clone()))
@@ -1882,7 +1909,7 @@ impl<'a> ServerCodegen<'a> {
             }
         }
         if let Some(body) = body_type(op) {
-            let body_ty = parse_type(&body);
+            let body_ty = self.model_type(&body);
             if op.request_body_required {
                 params.push(quote! { body: #body_ty });
             } else {
@@ -1932,33 +1959,83 @@ impl<'a> ServerCodegen<'a> {
             field_idents.push(field_ident.clone());
 
             let decoder = match &parameter.query_serialization {
-                Some(QuerySerialization::FormExplodedArray { .. }) => quote! {
-                    let #field_ident = {
-                        let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
-                        let raw_values: Vec<&str> = __pairs
-                            .iter()
-                            .filter(|(key, _)| key == #wire_name)
-                            .map(|(_, value)| value.as_str())
-                            .collect();
-                        if empty_marker && !raw_values.is_empty() {
-                            return Err(format!(
-                                "query array `{}` cannot combine values with its empty marker",
-                                #wire_name,
-                            ));
+                Some(QuerySerialization::FormExplodedArray { item_type }) => {
+                    if let crate::analysis::ArrayItemType::FlatStructRef {
+                        property_names, ..
+                    } = item_type
+                    {
+                        // AWS query-protocol flat structures arrive as
+                        // `param.N.Prop=value`; group by N and decode each
+                        // group as one JSON object so serde fills the struct.
+                        quote! {
+                            let #field_ident = {
+                                let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                                let prefix = concat!(#wire_name, ".");
+                                let mut groups: ::std::collections::BTreeMap<String, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                let allowed = [#(#property_names),*];
+                                for (key, value) in &__pairs {
+                                    let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                    let Some((index, property)) = rest.split_once('.') else { continue };
+                                    if !allowed.contains(&property) {
+                                        continue;
+                                    }
+                                    groups
+                                        .entry(index.to_string())
+                                        .or_default()
+                                        .insert(property.to_string(), ::serde_json::Value::String(value.clone()));
+                                }
+                                if empty_marker && !groups.is_empty() {
+                                    return Err(format!(
+                                        "query array `{}` cannot combine values with its empty marker",
+                                        #wire_name,
+                                    ));
+                                }
+                                if empty_marker {
+                                    Some(Vec::new())
+                                } else if groups.is_empty() {
+                                    None
+                                } else {
+                                    let mut values = Vec::with_capacity(groups.len());
+                                    for (_, object) in groups {
+                                        values.push(
+                                            ::serde_json::from_value(::serde_json::Value::Object(object))
+                                                .map_err(|error| format!("invalid query structure for `{}`: {error}", #wire_name))?,
+                                        );
+                                    }
+                                    Some(values)
+                                }
+                            };
                         }
-                        if empty_marker {
-                            Some(Vec::new())
-                        } else if raw_values.is_empty() {
-                            None
-                        } else {
-                            let mut values = Vec::with_capacity(raw_values.len());
-                            for raw in raw_values {
-                                values.push(__decode_query_scalar(raw, #wire_name)?);
-                            }
-                            Some(values)
+                    } else {
+                        quote! {
+                            let #field_ident = {
+                                let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                                let raw_values: Vec<&str> = __pairs
+                                    .iter()
+                                    .filter(|(key, _)| key == #wire_name)
+                                    .map(|(_, value)| value.as_str())
+                                    .collect();
+                                if empty_marker && !raw_values.is_empty() {
+                                    return Err(format!(
+                                        "query array `{}` cannot combine values with its empty marker",
+                                        #wire_name,
+                                    ));
+                                }
+                                if empty_marker {
+                                    Some(Vec::new())
+                                } else if raw_values.is_empty() {
+                                    None
+                                } else {
+                                    let mut values = Vec::with_capacity(raw_values.len());
+                                    for raw in raw_values {
+                                        values.push(__decode_query_scalar(raw, #wire_name)?);
+                                    }
+                                    Some(values)
+                                }
+                            };
                         }
-                    };
-                },
+                    }
+                }
                 Some(QuerySerialization::FormArray { .. }) => quote! {
                     let #field_ident = match (
                         __query_one(&__pairs, #wire_name)?,
@@ -2350,7 +2427,7 @@ impl<'a> ServerCodegen<'a> {
                         schema_name,
                         media_type,
                     } => (
-                        parse_type(&schema_name),
+                        self.model_type(&schema_name),
                         quote! { Json(body) },
                         media_type,
                         false,

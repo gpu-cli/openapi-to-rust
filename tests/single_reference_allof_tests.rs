@@ -217,3 +217,33 @@ fn test_mixed_allof_composition_vs_single_reference() {
         "Multi-schema allOf should flatten all properties into one struct"
     );
 }
+
+#[test]
+fn reference_with_annotation_sibling_preserves_recursive_model_reference() {
+    let spec = json!({
+        "openapi": "3.0.0",
+        "info": {"title": "recursive filter", "version": "1.0"},
+        "components": { "schemas": {
+            "Expression": {
+                "type": "object",
+                "properties": {
+                    "not": { "allOf": [
+                        { "$ref": "#/components/schemas/Expression" },
+                        { "description": "Negate this expression" }
+                    ]}
+                }
+            }
+        }}
+    });
+
+    let result = test_generation("recursive_annotated_allof", spec).expect("Generation failed");
+    let expression = result
+        .split("pub struct Expression")
+        .nth(1)
+        .expect("Expression model")
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(expression.contains("Expression"), "{expression}");
+    assert!(!expression.contains("serde_json::Value"), "{expression}");
+}

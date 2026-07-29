@@ -234,6 +234,98 @@ fn cyclic_response_reference_chain_is_rejected() {
 }
 
 #[test]
+fn raw_component_names_use_canonical_model_types_in_server_code() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "raw component names", "version": "1.0.0" },
+        "paths": {
+            "/videos/{videoId}": { "delete": {
+                "operationId": "deleteVideo",
+                "tags": ["Videos"],
+                "parameters": [{
+                    "name": "videoId",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }],
+                "responses": {
+                    "404": {
+                        "description": "not found",
+                        "content": { "application/json": {
+                            "schema": { "$ref": "#/components/schemas/not-found" }
+                        }}
+                    }
+                }
+            }},
+            "/topups": { "post": {
+                "operationId": "createTopup",
+                "tags": ["Videos"],
+                "requestBody": {
+                    "required": true,
+                    "content": { "application/json": {
+                        "schema": { "$ref": "#/components/schemas/topupRequest" }
+                    }}
+                },
+                "responses": { "204": { "description": "accepted" } }
+            }},
+            "/inline": { "get": {
+                "operationId": "get",
+                "responses": { "200": {
+                    "description": "inline success",
+                    "content": { "application/json": {
+                        "schema": { "type": "string" }
+                    }}
+                }}
+            }}
+        },
+        "components": { "schemas": {
+            "not-found": {
+                "type": "object",
+                "properties": { "title": { "type": "string" } }
+            },
+            "topupRequest": {
+                "type": "object",
+                "properties": { "amount": { "type": "integer" } }
+            }
+        }}
+    });
+    let mut analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let generator = CodeGenerator::new(GeneratorConfig {
+        enable_async_client: false,
+        server: Some(ServerSection {
+            framework: "axum".into(),
+            operations: vec!["deleteVideo".into(), "createTopup".into(), "get".into()],
+            prune_models: true,
+            validation: ServerValidationSection {
+                enabled: false,
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    });
+
+    let result = generator.generate_all(&mut analysis).unwrap();
+    let generated = |path: &str| {
+        &result
+            .files
+            .iter()
+            .find(|file| file.path == std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("missing generated {path}"))
+            .content
+    };
+    let errors = generated("server/errors.rs");
+    let api = generated("server/api.rs");
+    // Non-canonical component names (`not-found`, `topupRequest`) must be
+    // qualified with their canonical Rust identifiers; names that are already
+    // canonical (`GetResponse`) resolve through the types glob import.
+    assert!(errors.contains("super::super::types::NotFound"), "{errors}");
+    assert!(errors.contains("Ok(GetResponse)"), "{errors}");
+    assert!(api.contains("super::super::types::TopupRequest"), "{api}");
+    syn::parse_file(errors).expect("generated server errors must parse");
+    syn::parse_file(api).expect("generated server api must parse");
+}
+
+#[test]
 fn generated_responses_preserve_status_ranges_media_and_sse_status() {
     let temp = tempfile::TempDir::new().unwrap();
     let output_dir = temp.path().join("src/generated");
@@ -470,7 +562,8 @@ fn supported_json_representation_allows_unsupported_alternatives() {
         response.body,
         Some(openapi_to_rust::analysis::OperationResponseBody::Json { .. })
     ));
-    assert_eq!(response.unsupported_media_types, ["application/xml"]);
+    // XML is a supported text representation, so nothing is unsupported.
+    assert!(response.unsupported_media_types.is_empty());
     let server = ServerSection {
         framework: "axum".into(),
         operations: vec!["getReport".into()],

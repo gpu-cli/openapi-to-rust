@@ -107,6 +107,16 @@ fn round_trip_spec() -> Value {
                             "style": "form",
                             "explode": false,
                             "schema": { "$ref": "#/components/schemas/ScoresAlias" }
+                        },
+                        {
+                            "name": "tags",
+                            "in": "query",
+                            "style": "form",
+                            "explode": true,
+                            "schema": {
+                                "type": "array",
+                                "items": { "$ref": "#/components/schemas/Tag" }
+                            }
                         }
                     ],
                     "responses": { "204": { "description": "captured" } }
@@ -122,7 +132,15 @@ fn round_trip_spec() -> Value {
                 },
                 "QueryId": { "type": "integer", "format": "int64" },
                 "PublicScore": { "$ref": "#/components/schemas/Score" },
-                "Score": { "type": "integer", "format": "int32" }
+                "Score": { "type": "integer", "format": "int32" },
+                "Tag": {
+                    "type": "object",
+                    "required": ["Key", "Value"],
+                    "properties": {
+                        "Key": { "type": "string" },
+                        "Value": { "type": "string" }
+                    }
+                }
             }
         }
     })
@@ -220,6 +238,7 @@ mod tests {
             deep_filter: Option<QueryRoundTripDeepFilter>,
             ids: Vec<QueryId>,
             scores: Option<Vec<PublicScore>>,
+            tags: Option<Vec<Tag>>,
         ) -> QueryRoundTripResponse {
             self.captured
                 .send(json!({
@@ -232,6 +251,7 @@ mod tests {
                     "deep_filter": deep_filter,
                     "ids": ids,
                     "scores": scores,
+                    "tags": tags,
                 }))
                 .unwrap();
             QueryRoundTripResponse::NoContent
@@ -276,6 +296,16 @@ mod tests {
                 }),
                 vec![11, 12],
                 Some(vec![8, 9]),
+                Some(vec![
+                    Tag {
+                        key: "env".into(),
+                        value: "prod".into(),
+                    },
+                    Tag {
+                        key: "team".into(),
+                        value: "sdk".into(),
+                    },
+                ]),
             )
             .await
             .unwrap();
@@ -298,6 +328,10 @@ mod tests {
                 "deep_filter": { "owner": "alice/bob", "open": true },
                 "ids": [11, 12],
                 "scores": [8, 9],
+                "tags": [
+                    { "Key": "env", "Value": "prod" },
+                    { "Key": "team", "Value": "sdk" }
+                ],
             })
         );
 
@@ -311,6 +345,7 @@ mod tests {
                 QueryRoundTripCompact::default(),
                 Some(QueryRoundTripDeepFilter::default()),
                 Vec::new(),
+                Some(Vec::new()),
                 Some(Vec::new()),
             )
             .await
@@ -334,6 +369,7 @@ mod tests {
                 "deep_filter": {},
                 "ids": [],
                 "scores": [],
+                "tags": [],
             })
         );
 
@@ -360,6 +396,7 @@ mod tests {
                 },
                 None,
                 vec![1],
+                None,
                 None,
             )
             .await

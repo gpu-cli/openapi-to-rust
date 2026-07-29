@@ -550,6 +550,15 @@ pub enum ArrayItemType {
     Scalar(String),
     /// The schema name of a referenced scalar alias or string enum.
     SchemaRef(String),
+    /// The schema name of a referenced *flat* structure — every property is
+    /// scalar. Serialized AWS query-protocol style as
+    /// `param.N.Prop=value` per item (e.g. `Tags.1.Key=k&Tags.1.Value=v`).
+    /// Carries the wire property names so client and server emit identical
+    /// keys without re-resolving the schema.
+    FlatStructRef {
+        schema_name: String,
+        property_names: Vec<String>,
+    },
 }
 
 impl Default for DependencyGraph {
@@ -703,6 +712,63 @@ pub fn merge_schema_extensions(
     }
 
     Ok(result)
+}
+
+/// AWS-style specs append query markers to their path templates
+/// (`/tags/{resourceArn}#tagKeys`, `/2015-02-01/resource-tags/{ResourceId}#tagKeys`).
+/// The fragment is not part of the route — those values are declared as
+/// ordinary query parameters on the operation — so strip it before the path
+/// reaches route generation. Axum (and every HTTP router) matches on the path
+/// component only.
+fn normalize_operation_path(path: &str) -> String {
+    match path.split_once('#') {
+        Some((route, _fragment)) if route.starts_with('/') => route.to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// See through an `allOf: [$ref, {annotation}]` wrapper around a schema, the
+/// same shape `analyze_all_of` treats as a type alias. Returns the sole
+/// reference target's schema when every other member is annotation-only;
+/// otherwise the schema itself.
+fn unwrap_annotation_allof(schema: &crate::openapi::Schema) -> &crate::openapi::Schema {
+    let crate::openapi::Schema::AllOf { all_of, .. } = schema else {
+        return schema;
+    };
+    let mut references = all_of.iter().filter(|s| s.reference().is_some());
+    let (Some(first), None) = (references.next(), references.next()) else {
+        return schema;
+    };
+    let others_annotation_only = all_of.iter().all(|member| {
+        if member.reference().is_some() {
+            return true;
+        }
+        serde_json::to_value(member)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|object| {
+                object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "title"
+                            | "description"
+                            | "deprecated"
+                            | "readOnly"
+                            | "writeOnly"
+                            | "examples"
+                            | "example"
+                            | "externalDocs"
+                            | "xml"
+                            | "$comment"
+                    ) || key.starts_with("x-")
+                })
+            })
+    });
+    if others_annotation_only {
+        first
+    } else {
+        schema
+    }
 }
 
 /// Load an extension file and parse it into the JSON representation used by
@@ -2395,17 +2461,46 @@ impl SchemaAnalyzer {
         all_of_schemas: &[Schema],
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
-        // Special case: if allOf contains only a single reference, treat it as a direct type alias
-        // This handles patterns like: "allOf": [{"$ref": "#/components/schemas/Usage"}]
-        if all_of_schemas.len() == 1 {
-            if let Schema::Reference { reference, .. } = &all_of_schemas[0] {
-                if let Some(target) = self.extract_schema_name(reference) {
-                    dependencies.insert(target.to_string());
-                    return Ok(SchemaType::Reference {
-                        target: target.to_string(),
-                    });
-                }
+        // A reference plus annotation-only siblings is still a direct type
+        // alias. AWS-style specs frequently encode property descriptions as
+        // `allOf: [$ref, { description: ... }]`; recursively expanding a
+        // self-reference in that shape can otherwise recurse forever.
+        let referenced_targets = all_of_schemas
+            .iter()
+            .filter_map(|schema| schema.reference())
+            .filter_map(|reference| self.extract_schema_name(reference))
+            .collect::<Vec<_>>();
+        let only_reference_and_annotations = all_of_schemas.iter().all(|schema| {
+            if schema.reference().is_some() {
+                return true;
             }
+            serde_json::to_value(schema)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|object| {
+                    object.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "title"
+                                | "description"
+                                | "deprecated"
+                                | "readOnly"
+                                | "writeOnly"
+                                | "examples"
+                                | "example"
+                                | "externalDocs"
+                                | "xml"
+                                | "$comment"
+                        ) || key.starts_with("x-")
+                    })
+                })
+        });
+        if referenced_targets.len() == 1 && only_reference_and_annotations {
+            let target = referenced_targets[0];
+            dependencies.insert(target.to_string());
+            return Ok(SchemaType::Reference {
+                target: target.to_string(),
+            });
         }
 
         // AllOf represents schema composition - merge all schemas into one
@@ -4335,7 +4430,7 @@ impl SchemaAnalyzer {
         // dispatcher.
         if let Some(webhooks) = &spec.webhooks {
             for (name, path_item) in webhooks {
-                let synthetic_path = format!("__webhook__/{name}");
+                let synthetic_path = format!("/__webhook__/{name}");
                 self.ingest_path_item_operations(
                     &synthetic_path,
                     path_item,
@@ -4514,7 +4609,7 @@ impl SchemaAnalyzer {
         let mut op_info = OperationInfo {
             operation_id: operation_id.to_string(),
             method: method.to_uppercase(),
-            path: path.to_string(),
+            path: normalize_operation_path(path),
             summary: operation.summary.clone(),
             description: operation.description.clone(),
             request_body: None,
@@ -4596,7 +4691,11 @@ impl SchemaAnalyzer {
                             media_type: content_type.to_string(),
                         })
                     }
-                } else if media_type_essence(content_type).eq_ignore_ascii_case("text/plain") {
+                } else if crate::openapi::is_text_media_type(content_type) {
+                    // Any character-data media type (text/plain, text/xml,
+                    // application/xml, +xml suffixed) is buffered and handed
+                    // to the handler as a lossless UTF-8 String; the server
+                    // never parses the payload.
                     Some(RequestBodyContent::TextPlain {
                         media_type: content_type.to_string(),
                     })
@@ -5384,12 +5483,18 @@ impl SchemaAnalyzer {
     /// is wired for scalar params only.
     fn array_param_item_type(&self, schema: &crate::openapi::Schema) -> Option<ArrayItemType> {
         let items = schema.details().items.as_deref()?;
-        if let Some(ref_str) = items.reference() {
+        // AWS query-protocol specs wrap item refs in an annotation-only allOf
+        // (`items: {allOf: [$ref, {xml: ...}]}`). See through the wrapper when
+        // every sibling is annotation-only, mirroring the type-alias rule.
+        let unwrapped = unwrap_annotation_allof(items);
+        if let Some(ref_str) = unwrapped.reference() {
             let name = self.extract_schema_name(ref_str)?;
-            return self.referenced_array_scalar_item_type(name);
+            return self
+                .referenced_array_scalar_item_type(name)
+                .or_else(|| self.referenced_array_flat_struct_item_type(name));
         }
-        let format = items.details().format.clone();
-        let scalar = match items.schema_type()? {
+        let format = unwrapped.details().format.clone();
+        let scalar = match unwrapped.schema_type()? {
             crate::openapi::SchemaType::String => "String".to_string(),
             crate::openapi::SchemaType::Integer => {
                 self.type_mapper.integer_format(format.as_deref()).rust_type
@@ -5418,9 +5523,39 @@ impl SchemaAnalyzer {
             SchemaType::Primitive { rust_type, .. } => {
                 Some(ArrayItemType::Scalar(rust_type.clone()))
             }
-            SchemaType::Reference { target } => self.referenced_array_scalar_item_type(target),
+            SchemaType::Reference { target } => self
+                .referenced_array_scalar_item_type(target)
+                .or_else(|| self.referenced_array_flat_struct_item_type(target)),
             _ => None,
         }
+    }
+
+    /// Accept a referenced structure as a form-style array item when every
+    /// property is scalar (AWS query-protocol flat structures such as
+    /// `Tag { Key, Value }`). Nested objects, arrays, and maps are rejected
+    /// because the wire shape below one level is service-specific.
+    fn referenced_array_flat_struct_item_type(&self, name: &str) -> Option<ArrayItemType> {
+        let resolved = self.resolve_cached_schema(name)?;
+        let SchemaType::Object { properties, .. } = &resolved.schema_type else {
+            return None;
+        };
+        if properties.is_empty() {
+            return None;
+        }
+        let all_scalar = properties
+            .values()
+            .all(|property| match &property.schema_type {
+                SchemaType::Primitive { .. } => true,
+                SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. } => true,
+                SchemaType::Reference { target } => {
+                    self.referenced_array_scalar_item_type(target).is_some()
+                }
+                _ => false,
+            });
+        all_scalar.then(|| ArrayItemType::FlatStructRef {
+            schema_name: name.to_string(),
+            property_names: properties.keys().cloned().collect(),
+        })
     }
 
     /// Resolve a referenced array item through any alias chain while

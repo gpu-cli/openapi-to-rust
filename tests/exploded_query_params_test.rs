@@ -279,8 +279,8 @@ fn form_exploded_array_types_integer_items_through_type_mapper() {
         "required int32 array should be a bare Vec<i32>; got:\n{code}"
     );
     assert!(
-        code.contains("for item in ids"),
-        "required exploded array iterates the argument directly; got:\n{code}"
+        code.contains("for item in v"),
+        "required exploded array iterates the bound value; got:\n{code}"
     );
 }
 

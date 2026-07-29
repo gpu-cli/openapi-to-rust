@@ -12,7 +12,7 @@ pub struct OpenApiSpec {
     pub json_schema_dialect: Option<String>,
     #[serde(default)]
     pub servers: Option<Vec<Server>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_path_map")]
     pub paths: Option<BTreeMap<String, PathItem>>,
     #[serde(default)]
     pub webhooks: Option<BTreeMap<String, PathItem>>,
@@ -29,6 +29,32 @@ pub struct OpenApiSpec {
     pub self_uri: Option<String>,
     #[serde(flatten, default)]
     pub extensions: Extensions,
+}
+
+/// Deserialize the `paths` map while skipping entries that are not Path Item
+/// Objects. Some real-world specs (apicurio) park extension values such as
+/// `x-codegen-contextRoot: "/apis/registry/v2"` directly inside `paths`;
+/// OpenAPI allows arbitrary `x-` extensions here, so drop non-object entries
+/// that begin with `x-` instead of rejecting the whole document.
+fn deserialize_lenient_path_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, PathItem>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?;
+    let Some(entries) = raw else {
+        return Ok(None);
+    };
+    let mut paths = BTreeMap::new();
+    for (key, value) in entries {
+        if value.is_object() || !key.starts_with("x-") {
+            let item =
+                serde_json::from_value::<PathItem>(value).map_err(serde::de::Error::custom)?;
+            paths.insert(key, item);
+        }
+    }
+    Ok(Some(paths))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1079,11 +1105,28 @@ pub fn is_event_stream_media_type(ct: &str) -> bool {
 }
 
 /// Returns true for non-SSE media types in the `text` top-level family.
+///
+/// Structured text formats in the `application` family whose instances are
+/// UTF-8/UTF-16 character data — XML and its `+xml` suffix variants (RFC 7303,
+/// RFC 6839) — are buffered and emitted as text as well; bytes are never
+/// XML-parsed by the generated server, so a plain `String` body preserves
+/// the payload losslessly.
 pub fn is_text_media_type(ct: &str) -> bool {
     let Some((top_level, subtype)) = media_type_essence(ct).split_once('/') else {
         return false;
     };
-    top_level.eq_ignore_ascii_case("text") && !subtype.is_empty() && !is_event_stream_media_type(ct)
+    if top_level.eq_ignore_ascii_case("text")
+        && !subtype.is_empty()
+        && !is_event_stream_media_type(ct)
+    {
+        return true;
+    }
+    top_level.eq_ignore_ascii_case("application")
+        && (subtype.eq_ignore_ascii_case("xml")
+            || subtype.to_ascii_lowercase().ends_with("+xml")
+            // JWT (RFC 7519) compact serializations are ASCII text: three
+            // base64url segments joined by dots.
+            || subtype.eq_ignore_ascii_case("jwt"))
 }
 
 /// Returns true for OpenAPI media ranges with a wildcard subtype.
@@ -1132,6 +1175,7 @@ pub fn is_binary_media_type(ct: &str, schema: Option<&Schema>) -> bool {
     }
     if essence.eq_ignore_ascii_case("application/octet-stream")
         || essence.eq_ignore_ascii_case("application/zip")
+        || essence.eq_ignore_ascii_case("application/pdf")
     {
         return true;
     }
@@ -1221,6 +1265,11 @@ impl RequestBody {
             {
                 return Some((ct.as_str(), media_type.schema.as_ref()));
             }
+        }
+        // Character-data fallbacks (text/xml, application/xml, +xml suffixed)
+        // are buffered as UTF-8 text like text/plain.
+        if let Some((ct, media_type)) = content.iter().find(|(ct, _)| is_text_media_type(ct)) {
+            return Some((ct.as_str(), media_type.schema.as_ref()));
         }
         content
             .iter()
@@ -1315,6 +1364,29 @@ pub struct MediaType {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn paths_map_skips_extension_scalars() {
+        // apicurio registry: an `x-codegen-contextRoot` scalar sits inside
+        // `paths`; the document must still parse with the extension dropped.
+        let spec: OpenApiSpec = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "lenient paths", "version": "1" },
+            "paths": {
+                "x-codegen-contextRoot": "/apis/registry/v2",
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "responses": { "204": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let paths = spec.paths.unwrap();
+        assert!(paths.contains_key("/items"));
+        assert!(!paths.contains_key("x-codegen-contextRoot"));
+    }
 
     #[test]
     fn test_parse_simple_object_schema() {
@@ -1552,13 +1624,33 @@ mod tests {
     #[test]
     fn response_media_classifier_leaves_ambiguous_formats_unsupported() {
         let string_schema: Schema = serde_json::from_value(json!({ "type": "string" })).unwrap();
-        for media_type in ["application/xml", "application/pdf", "not-a-media-type"] {
+        for media_type in ["application/x-unknown", "not-a-media-type"] {
             assert_eq!(
                 classify_response_media_type(media_type, Some(&string_schema)),
                 ResponseMediaKind::Unsupported,
                 "{media_type}"
             );
         }
+        // PDF bodies are raw bytes; XML bodies are character data. Both are
+        // pass-through lossless for a server that never parses the payload,
+        // so they classify instead of failing generation.
+        assert_eq!(
+            classify_response_media_type("application/pdf", Some(&string_schema)),
+            ResponseMediaKind::Binary
+        );
+        assert_eq!(
+            classify_response_media_type("application/xml", Some(&string_schema)),
+            ResponseMediaKind::Text
+        );
+        assert_eq!(
+            classify_response_media_type("application/atom+xml", Some(&string_schema)),
+            ResponseMediaKind::Text
+        );
+        // JWT compact serializations (RFC 7519) are ASCII text.
+        assert_eq!(
+            classify_response_media_type("application/jwt", Some(&string_schema)),
+            ResponseMediaKind::Text
+        );
         assert!(!is_binary_media_type("text/plain", None));
     }
 
