@@ -324,8 +324,8 @@ edition = "2024"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-reqwest = { version = "0.12", features = ["json", "multipart"] }
-reqwest-middleware = { version = "0.4", features = ["multipart"] }
+reqwest = { version = "0.13", features = ["json", "multipart"] }
+reqwest-middleware = { version = "0.5", features = ["multipart", "query"] }
 "#,
     )
     .unwrap();

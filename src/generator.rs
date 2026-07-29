@@ -424,6 +424,12 @@ impl CodeGenerator {
                             .to_string(),
                     ));
                 }
+                if streaming_config.event_parser_helpers {
+                    files.push(GeneratedFile {
+                        path: "sse.rs".into(),
+                        content: self.generate_sse_runtime()?,
+                    });
+                }
                 let streaming_content =
                     self.generate_streaming_client(streaming_config, analysis)?;
                 files.push(GeneratedFile {
@@ -762,6 +768,10 @@ impl CodeGenerator {
     ) -> Result<String> {
         let mut client_code = TokenStream::new();
         let provenance_attribute = self.provenance_attribute();
+        let duration_import = streaming_config
+            .reconnection_config
+            .as_ref()
+            .map(|_| quote! { use std::time::Duration; });
 
         // Generate imports
         let imports = quote! {
@@ -776,18 +786,26 @@ impl CodeGenerator {
 
             use super::types::*;
             use async_trait::async_trait;
-            use futures_util::{Stream, StreamExt};
+            use futures_util::Stream;
             use std::pin::Pin;
-            use std::time::Duration;
             use reqwest::header::{HeaderMap, HeaderValue};
-            use tracing::{debug, error, info, warn, instrument};
+            use tracing::{debug, info, instrument};
+            #duration_import
         };
         client_code.extend(imports);
 
-        // Generate error types
         if streaming_config.generate_client {
-            let error_types = self.generate_streaming_error_types()?;
-            client_code.extend(error_types);
+            if streaming_config.reconnection_config.is_some() {
+                client_code.extend(quote! {
+                    use super::sse::{SseClient, SseReconnectOptions};
+                    pub use super::sse::StreamingError;
+                });
+            } else {
+                client_code.extend(quote! {
+                    use super::sse::SseClient;
+                    pub use super::sse::StreamingError;
+                });
+            }
         }
 
         // Generate client trait for each endpoint
@@ -800,12 +818,6 @@ impl CodeGenerator {
         if streaming_config.generate_client {
             let client_impl = self.generate_streaming_client_impl(streaming_config, analysis)?;
             client_code.extend(client_impl);
-        }
-
-        // Generate SSE parsing utilities
-        if streaming_config.event_parser_helpers {
-            let parser_code = self.generate_sse_parser_utilities(streaming_config)?;
-            client_code.extend(parser_code);
         }
 
         // Generate reconnection utilities if configured
@@ -1285,6 +1297,9 @@ impl CodeGenerator {
             .collect::<Vec<_>>();
         let pub_uses = module_names
             .iter()
+            // The SSE runtime intentionally keeps transport-level names under
+            // `sse::` so they cannot collide with API-specific streaming types.
+            .filter(|name| name.as_str() != "sse")
             .map(|name| format!("pub use {name}::*;"))
             .collect::<Vec<_>>();
 
@@ -3682,9 +3697,8 @@ impl CodeGenerator {
         let mut struct_fields = vec![
             quote! { base_url: String },
             quote! { api_key: Option<String> },
-            quote! { http_client: reqwest::Client },
+            quote! { sse_client: SseClient },
             quote! { custom_headers: std::collections::BTreeMap<String, String> },
-            quote! { max_response_body_bytes: usize },
         ];
 
         let has_optional_headers = !streaming_config
@@ -3714,24 +3728,44 @@ impl CodeGenerator {
             .as_ref()
             .and_then(|http| http.max_response_body_bytes)
             .unwrap_or(8 * 1024 * 1024);
+        let sse_client_initializer = if let Some(reconnect) = &streaming_config.reconnection_config
+        {
+            let max_retries = reconnect.max_retries;
+            let initial_delay_ms = reconnect.initial_delay_ms;
+            let max_delay_ms = reconnect.max_delay_ms;
+            let backoff_multiplier = reconnect.backoff_multiplier;
+            quote! {
+                SseClient::new()
+                    .with_max_error_body_bytes(#max_response_body_bytes)
+                    .with_reconnect_options(SseReconnectOptions {
+                        max_retries: #max_retries,
+                        initial_retry_delay: std::time::Duration::from_millis(#initial_delay_ms),
+                        max_retry_delay: std::time::Duration::from_millis(#max_delay_ms),
+                        backoff_multiplier: #backoff_multiplier,
+                    })
+            }
+        } else {
+            quote! {
+                SseClient::new()
+                    .with_max_error_body_bytes(#max_response_body_bytes)
+            }
+        };
 
         // Build constructor fields based on what the struct has
         let constructor_fields = if has_optional_headers {
             quote! {
                 base_url: #default_base_url.to_string(),
                 api_key: None,
-                http_client: reqwest::Client::new(),
+                sse_client: #sse_client_initializer,
                 custom_headers: std::collections::BTreeMap::new(),
-                max_response_body_bytes: #max_response_body_bytes,
                 optional_headers: std::collections::BTreeMap::new(),
             }
         } else {
             quote! {
                 base_url: #default_base_url.to_string(),
                 api_key: None,
-                http_client: reqwest::Client::new(),
+                sse_client: #sse_client_initializer,
                 custom_headers: std::collections::BTreeMap::new(),
-                max_response_body_bytes: #max_response_body_bytes,
             }
         };
 
@@ -3770,7 +3804,7 @@ impl CodeGenerator {
 
                 /// Set the maximum number of error-response bytes buffered in memory.
                 pub fn with_max_response_body_bytes(mut self, limit: usize) -> Self {
-                    self.max_response_body_bytes = limit;
+                    self.sse_client = self.sse_client.with_max_error_body_bytes(limit);
                     self
                 }
 
@@ -3786,7 +3820,7 @@ impl CodeGenerator {
 
                 /// Set the HTTP client
                 pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
-                    self.http_client = client;
+                    self.sse_client = self.sse_client.with_http_client(client);
                     self
                 }
 
@@ -3987,17 +4021,17 @@ impl CodeGenerator {
                     let url_str = url.to_string();
                     debug!("Making streaming GET request to: {}", url_str);
 
-                    let request_builder = self.http_client
+                    let request_builder = self.sse_client
                         .get(url_str)
                         .headers(headers);
 
                     debug!("Creating SSE stream from request");
-                    let stream = parse_sse_stream_with_limit::<#event_type>(
-                        request_builder,
-                        self.max_response_body_bytes,
-                    ).await?;
+                    let stream = self
+                        .sse_client
+                        .stream::<#event_type>(request_builder)
+                        .await?;
                     info!("SSE stream created successfully");
-                    Ok(Box::pin(stream))
+                    Ok(stream)
                 }
             }
         })
@@ -4079,28 +4113,167 @@ impl CodeGenerator {
                     #url_construction
                     debug!("Making streaming POST request to: {}", url);
 
-                    let request_builder = self.http_client
+                    let request_builder = self.sse_client
                         .post(&url)
                         .headers(headers)
                         .json(&streaming_request);
 
                     debug!("Creating SSE stream from request");
-                    let stream = parse_sse_stream_with_limit::<#event_type>(
-                        request_builder,
-                        self.max_response_body_bytes,
-                    ).await?;
+                    let stream = self
+                        .sse_client
+                        .stream::<#event_type>(request_builder)
+                        .await?;
                     info!("SSE stream created successfully");
-                    Ok(Box::pin(stream))
+                    Ok(stream)
                 }
             }
         })
     }
 
-    /// Generate SSE parsing utilities using reqwest-eventsource
-    fn generate_sse_parser_utilities(
-        &self,
-        _streaming_config: &crate::streaming::StreamingConfig,
-    ) -> Result<TokenStream> {
+    /// Generate the reusable SSE transport module emitted as `sse.rs`.
+    fn generate_sse_runtime(&self) -> Result<String> {
+        let provenance_attribute = self.provenance_attribute();
+        let error_types = self.generate_streaming_error_types()?;
+        let parser = self.generate_sse_parser_utilities()?;
+        let tokens = quote! {
+            //! Generated SSE transport, framing, and JSON decoding support.
+            //!
+            //! This module is emitted only when SSE generation is enabled.
+            #provenance_attribute
+            #![allow(clippy::format_in_format_args)]
+
+            use futures_util::{Stream, StreamExt};
+            use std::pin::Pin;
+            use std::time::Duration;
+            use tracing::debug;
+
+            #error_types
+
+            /// Reusable transport client for generated SSE operations.
+            #[derive(Debug, Clone)]
+            pub struct SseClient {
+                http_client: reqwest::Client,
+                max_error_body_bytes: usize,
+                reconnect_options: Option<SseReconnectOptions>,
+            }
+
+            impl SseClient {
+                pub fn new() -> Self {
+                    Self {
+                        http_client: reqwest::Client::new(),
+                        max_error_body_bytes: DEFAULT_MAX_SSE_ERROR_BODY_BYTES,
+                        reconnect_options: None,
+                    }
+                }
+
+                pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+                    self.http_client = client;
+                    self
+                }
+
+                pub fn with_max_error_body_bytes(mut self, limit: usize) -> Self {
+                    self.max_error_body_bytes = limit;
+                    self
+                }
+
+                /// Enable automatic reconnection for [`Self::stream`].
+                pub fn with_reconnect_options(mut self, options: SseReconnectOptions) -> Self {
+                    self.reconnect_options = Some(options);
+                    self
+                }
+
+                pub fn get(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+                    self.http_client.get(url)
+                }
+
+                pub fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+                    self.http_client.post(url)
+                }
+
+                pub async fn stream<T>(
+                    &self,
+                    request_builder: reqwest::RequestBuilder,
+                ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
+                where
+                    T: serde::de::DeserializeOwned + Send + 'static,
+                {
+                    if let Some(options) = self.reconnect_options.clone() {
+                        parse_sse_json_reconnecting_with_limit(
+                            request_builder,
+                            self.max_error_body_bytes,
+                            options,
+                        ).await
+                    } else {
+                        parse_sse_json_stream_with_limit(
+                            request_builder,
+                            self.max_error_body_bytes,
+                        ).await
+                    }
+                }
+
+                /// Stream raw SSE events from one HTTP connection.
+                pub async fn stream_raw(
+                    &self,
+                    request_builder: reqwest::RequestBuilder,
+                ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<String>, StreamingError>> + Send>>, StreamingError> {
+                    parse_sse_raw_stream_with_limit(request_builder, self.max_error_body_bytes).await
+                }
+
+                /// Stream typed JSON SSE events from one HTTP connection.
+                pub async fn stream_json<T>(
+                    &self,
+                    request_builder: reqwest::RequestBuilder,
+                ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<T>, StreamingError>> + Send>>, StreamingError>
+                where
+                    T: serde::de::DeserializeOwned + Send + 'static,
+                {
+                    parse_sse_json_events_with_limit(request_builder, self.max_error_body_bytes).await
+                }
+
+                /// Stream raw SSE events and reconnect retryable connections.
+                pub async fn stream_raw_reconnecting(
+                    &self,
+                    request_builder: reqwest::RequestBuilder,
+                ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<String>, StreamingError>> + Send>>, StreamingError> {
+                    parse_sse_raw_reconnecting_with_limit(
+                        request_builder,
+                        self.max_error_body_bytes,
+                        self.reconnect_options.clone().unwrap_or_default(),
+                    ).await
+                }
+
+                /// Stream typed JSON SSE events and reconnect retryable connections.
+                pub async fn stream_json_reconnecting<T>(
+                    &self,
+                    request_builder: reqwest::RequestBuilder,
+                ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<T>, StreamingError>> + Send>>, StreamingError>
+                where
+                    T: serde::de::DeserializeOwned + Send + 'static,
+                {
+                    parse_sse_json_reconnecting_events_with_limit(
+                        request_builder,
+                        self.max_error_body_bytes,
+                        self.reconnect_options.clone().unwrap_or_default(),
+                    ).await
+                }
+            }
+
+            impl Default for SseClient {
+                fn default() -> Self {
+                    Self::new()
+                }
+            }
+
+            #parser
+        };
+        let syntax_tree = syn::parse2::<syn::File>(tokens).map_err(|error| {
+            GeneratorError::CodeGenError(format!("Failed to parse generated sse.rs: {error}"))
+        })?;
+        Ok(prettyplease::unparse(&syntax_tree))
+    }
+
+    /// Generate the standalone SSE framing and JSON parsing utilities.
+    fn generate_sse_parser_utilities(&self) -> Result<TokenStream> {
         Ok(quote! {
             /// Default upper bound for an SSE error response buffered in memory.
             pub const DEFAULT_MAX_SSE_ERROR_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -4120,124 +4293,562 @@ impl CodeGenerator {
                 Ok(body)
             }
 
-            /// Parse SSE stream from HTTP request using reqwest-eventsource
-            pub async fn parse_sse_stream<T>(
-                request_builder: reqwest::RequestBuilder
-            ) -> Result<impl Stream<Item = Result<T, StreamingError>>, StreamingError>
-            where
-                T: serde::de::DeserializeOwned + Send + 'static,
-            {
-                parse_sse_stream_with_limit(request_builder, DEFAULT_MAX_SSE_ERROR_BODY_BYTES).await
+            /// A decoded SSE event with its transport metadata preserved.
+            #[derive(Debug, Clone, PartialEq, Eq)]
+            pub struct SseEvent<T> {
+                /// Event name, or `message` when the server omitted `event:`.
+                pub event: String,
+                /// Raw or deserialized event payload.
+                pub data: T,
+                /// Most recent event ID, used to resume a reconnected stream.
+                pub id: Option<String>,
+                /// Server-supplied reconnection delay on this event, if present.
+                pub retry: Option<Duration>,
             }
 
-            async fn parse_sse_stream_with_limit<T>(
-                request_builder: reqwest::RequestBuilder,
-                max_response_body_bytes: usize,
-            ) -> Result<impl Stream<Item = Result<T, StreamingError>>, StreamingError>
+            /// Controls automatic SSE reconnection behavior.
+            #[derive(Debug, Clone)]
+            pub struct SseReconnectOptions {
+                /// Maximum consecutive reconnection attempts.
+                pub max_retries: u32,
+                /// Delay before the first reconnection when the server did not send `retry:`.
+                pub initial_retry_delay: Duration,
+                /// Upper bound for client-computed and server-supplied delays.
+                pub max_retry_delay: Duration,
+                /// Exponential backoff multiplier for consecutive failures.
+                pub backoff_multiplier: f64,
+            }
+
+            impl Default for SseReconnectOptions {
+                fn default() -> Self {
+                    Self {
+                        max_retries: 3,
+                        initial_retry_delay: Duration::from_secs(3),
+                        max_retry_delay: Duration::from_secs(30),
+                        backoff_multiplier: 2.0,
+                    }
+                }
+            }
+
+            impl SseReconnectOptions {
+                fn delay(&self, attempt: u32, server_retry: Option<Duration>) -> Duration {
+                    if let Some(delay) = server_retry {
+                        return delay.min(self.max_retry_delay);
+                    }
+                    let multiplier = self.backoff_multiplier.max(1.0);
+                    let millis = self.initial_retry_delay.as_millis() as f64
+                        * multiplier.powi(attempt.min(63) as i32);
+                    Duration::from_millis(
+                        millis.min(self.max_retry_delay.as_millis() as f64) as u64,
+                    )
+                }
+            }
+
+            #[derive(Default)]
+            struct __SseDecoder {
+                line: Vec<u8>,
+                event: String,
+                data: Vec<String>,
+                last_event_id: Option<String>,
+                retry_delay: Option<Duration>,
+                event_retry: Option<Duration>,
+                saw_carriage_return: bool,
+            }
+
+            impl __SseDecoder {
+                fn feed(
+                    &mut self,
+                    chunk: &[u8],
+                ) -> Vec<Result<SseEvent<String>, StreamingError>> {
+                    let mut messages = Vec::new();
+                    for &byte in chunk {
+                        if self.saw_carriage_return {
+                            self.saw_carriage_return = false;
+                            if byte == b'\n' {
+                                continue;
+                            }
+                        }
+
+                        match byte {
+                            b'\n' => self.finish_line(&mut messages),
+                            b'\r' => {
+                                self.finish_line(&mut messages);
+                                self.saw_carriage_return = true;
+                            }
+                            _ => self.line.push(byte),
+                        }
+                    }
+                    messages
+                }
+
+                fn finish(&mut self) -> Vec<Result<SseEvent<String>, StreamingError>> {
+                    let mut messages = Vec::new();
+                    if !self.line.is_empty() {
+                        self.finish_line(&mut messages);
+                    }
+                    self.dispatch(&mut messages);
+                    messages
+                }
+
+                fn finish_line(
+                    &mut self,
+                    messages: &mut Vec<Result<SseEvent<String>, StreamingError>>,
+                ) {
+                    let line = std::mem::take(&mut self.line);
+                    let line = match String::from_utf8(line) {
+                        Ok(line) => line,
+                        Err(error) => {
+                            messages.push(Err(StreamingError::Parsing(format!(
+                                "SSE line is not valid UTF-8: {}",
+                                error
+                            ))));
+                            return;
+                        }
+                    };
+
+                    if line.is_empty() {
+                        self.dispatch(messages);
+                        return;
+                    }
+                    if line.starts_with(':') {
+                        return;
+                    }
+
+                    let (field, value) = line
+                        .split_once(':')
+                        .map_or((line.as_str(), ""), |(field, value)| {
+                            (field, value.strip_prefix(' ').unwrap_or(value))
+                        });
+                    match field {
+                        "event" => self.event = value.to_string(),
+                        "data" => self.data.push(value.to_string()),
+                        "id" if !value.contains('\0') => {
+                            self.last_event_id = (!value.is_empty()).then(|| value.to_string());
+                        }
+                        "retry" if value.bytes().all(|byte| byte.is_ascii_digit()) => {
+                            if let Ok(milliseconds) = value.parse::<u64>() {
+                                let delay = Duration::from_millis(milliseconds);
+                                self.retry_delay = Some(delay);
+                                self.event_retry = Some(delay);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                fn dispatch(
+                    &mut self,
+                    messages: &mut Vec<Result<SseEvent<String>, StreamingError>>,
+                ) {
+                    if self.data.is_empty() {
+                        self.event.clear();
+                        self.event_retry = None;
+                        return;
+                    }
+                    messages.push(Ok(SseEvent {
+                        event: if self.event.is_empty() {
+                            "message".to_string()
+                        } else {
+                            std::mem::take(&mut self.event)
+                        },
+                        data: std::mem::take(&mut self.data).join("\n"),
+                        id: self.last_event_id.clone(),
+                        retry: self.event_retry.take(),
+                    }));
+                    self.event.clear();
+                }
+
+                fn reset_for_reconnect(&mut self) {
+                    self.line.clear();
+                    self.event.clear();
+                    self.data.clear();
+                    self.event_retry = None;
+                    self.saw_carriage_return = false;
+                }
+            }
+
+            fn __deserialize_sse_event<T>(
+                event: SseEvent<String>,
+            ) -> Option<Result<SseEvent<T>, StreamingError>>
+            where
+                T: serde::de::DeserializeOwned,
+            {
+                if event.data.trim() == "[DONE]" {
+                    return None;
+                }
+                if event.event == "ping" {
+                    debug!("Received SSE ping event, skipping");
+                    return None;
+                }
+                if event.data.trim().is_empty() {
+                    debug!("Empty SSE data, skipping");
+                    return None;
+                }
+
+                let json_value = match serde_json::from_str::<serde_json::Value>(&event.data) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Some(Err(StreamingError::Parsing(format!(
+                            "SSE event is not valid JSON: {} ({})",
+                            event.data, error
+                        ))));
+                    }
+                };
+                let is_ping = json_value
+                    .get("event")
+                    .or_else(|| json_value.get("type"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|event| event == "ping");
+                if is_ping {
+                    debug!("Received ping event in JSON data, skipping");
+                    return None;
+                }
+
+                Some(
+                    serde_json::from_value::<T>(json_value)
+                        .map(|data| SseEvent {
+                            event: event.event.clone(),
+                            data,
+                            id: event.id.clone(),
+                            retry: event.retry,
+                        })
+                        .map_err(|error| StreamingError::Parsing(format!(
+                            "Failed to parse SSE event: {} (raw: {}, event: {})",
+                            error, event.data, event.event
+                        ))),
+                )
+            }
+
+            /// Parse an SSE response without an external EventSource wrapper.
+            pub async fn parse_sse_stream<T>(
+                request_builder: reqwest::RequestBuilder
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
             where
                 T: serde::de::DeserializeOwned + Send + 'static,
             {
-                let mut event_source = reqwest_eventsource::EventSource::new(request_builder).map_err(|e| {
-                    StreamingError::Connection(format!("Failed to create event source: {}", e))
+                parse_sse_json_stream_with_limit(
+                    request_builder,
+                    DEFAULT_MAX_SSE_ERROR_BODY_BYTES,
+                ).await
+            }
+
+            struct __SseOpenError {
+                error: StreamingError,
+                retryable: bool,
+            }
+
+            async fn __open_sse_response(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+            ) -> Result<reqwest::Response, __SseOpenError> {
+                let response = request_builder.send().await.map_err(|error| __SseOpenError {
+                    error: error.into(),
+                    retryable: true,
                 })?;
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    let error = match __read_bounded_streaming_error_body(
+                        response,
+                        max_response_body_bytes,
+                    ).await {
+                        Ok(body) => StreamingError::Connection(format!(
+                            "HTTP {} error: {}",
+                            status.as_u16(),
+                            String::from_utf8_lossy(&body)
+                        )),
+                        Err(error) => error,
+                    };
+                    return Err(__SseOpenError { error, retryable });
+                }
 
-                let stream = event_source.filter_map(move |event_result| async move {
-                    match event_result {
-                        Ok(reqwest_eventsource::Event::Open) => {
-                            debug!("SSE connection opened");
-                            None
-                        }
-                        Ok(reqwest_eventsource::Event::Message(message)) => {
-                            // Check if this is a ping event by SSE event type
-                            if message.event == "ping" {
-                                debug!("Received SSE ping event, skipping");
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default();
+                if !content_type
+                    .split(';')
+                    .next()
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
+                {
+                    let error = StreamingError::Parsing(format!(
+                        "Expected text/event-stream response, received {}",
+                        if content_type.is_empty() { "no Content-Type" } else { content_type }
+                    ));
+                    return Err(__SseOpenError { error, retryable: false });
+                }
+
+                debug!("SSE connection opened");
+                Ok(response)
+            }
+
+            fn __raw_response_stream(
+                response: reqwest::Response,
+            ) -> Pin<Box<dyn Stream<Item = Result<SseEvent<String>, StreamingError>> + Send>> {
+                let stream = futures_util::stream::unfold(
+                    (
+                        response,
+                        __SseDecoder::default(),
+                        std::collections::VecDeque::<Result<SseEvent<String>, StreamingError>>::new(),
+                        false,
+                    ),
+                    |(mut response, mut decoder, mut pending, mut done)| async move {
+                        loop {
+                            if let Some(item) = pending.pop_front() {
+                                return Some((item, (response, decoder, pending, done)));
+                            }
+                            if done {
+                                debug!("SSE stream completed normally");
                                 return None;
                             }
 
-                            // Special handling for empty data
-                            if message.data.trim().is_empty() {
-                                debug!("Empty SSE data, skipping");
-                                return None;
-                            }
-
-                            // Check if this is a ping event in the JSON data
-                            if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&message.data) {
-                                if let Some(event_type) = json_value.get("event").and_then(|v| v.as_str()) {
-                                    if event_type == "ping" {
-                                        debug!("Received ping event in JSON data, skipping");
-                                        return None;
-                                    }
-                                }
-
-                                // Try to parse the full event normally
-                                match serde_json::from_value::<T>(json_value) {
-                                    Ok(parsed_event) => {
-                                        Some(Ok(parsed_event))
-                                    }
-                                    Err(e) => {
-                                        if message.data.contains("ping") || message.event.contains("ping") {
-                                            debug!("Ignoring ping-related event: {}", message.data);
-                                            None
-                                        } else {
-                                            Some(Err(StreamingError::Parsing(
-                                                format!("Failed to parse SSE event: {} (raw: {})", e, message.data)
-                                            )))
+                            match response.chunk().await {
+                                Ok(Some(chunk)) => {
+                                    for event in decoder.feed(&chunk) {
+                                        let is_done = event
+                                            .as_ref()
+                                            .is_ok_and(|event| event.data.trim() == "[DONE]");
+                                        pending.push_back(event);
+                                        if is_done {
+                                            done = true;
+                                            break;
                                         }
                                     }
                                 }
-                            } else {
-                                // Not valid JSON at all
-                                Some(Err(StreamingError::Parsing(
-                                    format!("SSE event is not valid JSON: {}", message.data)
-                                )))
-                            }
-                        }
-                        Err(e) => {
-                            // Check if this is a normal stream end vs actual error
-                            match e {
-                                reqwest_eventsource::Error::StreamEnded => {
-                                    debug!("SSE stream completed normally");
-                                    None // Normal stream end, not an error
+                                Err(error) => {
+                                    done = true;
+                                    pending.push_back(Err(error.into()));
                                 }
-                                reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
-                                    // We have access to the response body for error details
-                                    let status_code = status.as_u16();
-
-                                    // Read the response body to get error details
-                                    let error_body = match __read_bounded_streaming_error_body(
-                                        response,
-                                        max_response_body_bytes,
-                                    ).await {
-                                        Ok(body) => String::from_utf8_lossy(&body).into_owned(),
-                                        Err(error) => return Some(Err(error)),
-                                    };
-
-                                    error!("SSE connection error - HTTP {}: {}", status_code, error_body);
-
-                                    let detailed_error = format!(
-                                        "HTTP {} error: {}",
-                                        status_code,
-                                        error_body
-                                    );
-
-                                    Some(Err(StreamingError::Connection(detailed_error)))
-                                }
-                                _ => {
-                                    let error_str = e.to_string();
-                                    if error_str.contains("stream closed") {
-                                        debug!("SSE stream closed");
-                                        None
-                                    } else {
-                                        error!("SSE connection error: {}", e);
-                                        Some(Err(StreamingError::Connection(error_str)))
+                                Ok(None) => {
+                                    done = true;
+                                    for event in decoder.finish() {
+                                        pending.push_back(event);
                                     }
                                 }
                             }
                         }
                     }
-                });
+                );
 
-                Ok(stream)
+                Box::pin(stream)
+            }
+
+            async fn parse_sse_raw_stream_with_limit(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<String>, StreamingError>> + Send>>, StreamingError> {
+                Ok(match __open_sse_response(request_builder, max_response_body_bytes).await {
+                    Ok(response) => __raw_response_stream(response),
+                    Err(error) => Box::pin(futures_util::stream::once(async move { Err(error.error) })),
+                })
+            }
+
+            fn __json_event_stream<T>(
+                raw: Pin<Box<dyn Stream<Item = Result<SseEvent<String>, StreamingError>> + Send>>,
+            ) -> Pin<Box<dyn Stream<Item = Result<SseEvent<T>, StreamingError>> + Send>>
+            where
+                T: serde::de::DeserializeOwned + Send + 'static,
+            {
+                Box::pin(raw.filter_map(|event| async move {
+                    match event {
+                        Ok(event) => __deserialize_sse_event(event),
+                        Err(error) => Some(Err(error)),
+                    }
+                }))
+            }
+
+            async fn parse_sse_json_events_with_limit<T>(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<T>, StreamingError>> + Send>>, StreamingError>
+            where
+                T: serde::de::DeserializeOwned + Send + 'static,
+            {
+                Ok(__json_event_stream(
+                    parse_sse_raw_stream_with_limit(request_builder, max_response_body_bytes).await?,
+                ))
+            }
+
+            async fn parse_sse_json_stream_with_limit<T>(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
+            where
+                T: serde::de::DeserializeOwned + Send + 'static,
+            {
+                let events = parse_sse_json_events_with_limit(request_builder, max_response_body_bytes).await?;
+                Ok(Box::pin(events.map(|event| event.map(|event| event.data))))
+            }
+
+            struct __ReconnectState {
+                request: reqwest::RequestBuilder,
+                response: Option<reqwest::Response>,
+                decoder: __SseDecoder,
+                pending: std::collections::VecDeque<Result<SseEvent<String>, StreamingError>>,
+                options: SseReconnectOptions,
+                max_response_body_bytes: usize,
+                attempts: u32,
+                wait_before_open: bool,
+                done: bool,
+            }
+
+            async fn parse_sse_raw_reconnecting_with_limit(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+                options: SseReconnectOptions,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<String>, StreamingError>> + Send>>, StreamingError> {
+                if request_builder.try_clone().is_none() {
+                    return Err(StreamingError::Connection(
+                        "SSE reconnection requires a cloneable request body".to_string(),
+                    ));
+                }
+
+                let stream = futures_util::stream::unfold(
+                    __ReconnectState {
+                        request: request_builder,
+                        response: None,
+                        decoder: __SseDecoder::default(),
+                        pending: std::collections::VecDeque::new(),
+                        options,
+                        max_response_body_bytes,
+                        attempts: 0,
+                        wait_before_open: false,
+                        done: false,
+                    },
+                    |mut state| async move {
+                        loop {
+                            if let Some(item) = state.pending.pop_front() {
+                                return Some((item, state));
+                            }
+                            if state.done {
+                                return None;
+                            }
+
+                            if state.response.is_none() {
+                                if state.wait_before_open {
+                                    let delay = state.options.delay(
+                                        state.attempts.saturating_sub(1),
+                                        state.decoder.retry_delay,
+                                    );
+                                    debug!(?delay, attempt = state.attempts, "Reconnecting SSE stream");
+                                    futures_timer::Delay::new(delay).await;
+                                    state.wait_before_open = false;
+                                }
+
+                                let mut request = state.request.try_clone().expect("request clone checked");
+                                if let Some(last_event_id) = state.decoder.last_event_id.as_deref() {
+                                    request = request.header("Last-Event-ID", last_event_id);
+                                }
+                                match __open_sse_response(request, state.max_response_body_bytes).await {
+                                    Ok(response) => state.response = Some(response),
+                                    Err(error) if error.retryable && state.attempts < state.options.max_retries => {
+                                        state.attempts += 1;
+                                        state.wait_before_open = true;
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        state.done = true;
+                                        state.pending.push_back(Err(error.error));
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            let next = state.response.as_mut().expect("response opened").chunk().await;
+                            match next {
+                                Ok(Some(chunk)) => {
+                                    let events = state.decoder.feed(&chunk);
+                                    if !events.is_empty() {
+                                        state.attempts = 0;
+                                    }
+                                    for event in events {
+                                        let is_done = event
+                                            .as_ref()
+                                            .is_ok_and(|event| event.data.trim() == "[DONE]");
+                                        state.pending.push_back(event);
+                                        if is_done {
+                                            state.done = true;
+                                            state.response = None;
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    let events = state.decoder.finish();
+                                    if !events.is_empty() {
+                                        state.attempts = 0;
+                                    }
+                                    for event in events {
+                                        let is_done = event
+                                            .as_ref()
+                                            .is_ok_and(|event| event.data.trim() == "[DONE]");
+                                        state.pending.push_back(event);
+                                        if is_done {
+                                            state.done = true;
+                                            break;
+                                        }
+                                    }
+                                    state.response = None;
+                                    state.decoder.reset_for_reconnect();
+                                    if !state.done {
+                                        if state.attempts < state.options.max_retries {
+                                            state.attempts += 1;
+                                            state.wait_before_open = true;
+                                        } else {
+                                            state.done = true;
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    state.response = None;
+                                    state.decoder.reset_for_reconnect();
+                                    if state.attempts < state.options.max_retries {
+                                        state.attempts += 1;
+                                        state.wait_before_open = true;
+                                    } else {
+                                        state.done = true;
+                                        state.pending.push_back(Err(error.into()));
+                                    }
+                                }
+                            }
+                        }
+                    },
+                );
+                Ok(Box::pin(stream))
+            }
+
+            async fn parse_sse_json_reconnecting_events_with_limit<T>(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+                options: SseReconnectOptions,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<SseEvent<T>, StreamingError>> + Send>>, StreamingError>
+            where
+                T: serde::de::DeserializeOwned + Send + 'static,
+            {
+                Ok(__json_event_stream(
+                    parse_sse_raw_reconnecting_with_limit(
+                        request_builder,
+                        max_response_body_bytes,
+                        options,
+                    ).await?,
+                ))
+            }
+
+            async fn parse_sse_json_reconnecting_with_limit<T>(
+                request_builder: reqwest::RequestBuilder,
+                max_response_body_bytes: usize,
+                options: SseReconnectOptions,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<T, StreamingError>> + Send>>, StreamingError>
+            where
+                T: serde::de::DeserializeOwned + Send + 'static,
+            {
+                let events = parse_sse_json_reconnecting_events_with_limit(
+                    request_builder,
+                    max_response_body_bytes,
+                    options,
+                ).await?;
+                Ok(Box::pin(events.map(|event| event.map(|event| event.data))))
             }
         })
     }

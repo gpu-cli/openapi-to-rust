@@ -310,9 +310,15 @@ pub fn collect_generated_dep_requirements<'a>(
     }
 
     if uses("reqwest::") {
-        let mut features = vec!["rustls-tls"];
+        let mut features = vec!["rustls"];
         if uses(".json(&") {
             features.push("json");
+        }
+        if uses(".query(&") {
+            features.push("query");
+        }
+        if uses(".form(&") {
+            features.push("form");
         }
         // Multipart operations reference `reqwest::multipart::Form` directly.
         // reqwest is pinned with default-features off, so the feature has to be
@@ -323,27 +329,36 @@ pub fn collect_generated_dep_requirements<'a>(
         if uses("reqwest::multipart") {
             features.push("multipart");
         }
-        // `Response::bytes_stream()`, used by generated SSE operations, is
-        // gated behind reqwest's `stream` feature.
-        if uses(".bytes_stream()") {
+        // Incremental response streaming APIs used by generated SSE operations
+        // are gated behind reqwest's `stream` feature.
+        if uses(".bytes_stream()") || uses(".chunk().await") {
             features.push("stream");
         }
         dependencies.push(
-            DepRequirement::new("reqwest", "0.12")
+            DepRequirement::new("reqwest", "0.13")
                 .without_default_features()
                 .with_features(&features),
         );
     }
     if uses("reqwest_middleware::") {
-        let dependency = if uses(".multipart(form)") {
-            DepRequirement::new("reqwest-middleware", "0.4").with_features(&["multipart"])
-        } else {
-            DepRequirement::new("reqwest-middleware", "0.4")
-        };
-        dependencies.push(dependency);
+        let mut features = Vec::new();
+        if uses(".json(&") {
+            features.push("json");
+        }
+        if uses(".query(&") {
+            features.push("query");
+        }
+        if uses(".form(&") {
+            features.push("form");
+        }
+        if uses(".multipart(form)") {
+            features.push("multipart");
+        }
+        dependencies
+            .push(DepRequirement::new("reqwest-middleware", "0.5").with_features(&features));
     }
     if uses("reqwest_retry::") {
-        let dependency = DepRequirement::new("reqwest-retry", "0.7");
+        let dependency = DepRequirement::new("reqwest-retry", "0.9");
         dependencies.push(if uses("reqwest_tracing::") {
             dependency
         } else {
@@ -351,19 +366,19 @@ pub fn collect_generated_dep_requirements<'a>(
         });
     }
     if uses("reqwest_tracing::") {
-        dependencies.push(DepRequirement::new("reqwest-tracing", "0.5"));
-    }
-    if uses("reqwest_eventsource::") {
-        dependencies.push(DepRequirement::new("reqwest-eventsource", "0.6"));
+        dependencies.push(DepRequirement::new("reqwest-tracing", "0.7"));
     }
     if uses("thiserror::") || uses("use thiserror::") {
-        dependencies.push(DepRequirement::new("thiserror", "1"));
+        dependencies.push(DepRequirement::new("thiserror", "2"));
     }
     if uses("async_trait::") {
         dependencies.push(DepRequirement::new("async-trait", "0.1"));
     }
     if uses("futures_util::") {
         dependencies.push(DepRequirement::new("futures-util", "0.3"));
+    }
+    if uses("futures_timer::") {
+        dependencies.push(DepRequirement::new("futures-timer", "3"));
     }
     if uses("futures_core::") {
         dependencies.push(DepRequirement::new("futures-core", "0.3"));

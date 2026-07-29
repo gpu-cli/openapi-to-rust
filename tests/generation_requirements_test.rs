@@ -1,5 +1,5 @@
 use openapi_to_rust::config::{ServerSection, ServerValidationSection};
-use openapi_to_rust::streaming::{StreamingConfig, StreamingEndpoint};
+use openapi_to_rust::streaming::{ReconnectionConfig, StreamingConfig, StreamingEndpoint};
 use openapi_to_rust::type_mapping::{BinaryStrategy, DurationStrategy, TypeMappingConfig};
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, RetryConfig, SchemaAnalyzer, TypeMapper};
 use serde_json::json;
@@ -141,6 +141,18 @@ fn assert_names(
     assert_eq!(dependency_names(result), expected.into_iter().collect());
 }
 
+fn assert_version(result: &openapi_to_rust::GenerationResult, crate_name: &str, expected: &str) {
+    let dependency = result
+        .required_deps
+        .iter()
+        .find(|dependency| dependency.crate_name == crate_name)
+        .unwrap_or_else(|| panic!("missing {crate_name} dependency"));
+    assert_eq!(
+        dependency.version, expected,
+        "unexpected {crate_name} version"
+    );
+}
+
 fn compile_case(name: &str, mut config: GeneratorConfig) -> openapi_to_rust::GenerationResult {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp = tempfile::TempDir::new().expect("scratch crate");
@@ -221,6 +233,7 @@ fn streaming_config() -> StreamingConfig {
             event_union_type: "StreamEvent".into(),
             ..Default::default()
         }],
+        reconnection_config: Some(ReconnectionConfig::default()),
         ..Default::default()
     }
 }
@@ -267,6 +280,12 @@ fn disabled_sse_feature_does_not_emit_streaming_code_or_dependencies() {
             .files
             .iter()
             .all(|file| file.path != std::path::Path::new("streaming.rs"))
+    );
+    assert!(
+        result
+            .files
+            .iter()
+            .all(|file| file.path != std::path::Path::new("sse.rs"))
     );
     assert!(!dependency_names(&result).contains("reqwest-eventsource"));
     assert!(!dependency_names(&result).contains("futures-util"));
@@ -391,7 +410,8 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .iter()
         .find(|dependency| dependency.crate_name == "reqwest-middleware")
         .expect("middleware dependency");
-    assert_eq!(middleware.features, vec!["multipart"]);
+    assert_eq!(middleware.version, "0.5");
+    assert_eq!(middleware.features, vec!["multipart", "query"]);
 
     let sse = compile_case(
         "sse",
@@ -410,9 +430,9 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "base64",
             "bytes",
             "chrono",
+            "futures-timer",
             "futures-util",
             "reqwest",
-            "reqwest-eventsource",
             "serde",
             "serde_json",
             "thiserror",
@@ -426,8 +446,37 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .iter()
         .find(|dependency| dependency.crate_name == "reqwest")
         .expect("reqwest dependency");
-    assert_eq!(reqwest.features, vec!["json", "rustls-tls"]);
+    assert_eq!(reqwest.version, "0.13");
+    assert_eq!(reqwest.features, vec!["json", "rustls", "stream"]);
     assert!(!reqwest.default_features);
+    assert_version(&sse, "thiserror", "2");
+    let sse_runtime = sse
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("sse.rs"))
+        .expect("SSE runtime module");
+    assert!(sse_runtime.content.contains("pub struct SseClient"));
+    assert!(sse_runtime.content.contains("pub struct SseEvent<T>"));
+    assert!(
+        sse_runtime
+            .content
+            .contains("pub struct SseReconnectOptions")
+    );
+    assert!(sse_runtime.content.contains("pub async fn stream_raw"));
+    assert!(sse_runtime.content.contains("Last-Event-ID"));
+    let streaming = sse
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("streaming.rs"))
+        .expect("API-specific streaming module");
+    assert!(
+        streaming
+            .content
+            .contains("use super::sse::{SseClient, SseReconnectOptions}")
+    );
+    assert!(streaming.content.contains("with_reconnect_options"));
+    assert!(sse.mod_file.content.contains("pub mod sse;"));
+    assert!(!sse.mod_file.content.contains("pub use sse::*;"));
 
     let server = compile_case(
         "server",
@@ -499,12 +548,12 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "bytes",
             "chrono",
             "futures-core",
+            "futures-timer",
             "futures-util",
             "http-body-util",
             "jsonschema",
             "mime",
             "reqwest",
-            "reqwest-eventsource",
             "reqwest-middleware",
             "reqwest-retry",
             "reqwest-tracing",
@@ -517,4 +566,9 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "uuid",
         ],
     );
+    assert_version(&combined, "reqwest", "0.13");
+    assert_version(&combined, "reqwest-middleware", "0.5");
+    assert_version(&combined, "reqwest-retry", "0.9");
+    assert_version(&combined, "reqwest-tracing", "0.7");
+    assert_version(&combined, "thiserror", "2");
 }

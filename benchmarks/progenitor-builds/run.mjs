@@ -119,11 +119,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
-reqwest-middleware = "=0.4.2"
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls"] }
+reqwest-middleware = "=0.5.2"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-thiserror = "=1.0.69"
+thiserror = "=2.0.19"
 `);
   fs.writeFileSync(path.join(aotRoot, "src/lib.rs"), `pub mod generated;
 
