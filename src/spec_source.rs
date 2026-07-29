@@ -112,8 +112,22 @@ pub fn parse_spec(
 /// serde_yaml::Value and convert to serde_json::Value manually.
 pub fn yaml_to_json_value(content: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let preprocessed = sanitize_large_yaml_integers(content);
-    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&preprocessed)?;
-    Ok(yaml_value_to_json(yaml_value))
+    match serde_yaml::from_str::<serde_yaml::Value>(&preprocessed) {
+        Ok(yaml_value) => Ok(yaml_value_to_json(yaml_value)),
+        Err(error) => {
+            // Real-world specs (Adyen, Amadeus) carry literal tab characters
+            // inside block-scalar prose. YAML 1.2 forbids tabs for
+            // indentation, and serde_yaml rejects the document outright even
+            // when the tab is content. Retry once with tabs sanitized
+            // line-wise so block-scalar indentation survives.
+            if error.to_string().contains("tab character") {
+                let expanded = expand_yaml_tabs(&preprocessed);
+                let yaml_value: serde_yaml::Value = serde_yaml::from_str(&expanded)?;
+                return Ok(yaml_value_to_json(yaml_value));
+            }
+            Err(error.into())
+        }
+    }
 }
 
 /// Parse JSON with lossy number handling: numbers that overflow i64/u64 are stored as f64.
@@ -171,6 +185,26 @@ fn yaml_value_to_json(yaml: serde_yaml::Value) -> serde_json::Value {
         }
         serde_yaml::Value::Tagged(tagged) => yaml_value_to_json(tagged.value),
     }
+}
+
+/// Sanitize tab characters so serde_yaml accepts the document: a tab on an
+/// otherwise whitespace-only line is dropped entirely (blank lines carry no
+/// indentation semantics in block scalars), while tabs adjacent to content
+/// become a single space. This keeps block-scalar indent auto-detection
+/// consistent with sibling prose lines regardless of tab-stop assumptions.
+fn expand_yaml_tabs(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            if line.chars().all(|ch| ch == ' ' || ch == '\t') {
+                // Whitespace-only line: drop tabs, keep the spaces.
+                line.replace('\t', "")
+            } else {
+                line.replace('\t', " ")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Preprocess YAML content to convert integers that exceed i64/u64 range to float notation.
@@ -267,5 +301,34 @@ pub fn validate_oas_document(value: &serde_json::Value) -> Result<Option<String>
             };
             Err(format!("missing or unrecognized `openapi` version{hint}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_with_block_scalar_tabs_parses_after_sanitization() {
+        let spec = "openapi: 3.0.0\ninfo:\n  title: tabs\n  version: '1'\npaths:\n  /thing:\n    get:\n      description: |-\n        \t\n        Date and time of travel.\n        * Encoding: ASCII\n      operationId: getThing\n      responses:\n        '204':\n          description: ok\n";
+        let value = yaml_to_json_value(spec).expect("tabbed block scalar parses");
+        assert_eq!(
+            value["paths"]["/thing"]["get"]["operationId"],
+            serde_json::json!("getThing")
+        );
+        let description = value["paths"]["/thing"]["get"]["description"]
+            .as_str()
+            .expect("description is a string");
+        assert!(
+            description.contains("Date and time of travel."),
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn expand_yaml_tabs_drops_whitespace_only_line_tabs() {
+        assert_eq!(expand_yaml_tabs("    \t"), "    ");
+        assert_eq!(expand_yaml_tabs("a\tb"), "a b");
+        assert_eq!(expand_yaml_tabs("no tabs"), "no tabs");
     }
 }
