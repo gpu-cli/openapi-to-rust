@@ -95,10 +95,52 @@ enum Commands {
         #[arg(short, long, default_value = "openapi-to-rust.toml")]
         config: PathBuf,
     },
+    /// Manage and verify a collection of generated API clients.
+    Clients {
+        #[command(subcommand)]
+        action: ClientCommands,
+    },
     /// Server codegen commands (opt-in Axum scaffolding).
     Server {
         #[command(subcommand)]
         action: ServerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClientCommands {
+    /// Verify checked-in specs, generated output, and Cargo packages without writing.
+    Check {
+        #[arg(short, long, default_value = "openapi-clients.yml")]
+        manifest: PathBuf,
+        /// Limit the run to one named client.
+        #[arg(long)]
+        client: Option<String>,
+        /// Emit a machine-readable JSON report.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Regenerate from checked-in local or vendored specs without network access.
+    Update {
+        #[arg(short, long, default_value = "openapi-clients.yml")]
+        manifest: PathBuf,
+        /// Limit the run to one named client.
+        #[arg(long)]
+        client: Option<String>,
+        /// Emit a machine-readable JSON report.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Fetch remote specs, vendor changes, regenerate, and verify Cargo packages.
+    Sync {
+        #[arg(short, long, default_value = "openapi-clients.yml")]
+        manifest: PathBuf,
+        /// Limit the run to one named client.
+        #[arg(long)]
+        client: Option<String>,
+        /// Emit a machine-readable JSON report.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -245,6 +287,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             quiet,
             json,
         }),
+        Commands::Clients { action } => match action {
+            ClientCommands::Check {
+                manifest,
+                client,
+                json,
+            } => run_client_command(
+                manifest,
+                client,
+                openapi_to_rust::client_sync::ClientMode::Check,
+                json,
+            ),
+            ClientCommands::Update {
+                manifest,
+                client,
+                json,
+            } => run_client_command(
+                manifest,
+                client,
+                openapi_to_rust::client_sync::ClientMode::Update,
+                json,
+            ),
+            ClientCommands::Sync {
+                manifest,
+                client,
+                json,
+            } => run_client_command(
+                manifest,
+                client,
+                openapi_to_rust::client_sync::ClientMode::Sync,
+                json,
+            ),
+        },
         Commands::Server { action } => match action {
             ServerCommands::List {
                 spec,
@@ -268,6 +342,43 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 dry_run,
             } => run_server_remove(selector, config, dry_run),
         },
+    }
+}
+
+fn run_client_command(
+    manifest: PathBuf,
+    client: Option<String>,
+    mode: openapi_to_rust::client_sync::ClientMode,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = openapi_to_rust::client_sync::run_clients(&manifest, mode, client.as_deref())?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for client in &report.clients {
+            if let Some(error) = &client.error {
+                eprintln!("FAILED {:24} {error}", client.name);
+            } else {
+                let drift = match (client.spec_changed, client.output_changed) {
+                    (true, true) => " (remote spec and generated output updated)",
+                    (true, false) => " (remote spec updated; generated output unchanged)",
+                    (false, true) => " (generated output updated)",
+                    (false, false) => "",
+                };
+                println!("OK     {:24} generated and compiled{drift}", client.name);
+            }
+        }
+        println!(
+            "{} client(s), {} changed, {} failed",
+            report.clients.len(),
+            report.changed(),
+            report.failed()
+        );
+    }
+    if report.failed() == 0 {
+        Ok(())
+    } else {
+        Err(format!("{} client(s) failed", report.failed()).into())
     }
 }
 

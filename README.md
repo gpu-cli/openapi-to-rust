@@ -84,8 +84,9 @@ cargo install --locked openapi-to-rust
 ```
 
 This compiles the CLI locally and requires a Rust toolchain. Prebuilt binaries
-are not currently published. If you use the generator as a Rust library instead,
-run `cargo add openapi-to-rust`.
+for Linux x86-64, macOS x86-64/Apple Silicon, and Windows x86-64 are attached
+to each GitHub Release with SHA-256 checksums. If you use the generator as a
+Rust library instead, run `cargo add openapi-to-rust`.
 
 ## Try it in one command
 
@@ -144,6 +145,94 @@ Then:
 
 ```bash
 openapi-to-rust generate --config openapi-to-rust.toml
+```
+
+### Keep a collection of clients current
+
+`openapi-clients.yml` declares checked-in and remotely sourced clients. Each
+entry uses an ordinary generator TOML and names the Cargo package that must
+continue to compile. The TOML's `spec_path` must match the local `path` or
+remote `vendor` path in this manifest.
+
+```yaml
+version: 1
+clients:
+  - name: internal
+    spec:
+      path: openapi/internal.yaml
+    config: clients/internal/openapi-to-rust.toml
+    cargo:
+      manifest_path: Cargo.toml
+      package: internal-api
+      test: true
+
+  - name: runpod-v2
+    spec:
+      url: https://api.runpod.io/v2/openapi.json
+      vendor: specs/runpod/v2.json
+      normalize:
+        strip:
+          - /info/x-build-time
+    config: crates/runpod-api/gen/v2.toml
+    cargo:
+      manifest_path: Cargo.toml
+      package: runpod-api
+```
+
+Use `check` in pull-request CI. It performs no source or generated-file writes
+and tells contributors to run `update` when output is stale. `update` uses only
+checked-in local or vendored documents. `sync` is the networked operation: it
+validates remote documents, ignores configured volatile fields when comparing
+them, vendors meaningful changes, regenerates, and runs Cargo checks.
+
+```bash
+openapi-to-rust clients check
+openapi-to-rust clients update
+openapi-to-rust clients sync
+openapi-to-rust clients sync --client runpod-v2
+```
+
+For an internal checked-in API, keep the Action read-only:
+
+```yaml
+permissions:
+  contents: read
+
+steps:
+  - uses: actions/checkout@v6
+  - uses: dtolnay/rust-toolchain@stable
+  - uses: gpu-cli/openapi-to-rust@v0.12.0
+    with:
+      command: check
+      manifest: openapi-clients.yml
+```
+
+For remote APIs, schedule `sync` and let the Action maintain one stable pull
+request. Successful changes produce a normal PR; generation or compilation
+failures produce a draft PR containing the upstream spec change for diagnosis.
+
+```yaml
+name: Sync OpenAPI clients
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: gpu-cli/openapi-to-rust@v0.12.0
+        with:
+          command: sync
+          manifest: openapi-clients.yml
+          pull-request: true
 ```
 
 ### Select only the client operations you use
@@ -568,6 +657,11 @@ openapi-to-rust generate
 openapi-to-rust generate --config openapi-to-rust.toml
 openapi-to-rust generate --config openapi-to-rust.toml --types-conservative
 openapi-to-rust validate --config openapi-to-rust.toml
+
+# Multi-client lifecycle.
+openapi-to-rust clients check
+openapi-to-rust clients update
+openapi-to-rust clients sync --client runpod-v2
 
 # Server scope management — preserves TOML formatting (toml_edit)
 openapi-to-rust server list                    # all operations

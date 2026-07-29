@@ -4,6 +4,20 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
+## [Unreleased]
+
+### Added
+
+- `openapi-to-rust clients check|update|sync` manages a versioned YAML manifest
+  of checked-in and remote API clients, validates and vendors remote spec
+  changes, verifies generated output, and compiles the configured Cargo target.
+- The repository is directly usable as a GitHub Action. Scheduled remote syncs
+  can create or update a stable pull request, using a draft when generation or
+  compilation fails so upstream drift remains visible.
+- Tagged releases publish checksummed native CLI archives for Linux x86-64,
+  macOS x86-64/Apple Silicon, and Windows x86-64. The Action installs the
+  matching prebuilt instead of compiling the generator.
+
 ## [0.11.0] - 2026-07-27
 
 Nearly everything here was found by generating a client from RunPod's published

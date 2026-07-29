@@ -123,6 +123,14 @@ jobs:
           # Keep cargo-install artifacts inside the target tree restored by
           # rust-cache; the script still isolates and removes its package root.
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/install-smoke
+      - name: Build Action binary override
+        run: cargo build --locked --bin openapi-to-rust
+      - name: Smoke-test the local GitHub Action
+        uses: ./
+        with:
+          binary: ${{ github.workspace }}/target/debug/openapi-to-rust
+          command: check
+          manifest: tests/fixtures/client-sync/openapi-clients.yml
 
   msrv:
     runs-on: ubuntu-latest

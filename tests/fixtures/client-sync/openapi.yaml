@@ -1,0 +1,13 @@
+openapi: 3.1.0
+info:
+  title: Client sync fixture
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    Greeting:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string

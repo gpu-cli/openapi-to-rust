@@ -1,0 +1,11 @@
+version: 1
+clients:
+  - name: fixture
+    spec:
+      path: openapi.yaml
+    config: openapi-to-rust.toml
+    cargo:
+      manifest_path: client/Cargo.toml
+      package: client-sync-fixture
+      all_features: false
+      locked: true

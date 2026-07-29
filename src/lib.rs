@@ -48,6 +48,8 @@ pub mod analysis;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod client_generator;
+#[cfg(feature = "cli")]
+pub mod client_sync;
 pub mod config;
 pub mod error;
 pub mod extensions;

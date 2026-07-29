@@ -1,0 +1,7 @@
+[generator]
+spec_path = "openapi.yaml"
+output_dir = "client/src/generated"
+module_name = "fixture"
+
+[features]
+enable_async_client = false

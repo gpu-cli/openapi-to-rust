@@ -1,0 +1,100 @@
+name: OpenAPI to Rust client sync
+description: Generate, verify, compile, and optionally update pull requests for Rust API clients.
+
+inputs:
+  command:
+    description: check, update, or sync
+    required: false
+    default: check
+  manifest:
+    description: Path to the versioned client manifest
+    required: false
+    default: openapi-clients.yml
+  client:
+    description: Optional client name to run
+    required: false
+    default: ""
+  version:
+    description: Generator version; inferred from a version-tagged Action reference when omitted
+    required: false
+    default: ""
+  binary:
+    description: Existing openapi-to-rust binary to use instead of downloading a release
+    required: false
+    default: ""
+  pull-request:
+    description: Create or update a pull request when sync changes files
+    required: false
+    default: "false"
+  pull-request-branch:
+    description: Stable branch used for automated sync pull requests
+    required: false
+    default: openapi-sync/clients
+  pull-request-title:
+    description: Pull request title
+    required: false
+    default: "chore: sync generated OpenAPI clients"
+  pull-request-labels:
+    description: Newline-separated pull request labels
+    required: false
+    default: openapi-sync
+
+outputs:
+  changed:
+    description: Number of clients whose remote specification or generated output changed
+    value: ${{ steps.run.outputs.changed }}
+  failed:
+    description: Number of clients that failed generation or compilation
+    value: ${{ steps.run.outputs.failed }}
+  report:
+    description: Path to the JSON report
+    value: ${{ steps.run.outputs.report }}
+  pull-request-url:
+    description: Created or updated pull request URL
+    value: ${{ steps.pr.outputs.pull-request-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install openapi-to-rust
+      id: install
+      shell: bash
+      env:
+        INPUT_BINARY: ${{ inputs.binary }}
+        INPUT_VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action-install.sh"
+
+    - name: Generate and verify clients
+      id: run
+      shell: bash
+      env:
+        OPENAPI_TO_RUST_BIN: ${{ steps.install.outputs.binary }}
+        CLIENT_COMMAND: ${{ inputs.command }}
+        CLIENT_MANIFEST: ${{ inputs.manifest }}
+        CLIENT_NAME: ${{ inputs.client }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action-run.sh"
+
+    - name: Create or update sync pull request
+      id: pr
+      if: ${{ inputs.pull-request == 'true' && steps.run.outputs.changed != '0' }}
+      uses: peter-evans/create-pull-request@v8
+      with:
+        branch: ${{ inputs.pull-request-branch }}
+        title: ${{ inputs.pull-request-title }}
+        commit-message: ${{ inputs.pull-request-title }}
+        labels: ${{ inputs.pull-request-labels }}
+        draft: ${{ steps.run.outputs.exit_code != '0' }}
+        body: |
+          Automated OpenAPI client synchronization.
+
+          The workflow generated each changed client and ran its configured Cargo checks.
+          A draft pull request indicates that generation or compilation needs attention.
+
+    - name: Fail when a client did not verify
+      if: ${{ steps.run.outputs.exit_code != '0' }}
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+      run: exit "$EXIT_CODE"
