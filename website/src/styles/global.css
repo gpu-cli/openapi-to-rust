@@ -28,6 +28,7 @@
     --code-text: #f4efe5;
     --code-muted: #97a09d;
     --shell: 1180px;
+    --wide-shell: 1440px;
     --reading: 72ch;
     --radius: 8px;
     --shadow: 0 18px 45px rgb(16 21 33 / 10%);
@@ -347,7 +348,10 @@
 
   .prose { max-width: var(--reading); }
   .prose-wide { min-width: 0; max-width: none; }
-  .prose-wide > :where(h2, h3, p, ul, ol, blockquote, .callout, .verification-note) { max-width: var(--reading); }
+  .prose-wide > :where(h2, h3, p, ul, ol, blockquote, .callout, .verification-note) {
+    max-width: var(--reading);
+    margin-inline-start: clamp(0px, calc((100vw - var(--shell) - 2rem) / 2), 130px);
+  }
   .prose > * + * { margin-top: 1.2rem; }
   .prose h2 { margin-top: 3.5rem; font-size: clamp(1.9rem, 4vw, 2.8rem); }
   .prose h3 { margin-top: 2.3rem; }
@@ -385,7 +389,7 @@
   .on-this-page a:hover { color: var(--rust-dark); }
 
   .doc-shell-wide {
-    width: min(calc(100% - 2rem), 1440px);
+    width: min(calc(100% - 2rem), var(--wide-shell));
     grid-template-columns: minmax(0, 1fr) 240px;
     gap: clamp(2rem, 4vw, 4rem);
   }
