@@ -860,7 +860,10 @@ impl CodeGenerator {
             #operation_methods
         };
 
-        let syntax_tree = syn::parse2::<syn::File>(generated).map_err(|e| {
+        let syntax_tree = syn::parse2::<syn::File>(generated.clone()).map_err(|e| {
+            if let Ok(dump) = std::env::var("OATR_DUMP_TOKENS_ON_PARSE_ERROR") {
+                let _ = std::fs::write(&dump, generated.to_string());
+            }
             GeneratorError::CodeGenError(format!("Failed to parse HTTP client code: {e}"))
         })?;
 
@@ -3090,7 +3093,7 @@ impl CodeGenerator {
         rust_type_name(s)
     }
 
-    fn to_rust_field_name(&self, s: &str) -> String {
+    pub(crate) fn to_rust_field_name(&self, s: &str) -> String {
         // Track sign / leading-non-alpha so e.g. `+1` and `-1` produce
         // distinct field names instead of both collapsing to `field_1`
         // (observed in github.json's reactions schemas).

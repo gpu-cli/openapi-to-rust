@@ -83,6 +83,17 @@ pub fn reachable_schemas_with_roots(
             {
                 seed(name, &mut queue, &mut keep);
             }
+            if let Some(
+                QuerySerialization::FormExplodedArray {
+                    item_type: crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. },
+                }
+                | QuerySerialization::FormArray {
+                    item_type: crate::analysis::ArrayItemType::FlatStructRef { schema_name, .. },
+                },
+            ) = &p.query_serialization
+            {
+                seed(schema_name, &mut queue, &mut keep);
+            }
         }
     }
     for root in extra_roots {
@@ -1948,33 +1959,83 @@ impl<'a> ServerCodegen<'a> {
             field_idents.push(field_ident.clone());
 
             let decoder = match &parameter.query_serialization {
-                Some(QuerySerialization::FormExplodedArray { .. }) => quote! {
-                    let #field_ident = {
-                        let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
-                        let raw_values: Vec<&str> = __pairs
-                            .iter()
-                            .filter(|(key, _)| key == #wire_name)
-                            .map(|(_, value)| value.as_str())
-                            .collect();
-                        if empty_marker && !raw_values.is_empty() {
-                            return Err(format!(
-                                "query array `{}` cannot combine values with its empty marker",
-                                #wire_name,
-                            ));
+                Some(QuerySerialization::FormExplodedArray { item_type }) => {
+                    if let crate::analysis::ArrayItemType::FlatStructRef {
+                        property_names, ..
+                    } = item_type
+                    {
+                        // AWS query-protocol flat structures arrive as
+                        // `param.N.Prop=value`; group by N and decode each
+                        // group as one JSON object so serde fills the struct.
+                        quote! {
+                            let #field_ident = {
+                                let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                                let prefix = concat!(#wire_name, ".");
+                                let mut groups: ::std::collections::BTreeMap<String, ::serde_json::Map<String, ::serde_json::Value>> = ::std::collections::BTreeMap::new();
+                                let allowed = [#(#property_names),*];
+                                for (key, value) in &__pairs {
+                                    let Some(rest) = key.strip_prefix(prefix) else { continue };
+                                    let Some((index, property)) = rest.split_once('.') else { continue };
+                                    if !allowed.contains(&property) {
+                                        continue;
+                                    }
+                                    groups
+                                        .entry(index.to_string())
+                                        .or_default()
+                                        .insert(property.to_string(), ::serde_json::Value::String(value.clone()));
+                                }
+                                if empty_marker && !groups.is_empty() {
+                                    return Err(format!(
+                                        "query array `{}` cannot combine values with its empty marker",
+                                        #wire_name,
+                                    ));
+                                }
+                                if empty_marker {
+                                    Some(Vec::new())
+                                } else if groups.is_empty() {
+                                    None
+                                } else {
+                                    let mut values = Vec::with_capacity(groups.len());
+                                    for (_, object) in groups {
+                                        values.push(
+                                            ::serde_json::from_value(::serde_json::Value::Object(object))
+                                                .map_err(|error| format!("invalid query structure for `{}`: {error}", #wire_name))?,
+                                        );
+                                    }
+                                    Some(values)
+                                }
+                            };
                         }
-                        if empty_marker {
-                            Some(Vec::new())
-                        } else if raw_values.is_empty() {
-                            None
-                        } else {
-                            let mut values = Vec::with_capacity(raw_values.len());
-                            for raw in raw_values {
-                                values.push(__decode_query_scalar(raw, #wire_name)?);
-                            }
-                            Some(values)
+                    } else {
+                        quote! {
+                            let #field_ident = {
+                                let empty_marker = __query_empty_marker(&__pairs, #wire_name)?;
+                                let raw_values: Vec<&str> = __pairs
+                                    .iter()
+                                    .filter(|(key, _)| key == #wire_name)
+                                    .map(|(_, value)| value.as_str())
+                                    .collect();
+                                if empty_marker && !raw_values.is_empty() {
+                                    return Err(format!(
+                                        "query array `{}` cannot combine values with its empty marker",
+                                        #wire_name,
+                                    ));
+                                }
+                                if empty_marker {
+                                    Some(Vec::new())
+                                } else if raw_values.is_empty() {
+                                    None
+                                } else {
+                                    let mut values = Vec::with_capacity(raw_values.len());
+                                    for raw in raw_values {
+                                        values.push(__decode_query_scalar(raw, #wire_name)?);
+                                    }
+                                    Some(values)
+                                }
+                            };
                         }
-                    };
-                },
+                    }
+                }
                 Some(QuerySerialization::FormArray { .. }) => quote! {
                     let #field_ident = match (
                         __query_one(&__pairs, #wire_name)?,

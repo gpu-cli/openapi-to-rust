@@ -1703,19 +1703,56 @@ impl CodeGenerator {
                     }
                     continue;
                 }
-                Some(QuerySerialization::FormExplodedArray { .. }) => {
-                    // `?tags=a&tags=b` — one pair per element.
+                Some(QuerySerialization::FormExplodedArray { item_type }) => {
+                    // `?tags=a&tags=b` — one pair per element; flat structures
+                    // expand AWS query-protocol style as `?tags.1.Key=k&tags.1.Value=v`.
+                    let flat_struct = match item_type {
+                        crate::analysis::ArrayItemType::FlatStructRef {
+                            property_names, ..
+                        } => Some(property_names.clone()),
+                        _ => None,
+                    };
+                    let emit_items = if let Some(property_names) = flat_struct {
+                        let pushes = property_names
+                            .iter()
+                            .map(|wire_name| {
+                                // Wire names such as `Type` land on struct
+                                // fields via the same keyword-escaping the
+                                // model generator uses (`r#type`).
+                                let field_ident = CodeGenerator::to_field_ident(
+                                    &self.to_rust_field_name(wire_name),
+                                );
+                                quote! {
+                                    query_params.push((
+                                        format!("{}.{}.{}", #param_key, index, #wire_name),
+                                        item.#field_ident.to_string(),
+                                    ));
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        quote! {
+                            for (index, item) in v.iter().enumerate() {
+                                let index = index + 1;
+                                #(#pushes)*
+                            }
+                        }
+                    } else {
+                        quote! {
+                            for item in v {
+                                query_params.push((#param_key.to_string(), item.to_string()));
+                            }
+                        }
+                    };
                     if param.required {
                         param_building.push(quote! {
-                            if #param_name.is_empty() {
+                            let v = #param_name;
+                            if v.is_empty() {
                                 query_params.push((
                                     format!("{}[]", #param_key),
                                     String::new(),
                                 ));
                             } else {
-                                for item in #param_name {
-                                    query_params.push((#param_key.to_string(), item.to_string()));
-                                }
+                                #emit_items
                             }
                         });
                     } else {
@@ -1727,9 +1764,7 @@ impl CodeGenerator {
                                         String::new(),
                                     ));
                                 } else {
-                                    for item in v {
-                                        query_params.push((#param_key.to_string(), item.to_string()));
-                                    }
+                                    #emit_items
                                 }
                             }
                         });
@@ -2092,6 +2127,11 @@ impl CodeGenerator {
                     let rust_name = self.to_rust_type_name(schema_name);
                     syn::parse_str(&rust_name)
                         .unwrap_or_else(|_| panic!("invalid schema item type `{rust_name}`"))
+                }
+                ArrayItemType::FlatStructRef { schema_name, .. } => {
+                    let rust_name = self.to_rust_type_name(schema_name);
+                    syn::parse_str(&rust_name)
+                        .unwrap_or_else(|_| panic!("invalid struct item type `{rust_name}`"))
                 }
             };
             return quote! { Vec<#item_ty> };
