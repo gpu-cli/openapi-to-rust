@@ -34,8 +34,10 @@ We originally built this internally at [GPU CLI](https://gpu-cli.sh) to generate
 
 The repository contains **56 real-world specs**. The supported OpenAPI corpus is
 55 specs (one Gitea document is Swagger 2.0 and intentionally skipped). Pull
-requests compile-check the OpenAI and Anthropic production specs; a scheduled
-and manually runnable CI tier checks all 55 OpenAPI specs.
+requests compile-check the OpenAI and Anthropic production specs. The full tier
+generates all 55 and compile-checks 54; Microsoft Graph is generate-only in CI
+because its generated crate exceeds runner memory, and can be force-checked on
+a larger local machine.
 
 Release history and breaking changes live in the [changelog](CHANGELOG.md).
 
@@ -44,9 +46,9 @@ Release history and breaking changes live in the [changelog](CHANGELOG.md).
 - **OpenAPI 3.0 and 3.1, with experimental 3.2 support** — handles `type: ["X", "null"]`, `anyOf`/`oneOf`/`allOf`, discriminated unions, `const`, inline objects, and accepts paths-less specs (components-only or webhooks-only).
 - **Generates clients *and* servers** — pick client calls with `[client]`, hosted operations with `[server]`, or keep the default all-operation client. Both share the same `types.rs`.
 - **Typed scalars** — `format: date-time` → `chrono::DateTime<chrono::Utc>`, `uri` → `url::Url`, `binary` → `bytes::Bytes`, `uuid` → `uuid::Uuid`, `byte` → `Vec<u8>` + base64 codec, unsigned-int formats → `u32`/`u64`. All opt-out per-format in TOML.
-- **Async HTTP client** — typed methods per operation, retry/backoff via `reqwest-retry`, distributed tracing via `reqwest-tracing`, Bearer / API-key / custom auth (honored at runtime), default headers, path-template percent-encoding.
-- **Axum 0.8 server scaffolding** — trait per tag, status-code-typed response enum, SSE-ready `OkStream` variant, OpenAPI request validation, and a combined `build_router(...)` factory for multi-tag selections.
-- **SSE streaming clients** — first-class Server-Sent Events with reconnection.
+- **Async HTTP client** — typed JSON, text, binary, and multipart operations; bounded responses; retry/backoff via `reqwest-retry`; distributed tracing via `reqwest-tracing`; Bearer / API-key / custom auth; default headers; path-template percent-encoding.
+- **Axum 0.8 server scaffolding** — trait per tag, status-code-typed response enum, typed multipart/raw bodies, SSE-ready `OkStream` variant, OpenAPI request validation, and a combined `build_router(...)` factory for multi-tag selections.
+- **SSE streaming clients** — raw or typed Server-Sent Events, preserved event metadata, bounded error bodies, reconnect backoff, server `retry:` support, and `Last-Event-ID` resumption.
 - **Smart discriminated unions** — auto-detects implicit discriminators from `const` properties, falls back to `#[serde(untagged)]` when a union mixes scalar and object branches (e.g. `"auto"` *or* a tagged object).
 - **Per-operation typed errors** — each operation gets its own error enum with `Status4xx(...)` typed bodies; you can match on the exact API error shape.
 - **Typed `additionalProperties`** — extra keys become `BTreeMap<String, T>` instead of falling to `serde_json::Value` when the spec gives a value-type schema.
@@ -263,7 +265,8 @@ Two complete examples are in the repo:
 |------|-------------|
 | `types.rs` | All struct/enum definitions from OpenAPI schemas |
 | `client.rs` | Async HTTP client with typed methods per operation (when `enable_async_client`) |
-| `streaming.rs` | SSE streaming **client** with event parsing (when configured) |
+| `sse.rs` | Reusable SSE transport, framing, typed/raw decoding, and reconnection support (when SSE is enabled) |
+| `streaming.rs` | Endpoint-specific SSE request methods backed by `sse.rs` (when configured) |
 | `server/mod.rs` | Module re-exports for the server (when `[server]` is set) |
 | `server/api.rs` | `trait <Tag>Api { async fn <op>(&self, …) -> <Op>Response; }` per tag |
 | `server/errors.rs` | Status-typed response enums with JSON, bodyless, wildcard/default, and status-correct SSE variants plus `IntoResponse` |
@@ -406,6 +409,11 @@ match resp {
 
 ## Streaming (SSE)
 
+SSE support has two layers: `StreamingConfig` selects and types operations at
+generation time, while generated `sse.rs` owns the transport and parser. The
+transport is also usable directly for APIs whose event payloads are only known
+at runtime.
+
 ```rust
 use openapi_to_rust::streaming::*;
 
@@ -435,12 +443,35 @@ let streaming_config = StreamingConfig {
 Generated event types are tagged enums you can match on directly:
 
 ```rust
-match serde_json::from_str::<ResponseStreamEvent>(&data)? {
-    ResponseStreamEvent::TextDelta(d)  => out.push_str(&d.delta),
-    ResponseStreamEvent::Completed(_)  => break,
-    _                                   => {}
+use futures_util::StreamExt;
+use generated::sse::{SseClient, SseReconnectOptions};
+use generated::types::ResponseStreamEvent;
+
+let client = SseClient::new()
+    .with_reconnect_options(SseReconnectOptions::default());
+let request = client
+    .post("https://api.example.com/v1/responses")
+    .bearer_auth(api_key)
+    .json(&request_body);
+let mut events = client
+    .stream_json_reconnecting::<ResponseStreamEvent>(request)
+    .await?;
+
+while let Some(event) = events.next().await {
+    let event = event?;
+    // event.event, event.id, and event.retry preserve SSE transport metadata.
+    match event.data {
+        ResponseStreamEvent::TextDelta(d) => out.push_str(&d.delta),
+        ResponseStreamEvent::Completed(_) => break,
+        _ => {}
+    }
 }
 ```
+
+Reconnecting streams honor a server-provided `retry:` delay and send the latest
+non-empty event ID as `Last-Event-ID`. Use `stream_raw` or
+`stream_raw_reconnecting` when payloads are not JSON; `stream` retains the
+payload-only typed interface for callers that do not need transport metadata.
 
 The generator also **auto-detects** streaming endpoints: any response declaring `content: text/event-stream` flips `supports_streaming = true` automatically. Explicit `[[streaming.endpoints]]` config still wins when present.
 
@@ -699,10 +730,14 @@ The compile tiers are intentionally different:
 - Every pull request and push to `main` generates all 55 supported OpenAPI
   specs, then compile-checks the Anthropic and OpenAI production specs against
   each generated `REQUIRED_DEPS.toml`.
-- Weekly scheduled CI and manual workflow runs compile-check all 55 supported
-  OpenAPI specs. The bundled Gitea Swagger 2.0 document is reported as skipped.
+- Weekly scheduled CI and manual workflow runs generate all 55 supported
+  OpenAPI specs and compile-check 54. Microsoft Graph is reported as
+  generate-only because its generated crate exceeds the 16 GB runner; the
+  bundled Gitea Swagger 2.0 document is reported as skipped.
 - Local `scripts/spec-compile.sh` runs the same full tier; pass spec names as
-  arguments for a smaller targeted run.
+  arguments for a smaller targeted run. On a machine with sufficient memory,
+  `SPEC_COMPILE_FORCE_CHECK=1 scripts/spec-compile.sh microsoft-graph` also
+  compile-checks Microsoft Graph (about 19 GB peak RSS on the current corpus).
 - Every pull request also starts the generated OpenAI Responses and Anthropic
   Messages Axum examples on loopback and exercises them through pinned official
   Python SDKs. The compatibility gates cover unary and streaming responses,

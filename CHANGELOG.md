@@ -4,6 +4,88 @@ All notable changes are recorded here. This project follows semantic versioning,
 with one pre-1.0 qualification: a minor release may change generated Rust APIs
 when correcting output that was wrong or incomplete on the wire.
 
+## [Unreleased]
+
+## [0.12.0] - 2026-07-29
+
+This release broadens the set of real-world protocols that generated clients
+and servers can represent, and replaces the old inline SSE helpers with a
+reusable typed transport. Regenerated clients may have new request/response
+types, a new `ApiError::raw_body` field, and newer HTTP dependencies; review
+generated-code diffs when upgrading.
+
+### Added
+
+- SSE-enabled output now includes a standalone `sse.rs` transport with
+  `SseClient`, raw `SseEvent<String>` streams, typed JSON `SseEvent<T>` streams,
+  and the backwards-compatible payload-only stream. Event name, ID, and
+  server-provided `retry:` delay remain available to callers.
+- SSE streams can reconnect with bounded exponential backoff, honor the
+  server's `retry:` value, and send the most recently observed event ID as
+  `Last-Event-ID`. HTTP 429, 5xx, connection failures, and early EOF are
+  retryable; invalid content types and other terminal errors are not. The
+  generated runtime was exercised against live OpenAI- and
+  Anthropic-compatible streaming endpoints.
+- Flat `multipart/form-data` object schemas generate typed reqwest clients and
+  Axum extractors, including required and optional binary/scalar fields,
+  configured body limits, validation, and deterministic rejection of shapes
+  the generator cannot encode symmetrically.
+- Generated clients and servers support bounded binary and text request bodies,
+  including `application/octet-stream`, `application/pdf`, `text/plain`, XML,
+  and `application/jwt`. Non-JSON responses preserve exact bytes, and
+  `ApiError<E>::raw_body` exposes the unmodified response alongside its lossy
+  text rendering.
+- Buffered client responses and SSE error responses have an 8 MiB default
+  limit, configurable through `http_client.max_response_body_bytes` and the
+  generated runtime builders. Oversized bodies return `ResponseTooLarge`
+  without buffering beyond the limit.
+- Component-level Request Body Object references are resolved during operation
+  analysis, so `requestBody: { $ref: ... }` participates in normal client and
+  server generation.
+- The checked-in corpus now includes Storyden, and the documentation includes a
+  dated Progenitor workflow comparison with a reproducible compile benchmark.
+
+### Changed
+
+- Generated HTTP dependencies now target `reqwest` 0.13,
+  `reqwest-middleware` 0.5, `reqwest-retry` 0.9, `reqwest-tracing` 0.7, and
+  `thiserror` 2. Required reqwest and middleware features are inferred from the
+  selected operations, including query, form, multipart, streaming, and JSON
+  usage; rustls builds use reqwest 0.13's `rustls` feature.
+- AWS query-protocol operations can use bounded nested object/array form
+  encodings, while simple array headers and path parameters with literal
+  prefixes or suffixes now have matching typed client/server serialization.
+- Text and binary response media produce `String` and `bytes::Bytes` values
+  instead of being forced through JSON or lossy UTF-8 conversion. Generated
+  server response variants retain their declared media type.
+- The real-world corpus contains 56 documents: 55 supported OpenAPI specs and
+  one intentionally skipped Swagger 2.0 Gitea document. The ordinary full tier
+  compiles 54 and reports Microsoft Graph as generate-only because its generated
+  crate exceeds CI memory; `SPEC_COMPILE_FORCE_CHECK=1` enables local
+  compile-verification on larger machines.
+
+### Fixed
+
+- Bodyless operations that declare request-content semantics send
+  `Content-Length: 0`; ordinary methods without content semantics remain
+  unchanged, and optional bodies add the header only when absent.
+- Media selection recognizes PDF as binary and XML, `+xml`, and JWT as text,
+  prefers schema-bearing vendor JSON over schema-less canonical JSON, and
+  rejects wildcard or proprietary request media instead of emitting an invalid
+  `Content-Type`.
+- Recursive annotation-only `allOf` references are aliases again, avoiding
+  expansion overflows, and generated server code consistently uses canonical
+  Rust model names while avoiding response-enum name collisions.
+- Spec parsing tolerates literal tabs in YAML block-scalar prose and ignores
+  extension scalars parked inside `paths`. AWS route fragments are stripped and
+  synthetic webhook paths receive a leading slash.
+- Server-side validation normalizes common Java POSIX, ECMA Unicode, and legacy
+  octal regex syntax; unsupported look-around/backreference patterns no longer
+  abort generation. Component keys that resemble JSON Schema keywords are
+  namespaced in generated validation bundles.
+- Portable scratch directories and complete generated dependency fragments
+  keep the expanded corpus and packaged examples compiling on clean CI runners.
+
 ## [0.11.0] - 2026-07-27
 
 Nearly everything here was found by generating a client from RunPod's published
@@ -237,7 +319,9 @@ would have passed any amount of spec-diffing.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.8.0...v0.9.0
