@@ -19,6 +19,7 @@ const toc = [
   canonicalPath="/compare/progenitor"
   category="Comparison"
   updated="2026-07-28"
+  wideContent
   {toc}
 >
   <div class="callout">
@@ -41,7 +42,7 @@ const toc = [
   <p>
     This table compares documented project scope as reviewed on July 28, 2026. “Not a documented project goal” is intentionally different from “unsupported.”
   </p>
-  <p class="scroll-hint" id="comparison-scroll-hint">Scroll horizontally to compare both generators.</p>
+  <p class="scroll-hint" id="comparison-scroll-hint">On narrower screens, scroll horizontally to compare both generators.</p>
   <div class="table-wrap comparison-table" tabindex="0" aria-describedby="comparison-scroll-hint">
     <table>
       <caption>Rust generator comparison: openapi-to-rust 0.11.0 and Progenitor 0.14.0</caption>
@@ -140,11 +141,13 @@ const toc = [
   .benchmark-table table { min-width: 700px; }
   .comparison-table th:first-child { position: sticky; z-index: 1; left: 0; box-shadow: 1px 0 0 var(--line); }
   .comparison-table thead th:first-child { z-index: 2; }
-  .scroll-hint { margin-bottom: -1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; }
+  .scroll-hint { color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; }
+  .scroll-hint + .comparison-table { margin-top: 0.75rem; }
   .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-block: 2rem; }
   .decision-grid > div { border: 1px solid var(--ink); border-radius: 5px; background: var(--white); padding: 1.3rem; }
   .decision-grid h3 { margin-top: 0; font-size: 1.25rem; }
   .decision-grid ul { margin-top: 1rem; }
   .verification-note { max-width: var(--reading); border-top: 1px solid var(--line); padding-top: 1rem; font-family: var(--font-mono); font-size: 0.76rem; }
   @media (max-width: 720px) { .decision-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 560px) { .comparison-table th:first-child { min-width: 140px; } .comparison-table th, .comparison-table td { padding: 0.75rem; } }
 </style>

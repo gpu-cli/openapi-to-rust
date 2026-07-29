@@ -346,6 +346,8 @@
   }
 
   .prose { max-width: var(--reading); }
+  .prose-wide { min-width: 0; max-width: none; }
+  .prose-wide > :where(h2, h3, p, ul, ol, blockquote, .callout, .verification-note) { max-width: var(--reading); }
   .prose > * + * { margin-top: 1.2rem; }
   .prose h2 { margin-top: 3.5rem; font-size: clamp(1.9rem, 4vw, 2.8rem); }
   .prose h3 { margin-top: 2.3rem; }
@@ -381,6 +383,12 @@
   .on-this-page ol { display: grid; gap: 0.55rem; list-style: none; }
   .on-this-page a { color: var(--muted); font-size: 0.86rem; text-decoration: none; }
   .on-this-page a:hover { color: var(--rust-dark); }
+
+  .doc-shell-wide {
+    width: min(calc(100% - 2rem), 1440px);
+    grid-template-columns: minmax(0, 1fr) 240px;
+    gap: clamp(2rem, 4vw, 4rem);
+  }
 
   .mobile-toc { display: none; }
 
@@ -520,6 +528,20 @@
   .mobile-toc a { color: var(--rust-dark); font-size: 0.88rem; }
   .footer-grid { grid-template-columns: 1fr 1fr; }
   .footer-grid > div:first-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 1280px) {
+  .doc-shell-wide { grid-template-columns: minmax(0, 1fr); }
+  .doc-shell-wide .on-this-page { display: none; }
+  .doc-shell-wide .mobile-toc {
+    display: block;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--white);
+  }
+  .doc-shell-wide .mobile-toc summary { min-height: 48px; cursor: pointer; padding: 0.75rem 1rem; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
+  .doc-shell-wide .mobile-toc ol { display: grid; gap: 0.45rem; border-top: 1px solid var(--line); padding: 0.9rem 1rem 1rem 2.2rem; }
+  .doc-shell-wide .mobile-toc a { color: var(--rust-dark); font-size: 0.88rem; }
 }
 
 @media (max-width: 560px) {

@@ -20,6 +20,7 @@ const toc = [
   lead="Both projects generate Rust from OpenAPI, but they optimize for different jobs. This dated comparison separates OpenAPI Generator’s rust client and rust-axum server targets from the Rust-focused openapi-to-rust workflow."
   canonicalPath="/compare/openapi-generator"
   category="Comparison"
+  wideContent
   {toc}
 >
   <span slot="h1"><span class="nowrap">openapi-to-rust</span> vs OpenAPI Generator for Rust</span>
@@ -44,7 +45,7 @@ const toc = [
     The OpenAPI Generator columns below summarize its published generator documentation as reviewed on July 15, 2026.
     Those matrices can lag implementation, so links to the primary pages are included below the table.
   </p>
-  <p class="scroll-hint" id="comparison-scroll-hint">Scroll horizontally to compare all 3 generators.</p>
+  <p class="scroll-hint" id="comparison-scroll-hint">On narrower screens, scroll horizontally to compare all 3 generators.</p>
   <div class="table-wrap comparison-table" tabindex="0" aria-describedby="comparison-scroll-hint">
     <table>
       <caption>Rust code generator comparison, last verified July 15, 2026</caption>
@@ -153,7 +154,8 @@ openapi-generator-cli generate \\
   .comparison-table table { min-width: 920px; }
   .comparison-table th:first-child { position: sticky; z-index: 1; left: 0; box-shadow: 1px 0 0 var(--line); }
   .comparison-table thead th:first-child { z-index: 2; }
-  .scroll-hint { margin-bottom: -1.25rem; color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; }
+  .scroll-hint { color: var(--muted); font-family: var(--font-mono); font-size: 0.78rem; }
+  .scroll-hint + .comparison-table { margin-top: 0.75rem; }
   .comparison-commands { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   .decision-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-block: 2rem; }
   .decision-grid > div { border: 1px solid var(--ink); border-radius: 5px; background: var(--white); padding: 1.3rem; }
@@ -161,4 +163,5 @@ openapi-generator-cli generate \\
   .decision-grid ul { margin-top: 1rem; }
   .verification-note { max-width: var(--reading); border-top: 1px solid var(--line); padding-top: 1rem; font-family: var(--font-mono); font-size: 0.76rem; }
   @media (max-width: 720px) { .comparison-commands, .decision-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 560px) { .comparison-table th:first-child { min-width: 140px; } .comparison-table th, .comparison-table td { padding: 0.75rem; } }
 </style>

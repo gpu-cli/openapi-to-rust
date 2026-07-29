@@ -17,6 +17,8 @@ interface Props {
   toc?: TocItem[];
   /** ISO date (YYYY-MM-DD) of the last substantive review; omit when unknown. */
   updated?: string;
+  /** Allow data-heavy children such as tables to use a wider content track. */
+  wideContent?: boolean;
 }
 
 const {
@@ -28,6 +30,7 @@ const {
   category = "Documentation",
   toc = [],
   updated,
+  wideContent = false,
 } = Astro.props;
 
 const absoluteUrl = new URL(canonicalPath, Astro.site).toString();
@@ -93,7 +96,7 @@ const next = currentIndex >= 0 && currentIndex < docsOrder.length - 1 ? docsOrde
     <p class="lead">{lead}</p>
     {updatedDisplay && <p class="last-updated">Last reviewed {updatedDisplay}</p>}
   </header>
-  <div class="shell doc-shell">
+  <div class:list={["shell", "doc-shell", { "doc-shell-wide": wideContent }]}>
     {toc.length > 0 && (
       <details class="mobile-toc">
         <summary>On This Page</summary>
@@ -102,7 +105,7 @@ const next = currentIndex >= 0 && currentIndex < docsOrder.length - 1 ? docsOrde
         </ol>
       </details>
     )}
-    <article class="prose">
+    <article class:list={["prose", { "prose-wide": wideContent }]}>
       <slot />
       {(previous || next) && (
         <nav class="doc-pagination" aria-label="Documentation pages">
