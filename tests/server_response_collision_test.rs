@@ -128,7 +128,6 @@ serde = { version = "1", features = ["derive"] }
     let output = Command::new("cargo")
         .arg("check")
         .arg("--quiet")
-        .arg("--offline")
         .current_dir(temp.path())
         .output()
         .unwrap();

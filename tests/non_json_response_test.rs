@@ -207,7 +207,7 @@ tokio = {{ version = "1", features = ["macros", "net", "rt-multi-thread"] }}
     .unwrap();
 
     let output = Command::new("cargo")
-        .args(["test", "--quiet", "--offline"])
+        .args(["test", "--quiet"])
         .current_dir(temp.path())
         .env(
             "CARGO_BUILD_BUILD_DIR",

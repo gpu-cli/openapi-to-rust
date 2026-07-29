@@ -368,7 +368,6 @@ serde_urlencoded = "0.7"
     let output = Command::new("cargo")
         .arg("test")
         .arg("--quiet")
-        .arg("--offline")
         .current_dir(temp.path())
         .env(
             "CARGO_BUILD_BUILD_DIR",
