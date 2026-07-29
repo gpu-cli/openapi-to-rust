@@ -323,9 +323,9 @@ pub fn collect_generated_dep_requirements<'a>(
         if uses("reqwest::multipart") {
             features.push("multipart");
         }
-        // `Response::bytes_stream()`, used by generated SSE operations, is
-        // gated behind reqwest's `stream` feature.
-        if uses(".bytes_stream()") {
+        // Incremental response streaming APIs used by generated SSE operations
+        // are gated behind reqwest's `stream` feature.
+        if uses(".bytes_stream()") || uses(".chunk().await") {
             features.push("stream");
         }
         dependencies.push(
@@ -361,6 +361,9 @@ pub fn collect_generated_dep_requirements<'a>(
     }
     if uses("futures_util::") {
         dependencies.push(DepRequirement::new("futures-util", "0.3"));
+    }
+    if uses("futures_timer::") {
+        dependencies.push(DepRequirement::new("futures-timer", "3"));
     }
     if uses("futures_core::") {
         dependencies.push(DepRequirement::new("futures-core", "0.3"));

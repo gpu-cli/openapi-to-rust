@@ -131,11 +131,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "stream": true,
             "max_tokens": 16
         }));
-    let mut anthropic = client.stream::<serde_json::Value>(anthropic_request).await?;
+    let mut anthropic = client
+        .stream_json::<serde_json::Value>(anthropic_request)
+        .await?;
     let mut event_types = std::collections::BTreeSet::new();
     while let Some(event) = anthropic.next().await {
         let event = event?;
-        if let Some(event_type) = event.get("type").and_then(serde_json::Value::as_str) {
+        if let Some(event_type) = event
+            .data
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+        {
+            if event.event != event_type {
+                return Err(format!(
+                    "Anthropic SSE event name {:?} did not match typed payload {event_type:?}",
+                    event.event
+                )
+                .into());
+            }
             event_types.insert(event_type.to_string());
         }
     }

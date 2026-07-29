@@ -156,15 +156,16 @@ mod tests {
     use super::generated::streaming::{
         StreamEventsStreamingClient, StreamingClient, StreamingError,
     };
-    use super::generated::sse::SseClient;
+    use super::generated::sse::{SseClient, SseReconnectOptions};
     use futures_util::StreamExt;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn spawn_chunked_server() -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            for _ in 0..9 {
+            for _ in 0..10 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 loop {
@@ -235,6 +236,46 @@ mod tests {
         address
     }
 
+    async fn spawn_reconnect_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0_u8; 1024];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                    if read == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                if attempt == 0 {
+                    assert!(!request.contains("last-event-id:"));
+                } else {
+                    assert!(request.contains("last-event-id: 42"), "{request}");
+                }
+
+                let body = if attempt == 0 {
+                    b"id: 42\nretry: 1\nevent: update\ndata: {\"sequence\":1}\n\n".as_slice()
+                } else {
+                    b"id: 43\nevent: update\ndata: {\"sequence\":2}\n\ndata: [DONE]\n\n".as_slice()
+                };
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                socket
+                    .write_all(format!("{:X}\r\n", body.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(body).await.unwrap();
+                socket.write_all(b"\r\n0\r\n\r\n").await.unwrap();
+            }
+        });
+        (address, task)
+    }
+
     macro_rules! assert_too_large {
         ($future:expr) => {
             match $future.await.unwrap_err() {
@@ -281,6 +322,36 @@ mod tests {
             serde_json::json!({ "message": "first" })
         );
         assert!(stream.next().await.is_none());
+
+        let request = sse_client.get(format!("http://{address}/sse-chunks"));
+        let mut raw = sse_client.stream_raw(request).await.unwrap();
+        assert_eq!(raw.next().await.unwrap().unwrap().event, "ping");
+        assert_eq!(raw.next().await.unwrap().unwrap().event, "message");
+        assert_eq!(raw.next().await.unwrap().unwrap().data, "[DONE]");
+        assert!(raw.next().await.is_none());
+
+        let (reconnect_address, reconnect_task) = spawn_reconnect_server().await;
+        let reconnecting = SseClient::new().with_reconnect_options(SseReconnectOptions {
+            max_retries: 1,
+            initial_retry_delay: Duration::ZERO,
+            max_retry_delay: Duration::from_millis(10),
+            backoff_multiplier: 1.0,
+        });
+        let request = reconnecting.get(format!("http://{reconnect_address}/events"));
+        let mut events = reconnecting
+            .stream_json_reconnecting::<serde_json::Value>(request)
+            .await
+            .unwrap();
+        let first = events.next().await.unwrap().unwrap();
+        assert_eq!(first.event, "update");
+        assert_eq!(first.id.as_deref(), Some("42"));
+        assert_eq!(first.retry, Some(Duration::from_millis(1)));
+        assert_eq!(first.data, serde_json::json!({ "sequence": 1 }));
+        let second = events.next().await.unwrap().unwrap();
+        assert_eq!(second.id.as_deref(), Some("43"));
+        assert_eq!(second.data, serde_json::json!({ "sequence": 2 }));
+        assert!(events.next().await.is_none());
+        reconnect_task.await.unwrap();
     }
 }
 "#,

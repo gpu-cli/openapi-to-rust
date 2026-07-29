@@ -1,5 +1,5 @@
 use openapi_to_rust::config::{ServerSection, ServerValidationSection};
-use openapi_to_rust::streaming::{StreamingConfig, StreamingEndpoint};
+use openapi_to_rust::streaming::{ReconnectionConfig, StreamingConfig, StreamingEndpoint};
 use openapi_to_rust::type_mapping::{BinaryStrategy, DurationStrategy, TypeMappingConfig};
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, RetryConfig, SchemaAnalyzer, TypeMapper};
 use serde_json::json;
@@ -221,6 +221,7 @@ fn streaming_config() -> StreamingConfig {
             event_union_type: "StreamEvent".into(),
             ..Default::default()
         }],
+        reconnection_config: Some(ReconnectionConfig::default()),
         ..Default::default()
     }
 }
@@ -416,6 +417,7 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "base64",
             "bytes",
             "chrono",
+            "futures-timer",
             "futures-util",
             "reqwest",
             "serde",
@@ -439,12 +441,25 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
         .find(|file| file.path == std::path::Path::new("sse.rs"))
         .expect("SSE runtime module");
     assert!(sse_runtime.content.contains("pub struct SseClient"));
+    assert!(sse_runtime.content.contains("pub struct SseEvent<T>"));
+    assert!(
+        sse_runtime
+            .content
+            .contains("pub struct SseReconnectOptions")
+    );
+    assert!(sse_runtime.content.contains("pub async fn stream_raw"));
+    assert!(sse_runtime.content.contains("Last-Event-ID"));
     let streaming = sse
         .files
         .iter()
         .find(|file| file.path == std::path::Path::new("streaming.rs"))
         .expect("API-specific streaming module");
-    assert!(streaming.content.contains("use super::sse::SseClient"));
+    assert!(
+        streaming
+            .content
+            .contains("use super::sse::{SseClient, SseReconnectOptions}")
+    );
+    assert!(streaming.content.contains("with_reconnect_options"));
     assert!(sse.mod_file.content.contains("pub mod sse;"));
     assert!(!sse.mod_file.content.contains("pub use sse::*;"));
 
@@ -518,6 +533,7 @@ fn every_generation_mode_compiles_from_its_exact_dependency_fragment() {
             "bytes",
             "chrono",
             "futures-core",
+            "futures-timer",
             "futures-util",
             "http-body-util",
             "jsonschema",
