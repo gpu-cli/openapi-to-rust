@@ -269,13 +269,8 @@ mod tests {
     )
     .unwrap();
 
-    let mode = if validation_enabled {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    let scratch_target = format!("/private/tmp/raw-body-target/{mode}");
-    let scratch_build = format!("/private/tmp/raw-body-build/{mode}");
+    let scratch_target = temp.path().join("cargo-target");
+    let scratch_build = temp.path().join("cargo-build");
     let check = Command::new("cargo")
         .args(["check", "--lib"])
         .current_dir(temp.path())
@@ -464,11 +459,8 @@ mod tests {
     let test = Command::new("cargo")
         .args(["test", "--quiet"])
         .current_dir(temp.path())
-        .env("CARGO_TARGET_DIR", "/private/tmp/storyden-roundtrip-target")
-        .env(
-            "CARGO_BUILD_BUILD_DIR",
-            "/private/tmp/storyden-roundtrip-build",
-        )
+        .env("CARGO_TARGET_DIR", temp.path().join("cargo-target"))
+        .env("CARGO_BUILD_BUILD_DIR", temp.path().join("cargo-build"))
         .output()
         .unwrap();
     assert!(

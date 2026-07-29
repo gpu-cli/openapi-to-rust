@@ -278,14 +278,8 @@ tokio = {{ version = "1", features = ["io-util", "macros", "net", "rt-multi-thre
     let output = Command::new("cargo")
         .args(["test", "--quiet"])
         .current_dir(temp.path())
-        .env(
-            "CARGO_BUILD_BUILD_DIR",
-            "/private/tmp/bounded-response-client-build",
-        )
-        .env(
-            "CARGO_TARGET_DIR",
-            "/private/tmp/bounded-response-client-target",
-        )
+        .env("CARGO_BUILD_BUILD_DIR", temp.path().join("cargo-build"))
+        .env("CARGO_TARGET_DIR", temp.path().join("cargo-target"))
         .output()
         .unwrap();
     assert!(

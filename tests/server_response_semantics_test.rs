@@ -369,14 +369,8 @@ serde_urlencoded = "0.7"
         .arg("test")
         .arg("--quiet")
         .current_dir(temp.path())
-        .env(
-            "CARGO_BUILD_BUILD_DIR",
-            "/private/tmp/non-json-media-target/server-runtime-build",
-        )
-        .env(
-            "CARGO_TARGET_DIR",
-            "/private/tmp/non-json-media-target/server-runtime-target",
-        )
+        .env("CARGO_BUILD_BUILD_DIR", temp.path().join("cargo-build"))
+        .env("CARGO_TARGET_DIR", temp.path().join("cargo-target"))
         .output()
         .unwrap();
     assert!(

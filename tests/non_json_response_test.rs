@@ -209,14 +209,8 @@ tokio = {{ version = "1", features = ["macros", "net", "rt-multi-thread"] }}
     let output = Command::new("cargo")
         .args(["test", "--quiet"])
         .current_dir(temp.path())
-        .env(
-            "CARGO_BUILD_BUILD_DIR",
-            "/private/tmp/non-json-media-target/client-runtime-build",
-        )
-        .env(
-            "CARGO_TARGET_DIR",
-            "/private/tmp/non-json-media-target/client-runtime-target",
-        )
+        .env("CARGO_BUILD_BUILD_DIR", temp.path().join("cargo-build"))
+        .env("CARGO_TARGET_DIR", temp.path().join("cargo-target"))
         .output()
         .unwrap();
     assert!(
