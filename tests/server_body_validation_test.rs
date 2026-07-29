@@ -91,10 +91,10 @@ fn programmatic_validation_limits_are_checked_at_generation_boundary() {
 }
 
 #[test]
-fn unsupported_request_media_is_rejected_during_server_generation() {
+fn xml_request_media_is_accepted_as_text_during_server_generation() {
     let spec = json!({
         "openapi": "3.1.0",
-        "info": { "title": "unsupported body", "version": "1" },
+        "info": { "title": "xml body", "version": "1" },
         "paths": { "/xml": { "post": {
             "operationId": "postXml",
             "requestBody": { "required": true, "content": {
@@ -115,12 +115,44 @@ fn unsupported_request_media_is_rejected_during_server_generation() {
         server: Some(server.clone()),
         ..Default::default()
     };
+    // XML bodies are character data: the handler receives them as a lossless
+    // UTF-8 String, so generation must succeed.
+    ServerCodegen::new(&config, &analysis, &server)
+        .generate()
+        .expect("application/xml request bodies are text-decodable");
+}
+
+#[test]
+fn unsupported_request_media_is_rejected_during_server_generation() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "unsupported body", "version": "1" },
+        "paths": { "/custom": { "post": {
+            "operationId": "postCustom",
+            "requestBody": { "required": true, "content": {
+                "application/x-proprietary": { "schema": { "type": "string" } }
+            }},
+            "responses": { "204": { "description": "unused" } }
+        }}}
+    });
+    let mut analyzer = SchemaAnalyzer::new(spec).unwrap();
+    let analysis = analyzer.analyze().unwrap();
+    let server = ServerSection {
+        framework: "axum".into(),
+        operations: vec!["postCustom".into()],
+        prune_models: true,
+        validation: Default::default(),
+    };
+    let config = GeneratorConfig {
+        server: Some(server.clone()),
+        ..Default::default()
+    };
     let error = ServerCodegen::new(&config, &analysis, &server)
         .generate()
         .unwrap_err()
         .to_string();
-    assert!(error.contains("postXml"), "{error}");
-    assert!(error.contains("application/xml"), "{error}");
+    assert!(error.contains("postCustom"), "{error}");
+    assert!(error.contains("application/x-proprietary"), "{error}");
 }
 
 #[test]

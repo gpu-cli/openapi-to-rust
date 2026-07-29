@@ -12,7 +12,7 @@ use crate::analysis::{
     ParameterInfo, QuerySerialization, RequestBodyContent, SchemaAnalysis, SchemaType,
 };
 use crate::config::ServerSection;
-use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig};
+use crate::generator::{CodeGenerator, GeneratedFile, GeneratorConfig, rust_type_name};
 
 use super::{OperationIndex, Selector};
 use heck::{ToPascalCase, ToSnakeCase};
@@ -286,6 +286,22 @@ impl<'a> ServerCodegen<'a> {
                 quote! { #![doc = #provenance] }
             })
             .unwrap_or_default()
+    }
+
+    /// Resolve a model type reference for emitted server modules. Names that
+    /// canonicalize to a different Rust identifier (e.g. `not-found`) cannot
+    /// be parsed from the raw component key and must be qualified explicitly;
+    /// already-canonical names resolve through the module's
+    /// `use super::super::types::*` glob like every other generated reference.
+    fn model_type(&self, ty: &str) -> TokenStream {
+        if self.analysis.schemas.contains_key(ty) {
+            let canonical = rust_type_name(ty);
+            if canonical != ty {
+                let ident = format_ident!("{}", canonical);
+                return quote! { super::super::types::#ident };
+            }
+        }
+        parse_type(ty)
     }
 
     /// Resolve selectors and emit `server/{mod,api,errors}.rs`.
@@ -1556,7 +1572,7 @@ impl<'a> ServerCodegen<'a> {
         let mut body_decode = TokenStream::new();
         let body_ty_opt = body_type(op);
         if let Some(body_ty) = &body_ty_opt {
-            let body_ty_tokens = parse_type(body_ty);
+            let body_ty_tokens = self.model_type(body_ty);
             let transport_body = match &op.request_body {
                 Some(RequestBodyContent::OctetStream { media_type }) => {
                     Some((format_ident!("decode_binary_body"), media_type.clone()))
@@ -1882,7 +1898,7 @@ impl<'a> ServerCodegen<'a> {
             }
         }
         if let Some(body) = body_type(op) {
-            let body_ty = parse_type(&body);
+            let body_ty = self.model_type(&body);
             if op.request_body_required {
                 params.push(quote! { body: #body_ty });
             } else {
@@ -2350,7 +2366,7 @@ impl<'a> ServerCodegen<'a> {
                         schema_name,
                         media_type,
                     } => (
-                        parse_type(&schema_name),
+                        self.model_type(&schema_name),
                         quote! { Json(body) },
                         media_type,
                         false,

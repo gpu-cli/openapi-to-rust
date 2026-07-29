@@ -264,6 +264,69 @@ pub fn default_type_mappings() -> BTreeMap<String, String> {
     mappings
 }
 
+/// Convert an OpenAPI schema name to the canonical Rust model identifier.
+///
+/// Every code-generation surface must use this helper rather than parsing raw
+/// component keys as Rust types; otherwise names such as `not-found` panic and
+/// names such as `inline_response_200` refer to models that were never emitted.
+pub(crate) fn rust_type_name(s: &str) -> String {
+    let mut result = String::new();
+    let mut next_upper = true;
+
+    for c in s.chars() {
+        match c {
+            'a'..='z' => {
+                result.push(if next_upper {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                });
+                next_upper = false;
+            }
+            'A'..='Z' | '0'..='9' => {
+                result.push(c);
+                next_upper = false;
+            }
+            _ => next_upper = true,
+        }
+    }
+
+    if result.is_empty() {
+        result = "Type".to_string();
+    }
+    if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        result = format!("Type{result}");
+    }
+    if matches!(
+        result.as_str(),
+        "Result"
+            | "Option"
+            | "Box"
+            | "Vec"
+            | "String"
+            | "Some"
+            | "None"
+            | "Ok"
+            | "Err"
+            | "Default"
+            | "Clone"
+            | "Debug"
+            | "Send"
+            | "Sync"
+            | "Sized"
+            | "Iterator"
+            | "From"
+            | "Into"
+            | "TryFrom"
+            | "TryInto"
+            | "AsRef"
+            | "AsMut"
+    ) {
+        result.push_str("Type");
+    }
+    result
+}
+
 /// Represents a generated file
 #[derive(Debug, Clone)]
 pub struct GeneratedFile {
@@ -3024,95 +3087,7 @@ impl CodeGenerator {
     }
 
     pub(crate) fn to_rust_type_name(&self, s: &str) -> String {
-        // Convert string to valid Rust type name (PascalCase)
-        let mut result = String::new();
-        let mut next_upper = true;
-        let mut prev_was_lower = false;
-
-        for c in s.chars() {
-            match c {
-                'a'..='z' => {
-                    if next_upper {
-                        result.push(c.to_ascii_uppercase());
-                        next_upper = false;
-                    } else {
-                        result.push(c);
-                    }
-                    prev_was_lower = true;
-                }
-                'A'..='Z' => {
-                    result.push(c);
-                    next_upper = false;
-                    prev_was_lower = false;
-                }
-                '0'..='9' => {
-                    // If previous was lowercase letter and this is start of a number sequence,
-                    // make it uppercase to improve readability (e.g., Tool20241022 instead of Tool20241022)
-                    if prev_was_lower && !result.chars().last().unwrap_or(' ').is_ascii_digit() {
-                        // This is fine as-is, the number follows naturally
-                    }
-                    result.push(c);
-                    next_upper = false;
-                    prev_was_lower = false;
-                }
-                '_' | '-' | '.' | ' ' => {
-                    // Skip underscore/separator and make next char uppercase
-                    next_upper = true;
-                    prev_was_lower = false;
-                }
-                _ => {
-                    // Other special characters - treat as word boundary
-                    next_upper = true;
-                    prev_was_lower = false;
-                }
-            }
-        }
-
-        // Handle empty result
-        if result.is_empty() {
-            result = "Type".to_string();
-        }
-
-        // Ensure type name starts with a letter (not a number)
-        if result.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            result = format!("Type{result}");
-        }
-
-        // Avoid masking ubiquitous std types and traits. cloudflare has a
-        // schema literally named `Result`, gcore has `Default`; emitting
-        // `pub enum Result { ... }` shadows std::result::Result and breaks
-        // every method's `-> Result<T, ApiOpError<...>>`. Same for impls
-        // like `impl Default for HttpClient { ... }` when `Default` resolves
-        // to the local type alias.
-        if matches!(
-            result.as_str(),
-            "Result"
-                | "Option"
-                | "Box"
-                | "Vec"
-                | "String"
-                | "Some"
-                | "None"
-                | "Ok"
-                | "Err"
-                | "Default"
-                | "Clone"
-                | "Debug"
-                | "Send"
-                | "Sync"
-                | "Sized"
-                | "Iterator"
-                | "From"
-                | "Into"
-                | "TryFrom"
-                | "TryInto"
-                | "AsRef"
-                | "AsMut"
-        ) {
-            result.push_str("Type");
-        }
-
-        result
+        rust_type_name(s)
     }
 
     fn to_rust_field_name(&self, s: &str) -> String {

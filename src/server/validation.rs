@@ -167,7 +167,7 @@ pub(crate) fn prepare_validation_bundle(
             &mut component_queue,
             &mut queued_components,
         )?;
-        components.insert(name, schema);
+        components.insert(component_bundle_key(&name), schema);
     }
 
     let mut definitions = Map::new();
@@ -309,6 +309,48 @@ fn normalize_schema(value: &Value, draft: ValidationDraft) -> Value {
             }
         }
     }
+    // AWS-authored specs widely carry the constraint as `x-pattern` (an
+    // OpenAPI extension) rather than the JSON Schema `pattern` keyword. The
+    // embedded validator compiles a pure JSON Schema document, where unknown
+    // keywords fail meta-schema validation, so promote the extension before
+    // compiling. A real `pattern` keyword always wins.
+    if !schema.contains_key("pattern")
+        && let Some(x_pattern) = schema.remove("x-pattern")
+        && let Value::String(x_pattern) = x_pattern
+    {
+        schema.insert("pattern".to_string(), Value::String(x_pattern));
+    }
+    if let Some(Value::String(pattern)) = schema.get_mut("pattern") {
+        let normalized = normalize_pattern(pattern);
+        if pattern_compiles_offline(&normalized) {
+            *pattern = normalized;
+        } else {
+            // The offline validator uses Rust's linear-time `regex` engine,
+            // which by design rejects look-around, backreferences, and other
+            // exponential features. A pattern constraint that cannot compile
+            // must degrade to "no pattern check" instead of failing code
+            // generation for the whole spec. The document is compiled against
+            // the JSON Schema meta-schema, where unknown keywords are errors,
+            // so the original expression cannot be preserved in-band.
+            schema.remove("pattern");
+        }
+    }
+    if let Some(Value::Object(patterns)) = schema.get_mut("patternProperties") {
+        let old_patterns = std::mem::take(patterns);
+        let mut rewritten = Map::new();
+        for (pattern, child) in old_patterns {
+            let normalized = normalize_pattern(&pattern);
+            if pattern_compiles_offline(&normalized) {
+                rewritten.insert(normalized, child);
+            } else {
+                // Same degradation as `pattern`: keep the entry reachable but
+                // under an always-matching key so instance documents still
+                // validate against the subschema.
+                rewritten.insert(".*".to_string(), child);
+            }
+        }
+        *patterns = rewritten;
+    }
 
     if draft == ValidationDraft::Draft4 {
         let nullable = schema
@@ -322,6 +364,172 @@ fn normalize_schema(value: &Value, draft: ValidationDraft) -> Value {
         }
     }
     Value::Object(schema)
+}
+
+/// Normalize an OpenAPI `pattern` (ECMA-262 / Java-flavoured) into a pattern
+/// Rust's linear-time `regex` engine can compile offline.
+fn normalize_pattern(pattern: &str) -> String {
+    let pattern = normalize_java_posix_classes(pattern);
+    let pattern = normalize_ecma_unicode_escapes(&pattern);
+    normalize_ecma_octal_escapes(&pattern)
+}
+
+/// Returns true when Rust's `regex` engine (the offline validator's backend)
+/// accepts the normalized pattern. Look-around, backreferences, and other
+/// exponential-time constructs are intentionally unsupported by that engine.
+fn pattern_compiles_offline(pattern: &str) -> bool {
+    regex::Regex::new(pattern).is_ok()
+}
+
+/// ECMA-262 allows four-digit Unicode escapes `\uXXXX`; Rust's `regex` crate
+/// only accepts the braced form `\u{XXXX}`. Translate the unbraced form while
+/// leaving already-braced escapes and escaped backslashes untouched.
+fn normalize_ecma_unicode_escapes(pattern: &str) -> String {
+    let bytes = pattern.as_bytes();
+    let mut normalized = String::with_capacity(pattern.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let preceding_backslashes = bytes[..index]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        let is_escaped = preceding_backslashes % 2 == 1;
+        if bytes[index] == b'\\'
+            && !is_escaped
+            && bytes.get(index + 1) == Some(&b'u')
+            && bytes.get(index + 2) != Some(&b'{')
+            && index + 5 < bytes.len()
+            && bytes[index + 2..index + 6]
+                .iter()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            normalized.push_str("\\u{");
+            normalized.push_str(&pattern[index + 2..index + 6]);
+            normalized.push('}');
+            index += 6;
+        } else {
+            let ch = pattern[index..]
+                .chars()
+                .next()
+                .expect("index is within the pattern");
+            normalized.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    normalized
+}
+
+/// OpenAPI 3.x declares patterns as ECMA-262, but many real-world specs
+/// (notably AWS) author them with Java's `java.util.regex` syntax. Rust's
+/// `regex` crate rejects Java's ASCII POSIX classes (`\p{Print}`, `\p{Alpha}`,
+/// ...) and the catch-all `\p{all}`. Translate them to equivalent ASCII forms;
+/// Java's POSIX classes are ASCII-only unless UNICODE_CHARACTER_CLASS is set,
+/// so ASCII ranges preserve the original semantics. Rust's engine already
+/// supports the `&&` class-intersection operator these are usually paired
+/// with, and the standard Unicode classes (`\p{L}`, `\p{N}`, ...) pass through
+/// unchanged.
+fn normalize_java_posix_classes(pattern: &str) -> String {
+    const JAVA_POSIX_CLASSES: [(&str, &str); 10] = [
+        ("Alnum", "A-Za-z0-9"),
+        ("Alpha", "A-Za-z"),
+        ("ASCII", "\\x00-\\x7F"),
+        ("Cntrl", "\\x00-\\x1F\\x7F"),
+        ("Graph", "!-~"),
+        ("Lower", "a-z"),
+        ("Print", " -~"),
+        ("Punct", "!-/:-@\\[-`{-~"),
+        ("Upper", "A-Z"),
+        ("XDigit", "0-9A-Fa-f"),
+    ];
+    let bytes = pattern.as_bytes();
+    let mut normalized = String::with_capacity(pattern.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let preceding_backslashes = bytes[..index]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        let is_escaped = preceding_backslashes % 2 == 1;
+        if bytes[index] == b'\\' && !is_escaped && bytes.get(index + 1) == Some(&b'p') {
+            let brace = bytes.get(index + 2);
+            if brace == Some(&b'{') {
+                if let Some(end) = pattern[index + 3..].find('}') {
+                    let class_name = &pattern[index + 3..index + 3 + end];
+                    if let Some((_, replacement)) = JAVA_POSIX_CLASSES
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(class_name))
+                    {
+                        // Inside a character class the range form slots in
+                        // directly; outside one it needs its own brackets.
+                        normalized.push_str(&format!("[{replacement}]"));
+                        index += 3 + end + 1;
+                        continue;
+                    }
+                    if class_name.eq_ignore_ascii_case("all") {
+                        normalized.push_str("[\\s\\S]");
+                        index += 3 + end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch = pattern[index..]
+            .chars()
+            .next()
+            .expect("index is within the pattern");
+        normalized.push(ch);
+        index += ch.len_utf8();
+    }
+    normalized
+}
+
+/// Rust's linear-time regex engine intentionally rejects legacy ECMAScript
+/// octal escapes such as `\000`, while OpenAPI 3.x patterns use ECMA-262
+/// syntax and real specifications still contain those escapes. Translate the
+/// unambiguous three-digit byte form before compiling the offline validator.
+fn normalize_ecma_octal_escapes(pattern: &str) -> String {
+    let bytes = pattern.as_bytes();
+    let mut normalized = String::with_capacity(pattern.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let preceding_backslashes = bytes[..index]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if bytes[index] == b'\\'
+            && preceding_backslashes % 2 == 0
+            && index + 3 < bytes.len()
+            && matches!(bytes[index + 1], b'0'..=b'3')
+            && matches!(bytes[index + 2], b'0'..=b'7')
+            && matches!(bytes[index + 3], b'0'..=b'7')
+        {
+            let value = (bytes[index + 1] - b'0') * 64
+                + (bytes[index + 2] - b'0') * 8
+                + (bytes[index + 3] - b'0');
+            normalized.push_str(&format!("\\x{value:02X}"));
+            index += 4;
+        } else {
+            let ch = pattern[index..]
+                .chars()
+                .next()
+                .expect("index is within the pattern");
+            normalized.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    normalized
+}
+
+/// Component keys in the embedded validation bundle are prefixed so a
+/// component *named* like a JSON Schema keyword (`id`, `$ref`, `type`, ...)
+/// cannot be mistaken for that keyword by the meta-schema. AWS's DataPipeline
+/// spec really does name a schema `id`, which draft-4 then reads as a schema
+/// identifier and rejects for not being a URI string.
+fn component_bundle_key(name: &str) -> String {
+    format!("component_{name}")
 }
 
 fn rewrite_references(
@@ -341,7 +549,7 @@ fn rewrite_references(
                     }
                     *reference = format!(
                         "{BUNDLE_ID}#/{definitions_key}/components/{}",
-                        escape_pointer_token(&name)
+                        escape_pointer_token(&component_bundle_key(&name))
                     );
                 } else if reference.starts_with(BUNDLE_ID) || !reference.starts_with('#') {
                     return Err(ValidationPreparationError::UnsupportedReference {
@@ -1185,6 +1393,120 @@ mod tests {
     fn pointer_tokens_are_escaped() {
         assert_eq!(escape_pointer_token("a~/b"), "a~0~1b");
         assert_eq!(unescape_pointer_token("a~0~1b"), "a~/b");
+    }
+
+    #[test]
+    fn draft4_ecma_octal_pattern_is_compiled_at_exported_pointer() {
+        let context = ValidationContext {
+            openapi_version: "3.0.0".to_string(),
+            ..Default::default()
+        };
+        let operation = OperationInfo {
+            operation_id: "awsStylePattern".to_string(),
+            parameters: vec![ParameterInfo {
+                name: "stream".to_string(),
+                location: "query".to_string(),
+                required: true,
+                schema_ref: None,
+                rust_type: "String".to_string(),
+                description: None,
+                enum_values: None,
+                enum_varnames: None,
+                rust_ident: None,
+                query_serialization: None,
+                validation_schema: Some(json!({
+                    "type": "string",
+                    "pattern": "[^/:|\\000-\\037]+"
+                })),
+            }],
+            ..Default::default()
+        };
+
+        let bundle = prepare_validation_bundle(&context, &[&operation]).unwrap();
+        let target = bundle
+            .target_for("awsStylePattern", "query", Some("stream"))
+            .unwrap();
+        let document: Value = serde_json::from_str(&bundle.document_json).unwrap();
+        let validators = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft4)
+            .with_pattern_options(jsonschema::PatternOptions::regex())
+            .build_map(&document)
+            .unwrap();
+        let validator = validators.get(&target.pointer).unwrap();
+        assert!(validator.is_valid(&json!("migration-stream")));
+        assert!(!validator.is_valid(&json!("\n")));
+    }
+
+    #[test]
+    fn java_posix_classes_and_intersection_compile_offline() {
+        // AWS-style patterns: Java `\p{Print}` POSIX class paired with the
+        // `&&[^...]` intersection operator. The referent component must
+        // compile so the pure-$ref target alias (`#/definitions/targets/v0`)
+        // is present in the validator map.
+        let context = ValidationContext {
+            openapi_version: "3.0.0".to_string(),
+            component_schemas: BTreeMap::from([(
+                "ScalingPlanName".to_string(),
+                json!({
+                    "type": "string",
+                    "pattern": "[\\p{Print}&&[^|:/]]+",
+                    "minLength": 1,
+                    "maxLength": 128
+                }),
+            )]),
+            ..Default::default()
+        };
+        let operation = OperationInfo {
+            operation_id: "createScalingPlan".to_string(),
+            request_body: Some(RequestBodyContent::Json {
+                schema_name: "CreateScalingPlanRequest".to_string(),
+                media_type: "application/json".to_string(),
+                validation_schema: json!({"$ref": "#/components/schemas/ScalingPlanName"}),
+            }),
+            ..Default::default()
+        };
+
+        let bundle = prepare_validation_bundle(&context, &[&operation]).unwrap();
+        let target = bundle
+            .target_for("createScalingPlan", "body", None)
+            .unwrap();
+        let document: Value = serde_json::from_str(&bundle.document_json).unwrap();
+        let validators = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft4)
+            .with_pattern_options(jsonschema::PatternOptions::regex())
+            .build_map(&document)
+            .unwrap();
+        let validator = validators.get(&target.pointer).unwrap();
+        assert!(validator.is_valid(&json!("my-plan 1")));
+        // JSON Schema patterns are unanchored searches, so a string that is
+        // *entirely* excluded characters must fail, while any string with at
+        // least one allowed character passes.
+        assert!(!validator.is_valid(&json!("|:/")));
+        assert!(!validator.is_valid(&json!("|||")));
+    }
+
+    #[test]
+    fn normalize_pattern_translates_java_posix_classes() {
+        assert_eq!(normalize_pattern("\\p{Alpha}+"), "[A-Za-z]+");
+        assert_eq!(
+            normalize_pattern("[\\p{Print}&&[^|:/]]+"),
+            "[[ -~]&&[^|:/]]+"
+        );
+        assert_eq!(normalize_pattern("\\p{all}"), "[\\s\\S]");
+        // Unicode classes pass through untouched.
+        assert_eq!(normalize_pattern("\\p{L}\\p{N}"), "\\p{L}\\p{N}");
+        // An escaped backslash before `\p` is literal text, not a class.
+        assert_eq!(normalize_pattern("\\\\p{Alpha}"), "\\\\p{Alpha}");
+    }
+
+    #[test]
+    fn normalize_pattern_translates_ecma_unicode_escapes() {
+        assert_eq!(normalize_pattern("\\u0021-\\u007F"), "\\u{0021}-\\u{007F}");
+        // Already-braced forms and non-hex tails pass through untouched.
+        assert_eq!(normalize_pattern("\\u{21}"), "\\u{21}");
+        assert_eq!(normalize_pattern("\\u00ZZ"), "\\u00ZZ");
+        // An escaped backslash keeps the sequence literal.
+        assert_eq!(normalize_pattern("\\\\u0021"), "\\\\u0021");
     }
 
     #[test]

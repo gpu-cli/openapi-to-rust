@@ -705,6 +705,19 @@ pub fn merge_schema_extensions(
     Ok(result)
 }
 
+/// AWS-style specs append query markers to their path templates
+/// (`/tags/{resourceArn}#tagKeys`, `/2015-02-01/resource-tags/{ResourceId}#tagKeys`).
+/// The fragment is not part of the route — those values are declared as
+/// ordinary query parameters on the operation — so strip it before the path
+/// reaches route generation. Axum (and every HTTP router) matches on the path
+/// component only.
+fn normalize_operation_path(path: &str) -> String {
+    match path.split_once('#') {
+        Some((route, _fragment)) if route.starts_with('/') => route.to_string(),
+        _ => path.to_string(),
+    }
+}
+
 /// Load an extension file and parse it into the JSON representation used by
 /// the analyzer. YAML extensions follow the same conversion policy as YAML
 /// OpenAPI documents; every other extension is parsed as JSON.
@@ -2395,17 +2408,46 @@ impl SchemaAnalyzer {
         all_of_schemas: &[Schema],
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
-        // Special case: if allOf contains only a single reference, treat it as a direct type alias
-        // This handles patterns like: "allOf": [{"$ref": "#/components/schemas/Usage"}]
-        if all_of_schemas.len() == 1 {
-            if let Schema::Reference { reference, .. } = &all_of_schemas[0] {
-                if let Some(target) = self.extract_schema_name(reference) {
-                    dependencies.insert(target.to_string());
-                    return Ok(SchemaType::Reference {
-                        target: target.to_string(),
-                    });
-                }
+        // A reference plus annotation-only siblings is still a direct type
+        // alias. AWS-style specs frequently encode property descriptions as
+        // `allOf: [$ref, { description: ... }]`; recursively expanding a
+        // self-reference in that shape can otherwise recurse forever.
+        let referenced_targets = all_of_schemas
+            .iter()
+            .filter_map(|schema| schema.reference())
+            .filter_map(|reference| self.extract_schema_name(reference))
+            .collect::<Vec<_>>();
+        let only_reference_and_annotations = all_of_schemas.iter().all(|schema| {
+            if schema.reference().is_some() {
+                return true;
             }
+            serde_json::to_value(schema)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|object| {
+                    object.keys().all(|key| {
+                        matches!(
+                            key.as_str(),
+                            "title"
+                                | "description"
+                                | "deprecated"
+                                | "readOnly"
+                                | "writeOnly"
+                                | "examples"
+                                | "example"
+                                | "externalDocs"
+                                | "xml"
+                                | "$comment"
+                        ) || key.starts_with("x-")
+                    })
+                })
+        });
+        if referenced_targets.len() == 1 && only_reference_and_annotations {
+            let target = referenced_targets[0];
+            dependencies.insert(target.to_string());
+            return Ok(SchemaType::Reference {
+                target: target.to_string(),
+            });
         }
 
         // AllOf represents schema composition - merge all schemas into one
@@ -4335,7 +4377,7 @@ impl SchemaAnalyzer {
         // dispatcher.
         if let Some(webhooks) = &spec.webhooks {
             for (name, path_item) in webhooks {
-                let synthetic_path = format!("__webhook__/{name}");
+                let synthetic_path = format!("/__webhook__/{name}");
                 self.ingest_path_item_operations(
                     &synthetic_path,
                     path_item,
@@ -4514,7 +4556,7 @@ impl SchemaAnalyzer {
         let mut op_info = OperationInfo {
             operation_id: operation_id.to_string(),
             method: method.to_uppercase(),
-            path: path.to_string(),
+            path: normalize_operation_path(path),
             summary: operation.summary.clone(),
             description: operation.description.clone(),
             request_body: None,
@@ -4596,7 +4638,11 @@ impl SchemaAnalyzer {
                             media_type: content_type.to_string(),
                         })
                     }
-                } else if media_type_essence(content_type).eq_ignore_ascii_case("text/plain") {
+                } else if crate::openapi::is_text_media_type(content_type) {
+                    // Any character-data media type (text/plain, text/xml,
+                    // application/xml, +xml suffixed) is buffered and handed
+                    // to the handler as a lossless UTF-8 String; the server
+                    // never parses the payload.
                     Some(RequestBodyContent::TextPlain {
                         media_type: content_type.to_string(),
                     })
