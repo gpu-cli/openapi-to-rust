@@ -12,7 +12,7 @@ pub struct OpenApiSpec {
     pub json_schema_dialect: Option<String>,
     #[serde(default)]
     pub servers: Option<Vec<Server>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_path_map")]
     pub paths: Option<BTreeMap<String, PathItem>>,
     #[serde(default)]
     pub webhooks: Option<BTreeMap<String, PathItem>>,
@@ -29,6 +29,32 @@ pub struct OpenApiSpec {
     pub self_uri: Option<String>,
     #[serde(flatten, default)]
     pub extensions: Extensions,
+}
+
+/// Deserialize the `paths` map while skipping entries that are not Path Item
+/// Objects. Some real-world specs (apicurio) park extension values such as
+/// `x-codegen-contextRoot: "/apis/registry/v2"` directly inside `paths`;
+/// OpenAPI allows arbitrary `x-` extensions here, so drop non-object entries
+/// that begin with `x-` instead of rejecting the whole document.
+fn deserialize_lenient_path_map<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, PathItem>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?;
+    let Some(entries) = raw else {
+        return Ok(None);
+    };
+    let mut paths = BTreeMap::new();
+    for (key, value) in entries {
+        if value.is_object() || !key.starts_with("x-") {
+            let item =
+                serde_json::from_value::<PathItem>(value).map_err(serde::de::Error::custom)?;
+            paths.insert(key, item);
+        }
+    }
+    Ok(Some(paths))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1334,6 +1360,29 @@ pub struct MediaType {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn paths_map_skips_extension_scalars() {
+        // apicurio registry: an `x-codegen-contextRoot` scalar sits inside
+        // `paths`; the document must still parse with the extension dropped.
+        let spec: OpenApiSpec = serde_json::from_value(json!({
+            "openapi": "3.0.0",
+            "info": { "title": "lenient paths", "version": "1" },
+            "paths": {
+                "x-codegen-contextRoot": "/apis/registry/v2",
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "responses": { "204": { "description": "ok" } }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let paths = spec.paths.unwrap();
+        assert!(paths.contains_key("/items"));
+        assert!(!paths.contains_key("x-codegen-contextRoot"));
+    }
 
     #[test]
     fn test_parse_simple_object_schema() {
