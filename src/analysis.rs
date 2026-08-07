@@ -1402,20 +1402,24 @@ impl SchemaAnalyzer {
         false
     }
 
-    fn all_variants_have_const_field(&self, variants: &[Schema], field_name: &str) -> bool {
+    fn all_variants_have_unique_const_values(&self, variants: &[Schema], field_name: &str) -> bool {
+        let mut values = HashSet::new();
+
         variants.iter().all(|variant| {
-            if let Some(ref_str) = variant.reference() {
-                // $ref variant: resolve and check the referenced schema
-                if let Some(schema_name) = self.extract_schema_name(ref_str) {
-                    if let Some(schema) = self.schemas.get(schema_name) {
-                        return self.has_const_discriminator_field(schema, field_name);
-                    }
-                }
+            let schema = if let Some(ref_str) = variant.reference() {
+                let Some(schema_name) = self.extract_schema_name(ref_str) else {
+                    return false;
+                };
+                let Some(schema) = self.schemas.get(schema_name) else {
+                    return false;
+                };
+                schema
             } else {
-                // Inline variant: check properties directly
-                return self.has_const_discriminator_field(variant, field_name);
-            }
-            false
+                variant
+            };
+
+            self.extract_discriminator_value_for_field(schema, field_name)
+                .is_some_and(|value| values.insert(value))
         })
     }
 
@@ -1502,32 +1506,18 @@ impl SchemaAnalyzer {
             }
         });
 
-        // Check each candidate against all variants
+        // A discriminator is only useful when every branch has a distinct
+        // value. Repeated values would generate duplicate serde rename tags,
+        // making later branches impossible to deserialize. In that case the
+        // caller falls back to an untagged union so nested const fields can
+        // participate in matching.
         for candidate in &candidates {
-            if self.all_variants_have_const_field(variants, candidate) {
+            if self.all_variants_have_unique_const_values(variants, candidate) {
                 return Some(candidate.clone());
             }
         }
 
         None
-    }
-
-    fn has_const_discriminator_field(&self, schema: &Schema, field_name: &str) -> bool {
-        if let Some(properties) = &schema.details().properties {
-            if let Some(field) = properties.get(field_name) {
-                // Check for const value (OpenAPI 3.1 style)
-                if field.details().const_value.is_some() {
-                    return true;
-                }
-                // Check if it's an enum field with a single value
-                if let Some(enum_vals) = &field.details().enum_values {
-                    return enum_vals.len() == 1;
-                }
-                // Fallback: check extra fields for const
-                return field.details().extra.contains_key("const");
-            }
-        }
-        false
     }
 
     fn is_simple_union(&self, schema: &Schema) -> bool {
