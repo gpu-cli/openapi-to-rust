@@ -32,10 +32,10 @@ committed output.
 
 We originally built this internally at [GPU CLI](https://gpu-cli.sh) to generate typed Rust clients for OpenAI, Anthropic, Cloudflare, and other large APIs. After battle-testing it against real-world specs with complex union types, discriminated enums, streaming endpoints, and the occasional spec/API drift, we decided to open source it.
 
-The repository contains **56 real-world specs**. The supported OpenAPI corpus is
-55 specs (one Gitea document is Swagger 2.0 and intentionally skipped). Pull
+The repository contains **57 real-world specs**. The supported OpenAPI corpus is
+56 specs (one Gitea document is Swagger 2.0 and intentionally skipped). Pull
 requests compile-check the OpenAI and Anthropic production specs. The full tier
-generates all 55 and compile-checks 54; Microsoft Graph is generate-only in CI
+generates all 56 and compile-checks 55; Microsoft Graph is generate-only in CI
 because its generated crate exceeds runner memory, and can be force-checked on
 a larger local machine.
 
@@ -49,7 +49,7 @@ Release history and breaking changes live in the [changelog](CHANGELOG.md).
 - **Async HTTP client** — typed JSON, text, binary, and multipart operations; bounded responses; retry/backoff via `reqwest-retry`; distributed tracing via `reqwest-tracing`; Bearer / API-key / custom auth; default headers; path-template percent-encoding.
 - **Axum 0.8 server scaffolding** — trait per tag, status-code-typed response enum, typed multipart/raw bodies, SSE-ready `OkStream` variant, OpenAPI request validation, and a combined `build_router(...)` factory for multi-tag selections.
 - **SSE streaming clients** — raw or typed Server-Sent Events, preserved event metadata, bounded error bodies, reconnect backoff, server `retry:` support, and `Last-Event-ID` resumption.
-- **Smart discriminated unions** — auto-detects implicit discriminators from `const` properties, falls back to `#[serde(untagged)]` when a union mixes scalar and object branches (e.g. `"auto"` *or* a tagged object).
+- **Smart discriminated unions** — auto-detects implicit discriminators from unique `const` properties, and falls back to `#[serde(untagged)]` for ambiguous tags or mixed scalar/object branches (e.g. `"auto"` *or* a tagged object).
 - **Per-operation typed errors** — each operation gets its own error enum with `Status4xx(...)` typed bodies; you can match on the exact API error shape.
 - **Typed `additionalProperties`** — extra keys become `BTreeMap<String, T>` instead of falling to `serde_json::Value` when the spec gives a value-type schema.
 - **Constraints at the server boundary** — `minLength`/`maxLength`/`minimum`/`pattern` remain useful model documentation, and selected Axum operations validate their request schemas at runtime with an offline `jsonschema` bundle.
