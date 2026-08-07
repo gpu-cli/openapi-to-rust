@@ -508,6 +508,8 @@ impl CodeGenerator {
 
     /// Generate the types.rs file content
     fn generate_types(&self, analysis: &mut SchemaAnalysis) -> Result<String> {
+        self.validate_schema_type_names(analysis)?;
+
         let provenance_attribute = self.provenance_attribute();
         let mut type_definitions = TokenStream::new();
 
@@ -562,25 +564,11 @@ impl CodeGenerator {
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
 
-        // Defensive layer: track emitted Rust type names so that two
-        // analyzed schemas which sanitize to the same Rust ident don't
-        // produce two definitions (E0119 conflicting impls / E0428 name
-        // defined multiple times). The first occurrence wins; later
-        // occurrences are silently dropped. Schema-name uniqueness at the
-        // analysis layer is a follow-up; this stops the generated file from
-        // failing to compile.
-        let mut emitted_rust_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
         let mut processed = std::collections::HashSet::new();
 
         // First, generate schemas in dependency order
         for schema_name in generation_order {
             if let Some(schema) = analysis.schemas.get(&schema_name) {
-                let rust_name = self.to_rust_type_name(&schema.name);
-                if !emitted_rust_names.insert(rust_name) {
-                    processed.insert(schema_name);
-                    continue;
-                }
                 let type_def = self.generate_type_definition(schema, analysis, &type_context)?;
                 if !type_def.is_empty() {
                     type_definitions.extend(type_def);
@@ -598,10 +586,6 @@ impl CodeGenerator {
         remaining_schemas.sort_by_key(|(name, _)| name.as_str());
 
         for (_schema_name, schema) in remaining_schemas {
-            let rust_name = self.to_rust_type_name(&schema.name);
-            if !emitted_rust_names.insert(rust_name) {
-                continue;
-            }
             let type_def = self.generate_type_definition(schema, analysis, &type_context)?;
             if !type_def.is_empty() {
                 type_definitions.extend(type_def);
@@ -831,6 +815,23 @@ impl CodeGenerator {
         })?;
 
         Ok(prettyplease::unparse(&syntax_tree))
+    }
+
+    fn validate_schema_type_names(&self, analysis: &SchemaAnalysis) -> Result<()> {
+        let mut source_by_rust_name = BTreeMap::<String, String>::new();
+
+        for schema in analysis.schemas.values() {
+            let rust_name = self.to_rust_type_name(&schema.name);
+            if let Some(first) = source_by_rust_name.insert(rust_name.clone(), schema.name.clone())
+            {
+                return Err(GeneratorError::InvalidSchema(format!(
+                    "schema names `{first}` and `{}` both map to Rust type `{rust_name}`",
+                    schema.name
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Generate HTTP client code for regular (non-streaming) requests.

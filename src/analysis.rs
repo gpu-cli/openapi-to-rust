@@ -1090,7 +1090,8 @@ impl SchemaAnalyzer {
     /// Construct an analyzer with a caller-supplied [`TypeMapper`]
     /// (built from `GeneratorConfig.types`). The CLI / library entry
     /// points use this so user TOML config drives type generation.
-    pub fn with_type_mapper(openapi_spec: Value, type_mapper: TypeMapper) -> Result<Self> {
+    pub fn with_type_mapper(mut openapi_spec: Value, type_mapper: TypeMapper) -> Result<Self> {
+        disambiguate_component_schema_names(&mut openapi_spec);
         let spec: OpenApiSpec =
             serde_json::from_value(openapi_spec.clone()).map_err(GeneratorError::ParseError)?;
         let schemas = Self::extract_schemas(&spec)?;
@@ -1341,6 +1342,8 @@ impl SchemaAnalyzer {
                 }
             }
         }
+
+        disambiguate_analyzed_schema_names(&mut analysis, &self.schemas);
 
         // Snapshot the type-mapper's used-features set so the
         // generator can decide which helper modules to emit
@@ -5869,4 +5872,370 @@ impl SchemaAnalyzer {
             _ => false,
         }
     }
+}
+
+fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
+    let Some(schemas) = openapi_spec
+        .pointer_mut("/components/schemas")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+
+    let mut names_by_rust_name = BTreeMap::<String, Vec<String>>::new();
+    for name in schemas.keys() {
+        names_by_rust_name
+            .entry(crate::generator::rust_type_name(name))
+            .or_default()
+            .push(name.clone());
+    }
+
+    // Reserve every identifier already represented by the document so a
+    // suffix never steals another component's canonical Rust name.
+    let mut claimed_rust_names = names_by_rust_name.keys().cloned().collect::<HashSet<_>>();
+    let mut aliases = BTreeMap::<String, String>::new();
+
+    for (rust_name, mut names) in names_by_rust_name {
+        if names.len() < 2 {
+            continue;
+        }
+
+        // Prefer an already-canonical component key (for example `Alert`
+        // over `alert`), then use lexical order for deterministic results.
+        names.sort_by_key(|name| (name != &rust_name, name.clone()));
+        for source_name in names.into_iter().skip(1) {
+            let mut suffix = 2;
+            let replacement = loop {
+                let candidate = format!("{rust_name}{suffix}");
+                if claimed_rust_names.insert(candidate.clone()) {
+                    break candidate;
+                }
+                suffix += 1;
+            };
+
+            eprintln!(
+                "⚠️  schema `{source_name}` maps to the existing Rust type `{rust_name}` — disambiguated to `{replacement}`"
+            );
+            aliases.insert(source_name, replacement);
+        }
+    }
+
+    if aliases.is_empty() {
+        return;
+    }
+
+    let original_schemas = std::mem::take(schemas);
+    for (name, schema) in original_schemas {
+        schemas.insert(aliases.get(&name).cloned().unwrap_or(name), schema);
+    }
+
+    rewrite_component_schema_references(openapi_spec, &aliases);
+}
+
+fn disambiguate_analyzed_schema_names(
+    analysis: &mut SchemaAnalysis,
+    component_schemas: &BTreeMap<String, Schema>,
+) {
+    let mut names_by_rust_name = BTreeMap::<String, Vec<String>>::new();
+    for name in analysis.schemas.keys() {
+        names_by_rust_name
+            .entry(crate::generator::rust_type_name(name))
+            .or_default()
+            .push(name.clone());
+    }
+
+    let mut claimed_rust_names = names_by_rust_name.keys().cloned().collect::<HashSet<_>>();
+    let mut aliases = BTreeMap::<String, String>::new();
+
+    for (rust_name, mut names) in names_by_rust_name {
+        if names.len() < 2 {
+            continue;
+        }
+        names.sort_by_key(|name| {
+            (
+                !component_schemas.contains_key(name),
+                name != &rust_name,
+                name.clone(),
+            )
+        });
+
+        for source_name in names.into_iter().skip(1) {
+            let mut suffix = 2;
+            let replacement = loop {
+                let candidate = format!("{rust_name}{suffix}");
+                if claimed_rust_names.insert(candidate.clone()) {
+                    break candidate;
+                }
+                suffix += 1;
+            };
+            eprintln!(
+                "⚠️  generated schema `{source_name}` maps to the existing Rust type `{rust_name}` — disambiguated to `{replacement}`"
+            );
+            aliases.insert(source_name, replacement);
+        }
+    }
+
+    if aliases.is_empty() {
+        return;
+    }
+
+    let original_schemas = std::mem::take(&mut analysis.schemas);
+    for (name, mut schema) in original_schemas {
+        schema.name = renamed_schema_name(&schema.name, &aliases);
+        schema.dependencies = schema
+            .dependencies
+            .into_iter()
+            .map(|name| renamed_schema_name(&name, &aliases))
+            .collect();
+        rewrite_schema_type_names(&mut schema.schema_type, &aliases);
+        analysis
+            .schemas
+            .insert(renamed_schema_name(&name, &aliases), schema);
+    }
+
+    let original_edges = std::mem::take(&mut analysis.dependencies.edges);
+    for (name, dependencies) in original_edges {
+        analysis.dependencies.edges.insert(
+            renamed_schema_name(&name, &aliases),
+            dependencies
+                .into_iter()
+                .map(|name| renamed_schema_name(&name, &aliases))
+                .collect(),
+        );
+    }
+    analysis.dependencies.recursive_schemas = analysis
+        .dependencies
+        .recursive_schemas
+        .iter()
+        .map(|name| renamed_schema_name(name, &aliases))
+        .collect();
+
+    analysis.patterns.tagged_enum_schemas = analysis
+        .patterns
+        .tagged_enum_schemas
+        .iter()
+        .map(|name| renamed_schema_name(name, &aliases))
+        .collect();
+    analysis.patterns.untagged_enum_schemas = analysis
+        .patterns
+        .untagged_enum_schemas
+        .iter()
+        .map(|name| renamed_schema_name(name, &aliases))
+        .collect();
+    analysis.patterns.type_mappings = std::mem::take(&mut analysis.patterns.type_mappings)
+        .into_iter()
+        .map(|(name, mappings)| {
+            (
+                renamed_schema_name(&name, &aliases),
+                mappings
+                    .into_iter()
+                    .map(|(value, schema_name)| {
+                        (value, renamed_schema_name(&schema_name, &aliases))
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+
+    for operation in analysis.operations.values_mut() {
+        if let Some(request_body) = &mut operation.request_body {
+            rewrite_request_body_schema_name(request_body, &aliases);
+        }
+        for schema_name in operation.response_schemas.values_mut() {
+            *schema_name = renamed_schema_name(schema_name, &aliases);
+        }
+        for parameter in &mut operation.parameters {
+            if let Some(schema_name) = &mut parameter.schema_ref {
+                *schema_name = renamed_schema_name(schema_name, &aliases);
+            }
+            if let Some(serialization) = &mut parameter.query_serialization {
+                rewrite_query_serialization_schema_names(serialization, &aliases);
+            }
+        }
+    }
+
+    for responses in analysis.operation_responses.values_mut() {
+        for response in responses.values_mut() {
+            if let Some(schema_name) = &mut response.schema_name {
+                *schema_name = renamed_schema_name(schema_name, &aliases);
+            }
+            if let Some(OperationResponseBody::Json { schema_name, .. }) = &mut response.body {
+                *schema_name = renamed_schema_name(schema_name, &aliases);
+            }
+        }
+    }
+}
+
+fn renamed_schema_name(name: &str, aliases: &BTreeMap<String, String>) -> String {
+    aliases
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn rewrite_schema_type_names(schema_type: &mut SchemaType, aliases: &BTreeMap<String, String>) {
+    match schema_type {
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            for property in properties.values_mut() {
+                rewrite_schema_type_names(&mut property.schema_type, aliases);
+            }
+            if let ObjectAdditionalProperties::Typed { value_type } = additional_properties {
+                rewrite_schema_type_names(value_type, aliases);
+            }
+        }
+        SchemaType::DiscriminatedUnion { variants, .. } => {
+            for variant in variants {
+                variant.type_name = renamed_schema_name(&variant.type_name, aliases);
+                variant.schema_ref = renamed_schema_name(&variant.schema_ref, aliases);
+            }
+        }
+        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+            for variant in variants {
+                variant.target = renamed_schema_name(&variant.target, aliases);
+            }
+        }
+        SchemaType::Array { item_type } => rewrite_schema_type_names(item_type, aliases),
+        SchemaType::Reference { target } => {
+            *target = renamed_schema_name(target, aliases);
+        }
+        SchemaType::Primitive { .. }
+        | SchemaType::StringEnum { .. }
+        | SchemaType::ExtensibleEnum { .. } => {}
+    }
+}
+
+fn rewrite_request_body_schema_name(
+    request_body: &mut RequestBodyContent,
+    aliases: &BTreeMap<String, String>,
+) {
+    match request_body {
+        RequestBodyContent::Json { schema_name, .. }
+        | RequestBodyContent::FormUrlEncoded { schema_name, .. }
+        | RequestBodyContent::Multipart { schema_name, .. } => {
+            *schema_name = renamed_schema_name(schema_name, aliases);
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_query_serialization_schema_names(
+    serialization: &mut QuerySerialization,
+    aliases: &BTreeMap<String, String>,
+) {
+    match serialization {
+        QuerySerialization::FormExplodedArray { item_type }
+        | QuerySerialization::FormArray { item_type }
+        | QuerySerialization::SimpleHeaderArray { item_type } => {
+            rewrite_array_item_type_schema_names(item_type, aliases);
+        }
+        QuerySerialization::FormExplodedNestedObject { properties } => {
+            for property in properties {
+                rewrite_query_property_type_schema_names(&mut property.value_type, aliases);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_array_item_type_schema_names(
+    item_type: &mut ArrayItemType,
+    aliases: &BTreeMap<String, String>,
+) {
+    match item_type {
+        ArrayItemType::SchemaRef(name) => *name = renamed_schema_name(name, aliases),
+        ArrayItemType::FlatStructRef {
+            schema_name,
+            properties,
+        }
+        | ArrayItemType::NestedStructRef {
+            schema_name,
+            properties,
+        } => {
+            *schema_name = renamed_schema_name(schema_name, aliases);
+            for property in properties {
+                rewrite_query_property_type_schema_names(&mut property.value_type, aliases);
+            }
+        }
+        ArrayItemType::Scalar(_) => {}
+    }
+}
+
+fn rewrite_query_property_type_schema_names(
+    property_type: &mut QueryStructPropertyType,
+    aliases: &BTreeMap<String, String>,
+) {
+    match property_type {
+        QueryStructPropertyType::Array { item_type } => {
+            rewrite_array_item_type_schema_names(item_type, aliases)
+        }
+        QueryStructPropertyType::Object { properties } => {
+            for property in properties {
+                rewrite_query_property_type_schema_names(&mut property.value_type, aliases);
+            }
+        }
+        QueryStructPropertyType::Scalar(_) => {}
+    }
+}
+
+fn rewrite_component_schema_references(value: &mut Value, aliases: &BTreeMap<String, String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                rewrite_component_schema_references(value, aliases);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(Value::String(reference)) = object.get_mut("$ref") {
+                rewrite_component_schema_reference(reference, aliases);
+            }
+
+            if let Some(Value::Object(mapping)) = object.get_mut("mapping") {
+                for target_value in mapping.values_mut() {
+                    let Some(target) = target_value.as_str() else {
+                        continue;
+                    };
+                    let replacement = aliases.get(target).cloned().or_else(|| {
+                        let mut target = target.to_string();
+                        rewrite_component_schema_reference(&mut target, aliases).then_some(target)
+                    });
+                    if let Some(replacement) = replacement {
+                        *target_value = Value::String(replacement);
+                    }
+                }
+            }
+
+            for value in object.values_mut() {
+                rewrite_component_schema_references(value, aliases);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_component_schema_reference(
+    reference: &mut String,
+    aliases: &BTreeMap<String, String>,
+) -> bool {
+    const PREFIX: &str = "#/components/schemas/";
+    let Some(encoded_name) = reference.strip_prefix(PREFIX) else {
+        return false;
+    };
+    let encoded_name = encoded_name.split('/').next().unwrap_or(encoded_name);
+
+    for (source, replacement) in aliases {
+        let encoded_source = source.replace('~', "~0").replace('/', "~1");
+        if encoded_name == encoded_source {
+            reference.replace_range(
+                PREFIX.len()..PREFIX.len() + encoded_source.len(),
+                replacement,
+            );
+            return true;
+        }
+    }
+
+    false
 }
