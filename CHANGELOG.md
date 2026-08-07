@@ -6,6 +6,22 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-07
+
+### Fixed
+
+- Distinct OpenAPI component keys that normalize to the same Rust identifier
+  are deterministically disambiguated instead of silently dropping a model;
+  references, discriminator mappings, dependencies, and operation schemas are
+  rewritten to the emitted names.
+- Implicit discriminators are selected only when every union branch has a
+  unique constant value. Ambiguous unions now remain untagged, preserving
+  nested constant fields so Serde can distinguish branches at runtime.
+
+### Changed
+
+- The real-world compile corpus now includes the OpenCode OpenAPI 3.1 document.
+
 ## [0.12.0] - 2026-07-29
 
 This release broadens the set of real-world protocols that generated clients
