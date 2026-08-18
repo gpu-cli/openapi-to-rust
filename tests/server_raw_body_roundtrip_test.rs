@@ -401,6 +401,21 @@ mod tests {
         }
     }
 
+    fn sample_plugin() -> Plugin {
+        Plugin {
+            added_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+            connection: PluginModeUnion::PluginSupervisedProps(PluginSupervisedProps {}),
+            description: None,
+            id: "plugin-one".to_string(),
+            manifest: PluginManifest::default(),
+            name: "Test Plugin".to_string(),
+            status: PluginStatus::PluginStatusActive(PluginStatusActive {
+                activated_at: "2024-01-01T00:00:00Z".parse().unwrap(),
+            }),
+            version: None,
+        }
+    }
+
     #[async_trait::async_trait]
     impl PluginsApi for Api {
         async fn plugin_update_package(
@@ -412,7 +427,7 @@ mod tests {
             self.captured
                 .send(("plugin".into(), body.map(|value| value.to_vec())))
                 .unwrap();
-            PluginUpdatePackageResponse::Ok(serde_json::json!({"updated": true}))
+            PluginUpdatePackageResponse::Ok(sample_plugin())
         }
     }
 
@@ -437,7 +452,10 @@ mod tests {
             .plugin_update_package("plugin-one", Some(archive.clone()))
             .await
             .unwrap();
-        assert_eq!(response, serde_json::json!({"updated": true}));
+        assert_eq!(
+            serde_json::to_value(&response).unwrap(),
+            serde_json::to_value(sample_plugin()).unwrap()
+        );
         assert_eq!(
             captured_rx.recv().await.unwrap(),
             ("plugin".into(), Some(archive))
