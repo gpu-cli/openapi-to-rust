@@ -308,6 +308,48 @@ fn test_nested_allof_composition() {
 }
 
 #[test]
+fn test_allof_with_redundant_type_object_sibling() {
+    // Test AllOf composition that should flatten properties instead of using serde_json::Value
+    // even with type: object.
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "components": {
+            "schemas": {
+                "Widget": {
+                    "type": "object",
+                    "allOf": [
+                        {"$ref": "#/components/schemas/WidgetBase"},
+                        {"$ref": "#/components/schemas/WidgetExtra"}
+                    ]
+                },
+                "WidgetBase": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"}
+                    }
+                },
+                "WidgetExtra": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                }
+            }
+        }
+    });
+
+    let result =
+        test_generation("allof_type_object_sibling_test", spec).expect("Generation failed");
+
+    assert!(result.contains("pub struct Widget"));
+    // Check different possible formats of string.
+    assert!(result.contains("pub id: Option<String>") || result.contains("pub id: String"));
+    assert!(result.contains("pub name: Option<String>") || result.contains("pub name: String"));
+    assert!(!result.contains("pub type Widget = serde_json::Value"));
+}
+
+#[test]
 fn test_object_with_additional_properties() {
     // Test that objects with additionalProperties correctly use BTreeMap<String, serde_json::Value>
     let spec = json!({

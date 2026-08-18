@@ -154,6 +154,16 @@ pub enum Schema {
         #[serde(flatten)]
         details: SchemaDetails,
     },
+    /// AllOf composition (must come before Typed to handle type + allOf
+    /// patterns)
+    AllOf {
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        schema_type: Option<SchemaType>,
+        #[serde(rename = "allOf")]
+        all_of: Vec<Schema>,
+        #[serde(flatten)]
+        details: SchemaDetails,
+    },
     /// Schema with `type` as an array (OpenAPI 3.1 / JSON Schema 2020-12).
     /// The canonical 3.1 way to express a nullable type is
     /// `type: ["string", "null"]`. Listed before `Typed` so the array form
@@ -168,13 +178,6 @@ pub enum Schema {
     Typed {
         #[serde(rename = "type")]
         schema_type: SchemaType,
-        #[serde(flatten)]
-        details: SchemaDetails,
-    },
-    /// AllOf composition
-    AllOf {
-        #[serde(rename = "allOf")]
-        all_of: Vec<Schema>,
         #[serde(flatten)]
         details: SchemaDetails,
     },
