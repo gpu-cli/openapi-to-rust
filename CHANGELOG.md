@@ -6,6 +6,14 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-18
+
+### Fixed
+
+- Schemas that pair `allOf` with a redundant sibling `type: object` are now
+  parsed as compositions instead of plain typed objects, so the composed
+  members are merged into the generated struct rather than dropped.
+
 ## [0.12.1] - 2026-08-07
 
 ### Fixed
