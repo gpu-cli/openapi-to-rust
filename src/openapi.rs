@@ -664,6 +664,9 @@ impl Schema {
     /// Get the schema type if explicitly set. For `Schema::TypedMulti` the
     /// "primary" non-null type is returned; if the array contained only `null`
     /// then `Some(&SchemaType::Null)` is returned.
+    ///
+    /// If the other non-null variants are important, consider where you should
+    /// instead use [non_null_schema_types][Self::non_null_schema_types].
     pub fn schema_type(&self) -> Option<&SchemaType> {
         match self {
             Schema::Typed { schema_type, .. } => Some(schema_type),
@@ -671,6 +674,27 @@ impl Schema {
                 .iter()
                 .find(|t| **t != SchemaType::Null)
                 .or_else(|| schema_types.first()),
+            _ => None,
+        }
+    }
+
+    /// Gets all non-null types from `type: [...]` (unlike
+    /// [Schema::schema_type] that handles the null value). Returns `None` if
+    /// the given [Schema::TypedMulti] has either only one non-null value, or if
+    /// this isn't a `Schema::TypedMulti`.
+    ///
+    /// This also removes duplicates.
+    pub fn non_null_schema_types(&self) -> Option<Vec<SchemaType>> {
+        match self {
+            Schema::TypedMulti { schema_types, .. } => {
+                let mut non_null = Vec::new();
+                for t in schema_types {
+                    if *t != SchemaType::Null && !non_null.contains(t) {
+                        non_null.push(t.clone());
+                    }
+                }
+                (non_null.len() > 1).then_some(non_null)
+            }
             _ => None,
         }
     }

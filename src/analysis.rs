@@ -338,7 +338,7 @@ pub struct DependencyGraph {
 pub struct DetectedPatterns {
     /// Schemas that should use tagged enums (discriminated unions)
     pub tagged_enum_schemas: HashSet<String>,
-    /// Schemas that should use untagged enums (simple unions)  
+    /// Schemas that should use untagged enums (simple unions)
     pub untagged_enum_schemas: HashSet<String>,
     /// Auto-detected type mappings for discriminated unions
     pub type_mappings: BTreeMap<String, BTreeMap<String, String>>,
@@ -1758,54 +1758,24 @@ impl SchemaAnalyzer {
                 }
             }
             Schema::Typed { .. } | Schema::TypedMulti { .. } => {
-                let primary = schema
-                    .schema_type()
-                    .cloned()
-                    .unwrap_or(OpenApiSchemaType::Object);
-                let format = details.format.as_deref();
-                match primary {
-                    OpenApiSchemaType::String => {
-                        if let Some(values) = details.string_enum_values() {
-                            SchemaType::StringEnum { values }
-                        } else {
-                            SchemaType::Primitive {
-                                rust_type: self.type_mapper.string_format(format).rust_type,
-                                serde_with: None,
-                            }
-                        }
+                if let Some(non_null_types) = schema.non_null_schema_types() {
+                    let mut variants = Vec::with_capacity(non_null_types.len());
+                    for t in non_null_types {
+                        variants.push(self.build_typed_multi_union_variant(
+                            t,
+                            schema,
+                            schema_name,
+                            &mut dependencies,
+                        )?);
                     }
-                    OpenApiSchemaType::Integer => SchemaType::Primitive {
-                        rust_type: self.type_mapper.integer_format(format).rust_type,
-                        serde_with: None,
-                    },
-                    OpenApiSchemaType::Number => SchemaType::Primitive {
-                        rust_type: self.type_mapper.number_format(format).rust_type,
-                        serde_with: None,
-                    },
-                    OpenApiSchemaType::Boolean => SchemaType::Primitive {
-                        rust_type: self.type_mapper.boolean().rust_type,
-                        serde_with: None,
-                    },
-                    OpenApiSchemaType::Array => {
-                        // Analyze array item type
-                        self.analyze_array_schema(schema, schema_name, &mut dependencies)?
-                    }
-                    OpenApiSchemaType::Object => {
-                        // Check if this is a dynamic JSON object
-                        if self.should_use_dynamic_json(schema) {
-                            SchemaType::Primitive {
-                                rust_type: self.type_mapper.dynamic_json().rust_type,
-                                serde_with: None,
-                            }
-                        } else {
-                            // Analyze object properties
-                            self.analyze_object_schema(schema, &mut dependencies)?
-                        }
-                    }
-                    _ => SchemaType::Primitive {
-                        rust_type: self.type_mapper.dynamic_json().rust_type,
-                        serde_with: None,
-                    },
+                    SchemaType::Union { variants }
+                } else {
+                    self.analyze_single_typed_schema(
+                        schema,
+                        schema_name,
+                        details,
+                        &mut dependencies,
+                    )?
                 }
             }
             Schema::AnyOf {
@@ -1879,6 +1849,66 @@ impl SchemaAnalyzer {
             nullable,
             description,
             default: details.default.clone(),
+        })
+    }
+
+    /// Resolve a `Schema::Typed`/`Schema::TypedMulti` schema that carries a
+    /// single effective type (the 3.1 nullable shorthand already collapses
+    /// to this via `schema_type()`). Proper multi-type unions are handled in
+    /// [Self::analyze_schema_value] via
+    /// [Self::build_typed_multi_union_variant].
+    fn analyze_single_typed_schema(
+        &mut self,
+        schema: &Schema,
+        schema_name: &str,
+        details: &crate::openapi::SchemaDetails,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaType> {
+        let primary = schema
+            .schema_type()
+            .cloned()
+            .unwrap_or(OpenApiSchemaType::Object);
+        let format = details.format.as_deref();
+        Ok(match primary {
+            OpenApiSchemaType::String => {
+                if let Some(values) = details.string_enum_values() {
+                    SchemaType::StringEnum { values }
+                } else {
+                    SchemaType::Primitive {
+                        rust_type: self.type_mapper.string_format(format).rust_type,
+                        serde_with: None,
+                    }
+                }
+            }
+            OpenApiSchemaType::Integer => SchemaType::Primitive {
+                rust_type: self.type_mapper.integer_format(format).rust_type,
+                serde_with: None,
+            },
+            OpenApiSchemaType::Number => SchemaType::Primitive {
+                rust_type: self.type_mapper.number_format(format).rust_type,
+                serde_with: None,
+            },
+            OpenApiSchemaType::Boolean => SchemaType::Primitive {
+                rust_type: self.type_mapper.boolean().rust_type,
+                serde_with: None,
+            },
+            OpenApiSchemaType::Array => {
+                self.analyze_array_schema(schema, schema_name, dependencies)?
+            }
+            OpenApiSchemaType::Object => {
+                if self.should_use_dynamic_json(schema) {
+                    SchemaType::Primitive {
+                        rust_type: self.type_mapper.dynamic_json().rust_type,
+                        serde_with: None,
+                    }
+                } else {
+                    self.analyze_object_schema(schema, dependencies)?
+                }
+            }
+            _ => SchemaType::Primitive {
+                rust_type: self.type_mapper.dynamic_json().rust_type,
+                serde_with: None,
+            },
         })
     }
 
@@ -2148,6 +2178,76 @@ impl SchemaAnalyzer {
         })
     }
 
+    /// Build one union variant for a genuine `type: [X, Y, ...]` member.
+    /// All members of a `TypedMulti` share a single `SchemaDetails`, so
+    /// `array`/`object` members carry the *same* `items`/`properties` as
+    /// the union schema itself — routing them through `TypeMapper::map`
+    /// (as the scalar members are) would discard that shape and collapse
+    /// to generic `Vec<serde_json::Value>` / `serde_json::Value`.
+    ///
+    /// This just properly handles array and object types before passing on to
+    /// the type mapper.
+    fn build_typed_multi_union_variant(
+        &mut self,
+        member_type: OpenApiSchemaType,
+        schema: &Schema,
+        union_type_name: &str,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaRef> {
+        match member_type {
+            OpenApiSchemaType::Array => {
+                let array_type_name = format!("{union_type_name}Array");
+                let array_type =
+                    self.analyze_array_schema(schema, &array_type_name, dependencies)?;
+                self.resolved_cache.insert(
+                    array_type_name.clone(),
+                    AnalyzedSchema {
+                        name: array_type_name.clone(),
+                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                        schema_type: array_type,
+                        dependencies: HashSet::new(),
+                        nullable: false,
+                        description: Some("Array variant in union".to_string()),
+                        default: None,
+                    },
+                );
+                dependencies.insert(array_type_name.clone());
+                Ok(SchemaRef {
+                    target: array_type_name,
+                    nullable: false,
+                })
+            }
+            OpenApiSchemaType::Object => {
+                let object_type_name = format!("{union_type_name}Object");
+                let object_type = self.analyze_object_schema(schema, dependencies)?;
+                self.resolved_cache.insert(
+                    object_type_name.clone(),
+                    AnalyzedSchema {
+                        name: object_type_name.clone(),
+                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                        schema_type: object_type,
+                        dependencies: dependencies.clone(),
+                        nullable: false,
+                        description: schema.details().description.clone(),
+                        default: None,
+                    },
+                );
+                dependencies.insert(object_type_name.clone());
+                Ok(SchemaRef {
+                    target: object_type_name,
+                    nullable: false,
+                })
+            }
+            _ => Ok(SchemaRef {
+                target: self
+                    .type_mapper
+                    .map(member_type, schema.details())
+                    .rust_type,
+                nullable: false,
+            }),
+        }
+    }
+
     fn analyze_property_schema_with_context(
         &mut self,
         schema: &Schema,
@@ -2179,6 +2279,67 @@ impl SchemaAnalyzer {
                     });
                 }
             }
+        }
+
+        // Genuine multi-scalar `type: [X, Y]` union (not the 3.1 nullable
+        // shorthand `[X, "null"]`, which `schema_type()` already collapses).
+        // Give it a named enum, same as an anyOf/oneOf union property below.
+        if let Some(non_null_types) = schema.non_null_schema_types() {
+            let context_name = self
+                .current_schema_name
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string());
+            let prop_pascal = property_name
+                .map(|name| self.to_pascal_case(name))
+                .unwrap_or_default();
+            let mut union_type_name = format!("{context_name}{prop_pascal}");
+            if self.schemas.contains_key(&union_type_name)
+                || self.resolved_cache.contains_key(&union_type_name)
+            {
+                let mut suffix = 2;
+                loop {
+                    let candidate = format!("{union_type_name}Union{suffix}");
+                    if !self.schemas.contains_key(&candidate)
+                        && !self.resolved_cache.contains_key(&candidate)
+                    {
+                        union_type_name = candidate;
+                        break;
+                    }
+                    suffix += 1;
+                    if suffix > 1000 {
+                        break;
+                    }
+                }
+            }
+
+            let details = schema.details();
+            let mut variants = Vec::with_capacity(non_null_types.len());
+            for t in non_null_types {
+                variants.push(self.build_typed_multi_union_variant(
+                    t,
+                    schema,
+                    &union_type_name,
+                    dependencies,
+                )?);
+            }
+
+            self.resolved_cache.insert(
+                union_type_name.clone(),
+                AnalyzedSchema {
+                    name: union_type_name.clone(),
+                    original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                    schema_type: SchemaType::Union { variants },
+                    dependencies: HashSet::new(),
+                    nullable: false,
+                    description: details.description.clone(),
+                    default: None,
+                },
+            );
+
+            dependencies.insert(union_type_name.clone());
+            return Ok(SchemaType::Reference {
+                target: union_type_name,
+            });
         }
 
         if let Some(schema_type) = schema.schema_type() {
