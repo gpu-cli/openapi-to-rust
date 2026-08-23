@@ -6,6 +6,14 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-08-22
+
+### Fixed
+
+- OpenAPI 3.1 schemas with multiple non-null types now generate proper Rust
+  unions instead of being treated as nullable versions of their first type;
+  array and object members retain their declared shapes.
+
 ## [0.12.2] - 2026-08-18
 
 ### Fixed
