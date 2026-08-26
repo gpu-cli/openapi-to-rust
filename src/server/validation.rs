@@ -273,6 +273,9 @@ fn normalize_schema(value: &Value, draft: ValidationDraft) -> Value {
         return value.clone();
     };
     let mut schema = source.clone();
+    if draft == ValidationDraft::Draft202012 {
+        rewrite_tuple_items(&mut schema);
+    }
     for key in [
         "items",
         "additionalProperties",
@@ -367,6 +370,28 @@ fn normalize_schema(value: &Value, draft: ValidationDraft) -> Value {
         }
     }
     Value::Object(schema)
+}
+
+/// Rewrite the draft-04 tuple spelling `items: [A, B]` into 2020-12's
+/// `prefixItems`, with `additionalItems` becoming `items`.
+///
+/// Tooling that predates 2020-12 still emits the tuple form under
+/// `openapi: "3.1.0"` (FastAPI/pydantic v1 does). Left as-is, the embedded
+/// 2020-12 validator ignores the keyword and the positions go unchecked.
+fn rewrite_tuple_items(schema: &mut Map<String, Value>) {
+    if !schema.get("items").is_some_and(Value::is_array) {
+        return;
+    }
+    let Some(Value::Array(positional)) = schema.remove("items") else {
+        return;
+    };
+    // An explicit `prefixItems` is already canonical and wins.
+    schema
+        .entry("prefixItems".to_string())
+        .or_insert(Value::Array(positional));
+    if let Some(additional) = schema.remove("additionalItems") {
+        schema.insert("items".to_string(), additional);
+    }
 }
 
 /// Normalize an OpenAPI `pattern` (ECMA-262 / Java-flavoured) into a pattern

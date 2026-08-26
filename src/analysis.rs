@@ -1155,7 +1155,7 @@ impl SchemaAnalyzer {
             if type_hint == "Array"
                 && matches!(schema.schema_type(), Some(OpenApiSchemaType::Array))
             {
-                if let Some(items_schema) = &schema.details().items {
+                if let Some(items_schema) = schema.details().item_schema() {
                     // Check for specific item types
                     if let Some(item_type) = items_schema.schema_type() {
                         match item_type {
@@ -3967,9 +3967,9 @@ impl SchemaAnalyzer {
         let details = schema.details();
 
         // Check if items field is present
-        if let Some(items_schema) = &details.items {
+        if let Some(items_schema) = details.item_schema() {
             // Analyze the item type
-            let item_type = match items_schema.as_ref() {
+            let item_type = match items_schema {
                 Schema::Reference { reference, .. } => {
                     // Array of referenced types
                     let target = self
@@ -4328,7 +4328,8 @@ impl SchemaAnalyzer {
                         self.analyze_array_schema(schema, context_name, dependencies)?;
 
                     // Create a unique name for this array type in the union
-                    let array_type_name = if let Some(items_schema) = &schema.details().items {
+                    let array_type_name = if let Some(items_schema) = schema.details().item_schema()
+                    {
                         if let Some(ref_str) = items_schema.reference() {
                             if let Some(item_type_name) = self.extract_schema_name(ref_str) {
                                 dependencies.insert(item_type_name.to_string());
@@ -5737,7 +5738,7 @@ impl SchemaAnalyzer {
     /// items stay plain `String`: the op-scoped enum synthesis (issue #10)
     /// is wired for scalar params only.
     fn array_param_item_type(&self, schema: &crate::openapi::Schema) -> Option<ArrayItemType> {
-        let items = schema.details().items.as_deref()?;
+        let items = schema.details().item_schema()?;
         // AWS query-protocol specs wrap item refs in an annotation-only allOf
         // (`items: {allOf: [$ref, {xml: ...}]}`). See through the wrapper when
         // every sibling is annotation-only, mirroring the type-alias rule.

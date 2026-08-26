@@ -556,6 +556,7 @@ focused fixture when relying on a less-common OpenAPI or JSON Schema keyword.
 |---|---|
 | `type` as array (e.g. `["string", "null"]`) | typed + used for nullability |
 | `prefixItems`, `unevaluatedItems`, `contains` / `minContains` / `maxContains` | typed |
+| draft-04 positional `items: [A, B]` (FastAPI/pydantic v1 emits it under 3.1) | typed as `prefixItems` |
 | `patternProperties`, `propertyNames`, `unevaluatedProperties` | typed |
 | `dependentRequired`, `dependentSchemas`, `if` / `then` / `else` | typed |
 | `contentEncoding`, `contentMediaType`, `contentSchema` | typed |

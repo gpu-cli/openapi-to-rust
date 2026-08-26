@@ -246,7 +246,7 @@ pub struct SchemaDetails {
 
     // Array-specific
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub items: Option<Box<Schema>>,
+    pub items: Option<Items>,
 
     // Number-specific
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,6 +367,24 @@ where
 pub enum ExclusiveBound {
     Bool(bool),
     Number(f64),
+}
+
+/// The `items` keyword.
+///
+/// JSON Schema 2020-12 spells it as a single schema applied to every element.
+/// Draft-04 also allowed a positional array — the tuple form — and tooling
+/// that predates 2020-12 (FastAPI/pydantic v1 emits it under
+/// `openapi: "3.1.0"`) still writes `items: [A, B]` where 2020-12 would write
+/// `prefixItems: [A, B]`. Both spellings parse; consumers reach positional
+/// entries through [`SchemaDetails::positional_items`], which unifies them
+/// with `prefixItems`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum Items {
+    /// 2020-12 `items`: one schema for every element.
+    Single(Box<Schema>),
+    /// Draft-04 tuple form: one schema per position.
+    Positional(Vec<Schema>),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -861,6 +879,29 @@ impl Schema {
 }
 
 impl SchemaDetails {
+    /// The schema every array element must satisfy, i.e. `items` in its
+    /// 2020-12 single-schema spelling. Returns `None` for the draft-04 tuple
+    /// form, which constrains positions rather than every element — read that
+    /// through [`Self::positional_items`].
+    pub fn item_schema(&self) -> Option<&Schema> {
+        match self.items.as_ref()? {
+            Items::Single(schema) => Some(schema),
+            Items::Positional(_) => None,
+        }
+    }
+
+    /// Positional element schemas, from either spelling: 2020-12
+    /// `prefixItems` or the draft-04 `items: [A, B]` tuple form.
+    pub fn positional_items(&self) -> Option<&[Schema]> {
+        if let Some(prefix_items) = self.prefix_items.as_deref() {
+            return Some(prefix_items);
+        }
+        match self.items.as_ref()? {
+            Items::Positional(schemas) => Some(schemas),
+            Items::Single(_) => None,
+        }
+    }
+
     /// Check if this schema is nullable
     pub fn is_nullable(&self) -> bool {
         self.nullable.unwrap_or(false)
