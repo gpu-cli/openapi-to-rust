@@ -5,6 +5,13 @@ pub enum GeneratorError {
     #[error("Failed to parse OpenAPI spec: {0}")]
     ParseError(#[from] serde_json::Error),
 
+    /// Document-level parse failure located to the node that failed. Serde's
+    /// own message for an untagged enum ("data did not match any variant of
+    /// untagged enum Schema") names no field, so a large spec would otherwise
+    /// have to be bisected by hand to find the offending node.
+    #[error("Failed to parse OpenAPI spec at {pointer}: {message}")]
+    ParseErrorAt { pointer: String, message: String },
+
     #[error("Unresolved schema reference: {0}")]
     UnresolvedReference(String),
 

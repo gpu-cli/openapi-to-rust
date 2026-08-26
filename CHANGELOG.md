@@ -6,6 +6,18 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- The draft-04 positional tuple form `items: [A, B]` — still emitted under
+  `openapi: "3.1.0"` by FastAPI/pydantic v1 — now parses instead of failing the
+  whole document, generating what the 2020-12 spelling `prefixItems: [A, B]`
+  generates. Generated Axum validators receive the canonical spelling, so the
+  positions are actually checked at runtime (#60).
+- Document parse failures now name the offending node by JSON Pointer, e.g.
+  `Failed to parse OpenAPI spec at #/components/schemas/Body/properties/pair/items`,
+  instead of reporting only "data did not match any variant of untagged enum
+  Schema" with no way to find it in a large spec (#60).
+
 ## [0.12.3] - 2026-08-22
 
 ### Fixed
