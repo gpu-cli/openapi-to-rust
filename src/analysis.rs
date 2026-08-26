@@ -201,6 +201,12 @@ pub enum SchemaType {
     Union { variants: Vec<SchemaRef> },
     /// Array type
     Array { item_type: Box<SchemaType> },
+    /// Fixed-arity array — one schema per position, no extras — rendered as a
+    /// Rust tuple. Only emitted when the spec proves the length (see
+    /// `SchemaDetails::positional_items_are_exact`); an open `prefixItems`
+    /// stays an `Array`, because serde would reject the extra elements the
+    /// spec allows.
+    Tuple { element_types: Vec<SchemaType> },
     /// String enum
     StringEnum { values: Vec<String> },
     /// Extensible enum with known values and custom variant
@@ -3966,76 +3972,242 @@ impl SchemaAnalyzer {
     ) -> Result<SchemaType> {
         let details = schema.details();
 
+        // Positional schemas first: when the spec pins the length, the array is
+        // a tuple, and `items` (if present at all) only describes elements that
+        // cannot occur.
+        if let Some(positions) = details.positional_items() {
+            return self.analyze_positional_items(
+                positions,
+                details,
+                parent_schema_name,
+                dependencies,
+            );
+        }
+
         // Check if items field is present
         if let Some(items_schema) = details.item_schema() {
-            // Analyze the item type
-            let item_type = match items_schema {
-                Schema::Reference { reference, .. } => {
-                    // Array of referenced types
+            let item_type = self.analyze_item_schema(
+                items_schema,
+                parent_schema_name,
+                &format!("{parent_schema_name}Item"),
+                dependencies,
+            )?;
+            Ok(SchemaType::Array {
+                item_type: Box::new(item_type),
+            })
+        } else {
+            // No items specified, fall back to generic array
+            Ok(SchemaType::Primitive {
+                rust_type: "Vec<serde_json::Value>".to_string(),
+                serde_with: None,
+            })
+        }
+    }
+
+    /// Analyze positional element schemas — 2020-12 `prefixItems` or the
+    /// draft-04 `items: [A, B]` tuple form — into the tightest type the spec
+    /// justifies.
+    ///
+    /// Three tiers, because `prefixItems` alone does not bound an array's
+    /// length and a Rust tuple is fixed-arity:
+    ///
+    /// 1. the length is pinned → a tuple, one element per position;
+    /// 2. no extras are allowed and every position is the same schema →
+    ///    `Vec<T>`, which accepts any permitted length;
+    /// 3. otherwise → `Vec<serde_json::Value>`, since a payload may legally
+    ///    carry more elements, of other types, than the positions describe.
+    fn analyze_positional_items(
+        &mut self,
+        positions: &[Schema],
+        details: &crate::openapi::SchemaDetails,
+        parent_schema_name: &str,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaType> {
+        if details.positional_items_are_exact() && !positions.is_empty() {
+            let mut element_types = Vec::with_capacity(positions.len());
+            for (index, position) in positions.iter().enumerate() {
+                element_types.push(self.analyze_item_schema(
+                    position,
+                    parent_schema_name,
+                    &format!("{parent_schema_name}Item{}", index + 1),
+                    dependencies,
+                )?);
+            }
+            return Ok(SchemaType::Tuple { element_types });
+        }
+
+        // Analyze a shared position only once, and only when the positions are
+        // interchangeable: analyzing every position would hoist a named type
+        // per inline object, and tiers 2 and 3 discard all but one of them.
+        if details.positional_items_are_closed()
+            && let Some(shared) = shared_positional_schema(positions)
+        {
+            let item_type = self.analyze_item_schema(
+                shared,
+                parent_schema_name,
+                &format!("{parent_schema_name}Item"),
+                dependencies,
+            )?;
+            return Ok(SchemaType::Array {
+                item_type: Box::new(item_type),
+            });
+        }
+
+        Ok(SchemaType::Primitive {
+            rust_type: "Vec<serde_json::Value>".to_string(),
+            serde_with: None,
+        })
+    }
+
+    /// Analyze one element schema into its generated type.
+    ///
+    /// `inline_name` names whatever has to be hoisted out of an inline element
+    /// schema — an object, a string enum, a union — so tuple positions can pass
+    /// a per-position name. `parent_schema_name` stays the enclosing schema,
+    /// which is what a `$recursiveRef: "#"` element resolves to.
+    fn analyze_item_schema(
+        &mut self,
+        items_schema: &Schema,
+        parent_schema_name: &str,
+        inline_name: &str,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaType> {
+        let item_type = match items_schema {
+            Schema::Reference { reference, .. } => {
+                // Array of referenced types
+                let target = self
+                    .extract_schema_name(reference)
+                    .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
+                    .to_string();
+                dependencies.insert(target.clone());
+                SchemaType::Reference { target }
+            }
+            Schema::RecursiveRef { recursive_ref, .. } => {
+                // Array of recursive references
+                if recursive_ref == "#" {
+                    // Self-reference to the current schema
                     let target = self
-                        .extract_schema_name(reference)
-                        .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
+                        .find_recursive_anchor_schema()
+                        .unwrap_or_else(|| parent_schema_name.to_string());
+                    dependencies.insert(target.clone());
+                    SchemaType::Reference { target }
+                } else {
+                    let target = self
+                        .extract_schema_name(recursive_ref)
+                        .unwrap_or("RecursiveType")
                         .to_string();
                     dependencies.insert(target.clone());
                     SchemaType::Reference { target }
                 }
-                Schema::RecursiveRef { recursive_ref, .. } => {
-                    // Array of recursive references
-                    if recursive_ref == "#" {
-                        // Self-reference to the current schema
-                        let target = self
-                            .find_recursive_anchor_schema()
-                            .unwrap_or_else(|| parent_schema_name.to_string());
-                        dependencies.insert(target.clone());
-                        SchemaType::Reference { target }
-                    } else {
-                        let target = self
-                            .extract_schema_name(recursive_ref)
-                            .unwrap_or("RecursiveType")
-                            .to_string();
-                        dependencies.insert(target.clone());
-                        SchemaType::Reference { target }
-                    }
-                }
-                Schema::Typed { schema_type, .. } => {
-                    // Array of primitive types
-                    match schema_type {
-                        OpenApiSchemaType::String => {
-                            // Inline string enum in array items — hoist to a
-                            // named enum (`{Parent}Item`) instead of collapsing
-                            // to `Vec<String>`.
-                            match items_schema
-                                .details()
-                                .string_enum_values()
-                                .filter(|values| !values.is_empty())
-                            {
-                                Some(values) => self.hoist_inline_string_enum(
-                                    items_schema,
-                                    values,
-                                    format!("{parent_schema_name}Item"),
-                                    dependencies,
-                                ),
-                                None => SchemaType::Primitive {
-                                    rust_type: "String".to_string(),
-                                    serde_with: None,
-                                },
-                            }
-                        }
-                        OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
-                            let details = items_schema.details();
-                            let rust_type = self.get_number_rust_type(schema_type.clone(), details);
-                            SchemaType::Primitive {
-                                rust_type,
+            }
+            Schema::Typed { schema_type, .. } => {
+                // Array of primitive types
+                match schema_type {
+                    OpenApiSchemaType::String => {
+                        // Inline string enum in array items — hoist to a
+                        // named enum (`{Parent}Item`) instead of collapsing
+                        // to `Vec<String>`.
+                        match items_schema
+                            .details()
+                            .string_enum_values()
+                            .filter(|values| !values.is_empty())
+                        {
+                            Some(values) => self.hoist_inline_string_enum(
+                                items_schema,
+                                values,
+                                inline_name.to_string(),
+                                dependencies,
+                            ),
+                            None => SchemaType::Primitive {
+                                rust_type: "String".to_string(),
                                 serde_with: None,
-                            }
+                            },
                         }
-                        OpenApiSchemaType::Boolean => SchemaType::Primitive {
-                            rust_type: "bool".to_string(),
+                    }
+                    OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
+                        let details = items_schema.details();
+                        let rust_type = self.get_number_rust_type(schema_type.clone(), details);
+                        SchemaType::Primitive {
+                            rust_type,
                             serde_with: None,
-                        },
+                        }
+                    }
+                    OpenApiSchemaType::Boolean => SchemaType::Primitive {
+                        rust_type: "bool".to_string(),
+                        serde_with: None,
+                    },
+                    OpenApiSchemaType::Object => {
+                        // Inline object in array - create a named schema for it
+                        let object_type_name = inline_name.to_string();
+
+                        // Analyze the object schema
+                        let object_type = self.analyze_object_schema(items_schema, dependencies)?;
+
+                        // Create an analyzed schema for the inline object
+                        let inline_schema = AnalyzedSchema {
+                            name: object_type_name.clone(),
+                            original: serde_json::to_value(items_schema).unwrap_or(Value::Null),
+                            schema_type: object_type,
+                            dependencies: dependencies.clone(),
+                            nullable: false,
+                            description: items_schema.details().description.clone(),
+                            default: None,
+                        };
+
+                        // Add the inline object as a named schema
+                        self.resolved_cache
+                            .insert(object_type_name.clone(), inline_schema);
+                        dependencies.insert(object_type_name.clone());
+
+                        // Return a reference to the named schema
+                        SchemaType::Reference {
+                            target: object_type_name,
+                        }
+                    }
+                    OpenApiSchemaType::Array => {
+                        // Array of arrays - recursively analyze
+                        self.analyze_array_schema(items_schema, parent_schema_name, dependencies)?
+                    }
+                    _ => SchemaType::Primitive {
+                        rust_type: "serde_json::Value".to_string(),
+                        serde_with: None,
+                    },
+                }
+            }
+            Schema::OneOf { .. } | Schema::AnyOf { .. } => {
+                // Union types in arrays - analyze recursively
+                let analyzed = self.analyze_schema_value(items_schema, "ArrayItem")?;
+
+                // If we got a discriminated union or union, we need to create a separate schema for it
+                match &analyzed.schema_type {
+                    SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => {
+                        // Generate a unique name for the union schema based on the parent context
+                        // Use the parent context directly to maintain consistent naming
+                        let union_name = format!("{inline_name}Union");
+
+                        // Create a new analyzed schema with the correct name
+                        let mut union_schema = analyzed;
+                        union_schema.name = union_name.clone();
+
+                        // Add the union as a separate schema
+                        self.resolved_cache.insert(union_name.clone(), union_schema);
+
+                        // Add dependency
+                        dependencies.insert(union_name.clone());
+
+                        // Return a reference to the union schema
+                        SchemaType::Reference { target: union_name }
+                    }
+                    _ => analyzed.schema_type,
+                }
+            }
+            Schema::Untyped { .. } => {
+                // Try to infer the type
+                if let Some(inferred) = items_schema.inferred_type() {
+                    match inferred {
                         OpenApiSchemaType::Object => {
                             // Inline object in array - create a named schema for it
-                            let object_type_name = format!("{parent_schema_name}Item");
+                            let object_type_name = inline_name.to_string();
 
                             // Analyze the object schema
                             let object_type =
@@ -4062,141 +4234,57 @@ impl SchemaAnalyzer {
                                 target: object_type_name,
                             }
                         }
-                        OpenApiSchemaType::Array => {
-                            // Array of arrays - recursively analyze
-                            self.analyze_array_schema(
-                                items_schema,
-                                parent_schema_name,
-                                dependencies,
-                            )?
+                        OpenApiSchemaType::String => {
+                            // Typeless (OpenAPI 3.1) enum in array items —
+                            // same hoisting as the typed-string arm.
+                            match items_schema
+                                .details()
+                                .string_enum_values()
+                                .filter(|values| !values.is_empty())
+                            {
+                                Some(values) => self.hoist_inline_string_enum(
+                                    items_schema,
+                                    values,
+                                    inline_name.to_string(),
+                                    dependencies,
+                                ),
+                                None => SchemaType::Primitive {
+                                    rust_type: "String".to_string(),
+                                    serde_with: None,
+                                },
+                            }
                         }
+                        OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
+                            let details = items_schema.details();
+                            let rust_type = self.get_number_rust_type(inferred, details);
+                            SchemaType::Primitive {
+                                rust_type,
+                                serde_with: None,
+                            }
+                        }
+                        OpenApiSchemaType::Boolean => SchemaType::Primitive {
+                            rust_type: "bool".to_string(),
+                            serde_with: None,
+                        },
                         _ => SchemaType::Primitive {
                             rust_type: "serde_json::Value".to_string(),
                             serde_with: None,
                         },
                     }
-                }
-                Schema::OneOf { .. } | Schema::AnyOf { .. } => {
-                    // Union types in arrays - analyze recursively
-                    let analyzed = self.analyze_schema_value(items_schema, "ArrayItem")?;
-
-                    // If we got a discriminated union or union, we need to create a separate schema for it
-                    match &analyzed.schema_type {
-                        SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => {
-                            // Generate a unique name for the union schema based on the parent context
-                            // Use the parent context directly to maintain consistent naming
-                            let union_name = format!("{parent_schema_name}ItemUnion");
-
-                            // Create a new analyzed schema with the correct name
-                            let mut union_schema = analyzed;
-                            union_schema.name = union_name.clone();
-
-                            // Add the union as a separate schema
-                            self.resolved_cache.insert(union_name.clone(), union_schema);
-
-                            // Add dependency
-                            dependencies.insert(union_name.clone());
-
-                            // Return a reference to the union schema
-                            SchemaType::Reference { target: union_name }
-                        }
-                        _ => analyzed.schema_type,
+                } else {
+                    SchemaType::Primitive {
+                        rust_type: "serde_json::Value".to_string(),
+                        serde_with: None,
                     }
                 }
-                Schema::Untyped { .. } => {
-                    // Try to infer the type
-                    if let Some(inferred) = items_schema.inferred_type() {
-                        match inferred {
-                            OpenApiSchemaType::Object => {
-                                // Inline object in array - create a named schema for it
-                                let object_type_name = format!("{parent_schema_name}Item");
-
-                                // Analyze the object schema
-                                let object_type =
-                                    self.analyze_object_schema(items_schema, dependencies)?;
-
-                                // Create an analyzed schema for the inline object
-                                let inline_schema = AnalyzedSchema {
-                                    name: object_type_name.clone(),
-                                    original: serde_json::to_value(items_schema)
-                                        .unwrap_or(Value::Null),
-                                    schema_type: object_type,
-                                    dependencies: dependencies.clone(),
-                                    nullable: false,
-                                    description: items_schema.details().description.clone(),
-                                    default: None,
-                                };
-
-                                // Add the inline object as a named schema
-                                self.resolved_cache
-                                    .insert(object_type_name.clone(), inline_schema);
-                                dependencies.insert(object_type_name.clone());
-
-                                // Return a reference to the named schema
-                                SchemaType::Reference {
-                                    target: object_type_name,
-                                }
-                            }
-                            OpenApiSchemaType::String => {
-                                // Typeless (OpenAPI 3.1) enum in array items —
-                                // same hoisting as the typed-string arm.
-                                match items_schema
-                                    .details()
-                                    .string_enum_values()
-                                    .filter(|values| !values.is_empty())
-                                {
-                                    Some(values) => self.hoist_inline_string_enum(
-                                        items_schema,
-                                        values,
-                                        format!("{parent_schema_name}Item"),
-                                        dependencies,
-                                    ),
-                                    None => SchemaType::Primitive {
-                                        rust_type: "String".to_string(),
-                                        serde_with: None,
-                                    },
-                                }
-                            }
-                            OpenApiSchemaType::Integer | OpenApiSchemaType::Number => {
-                                let details = items_schema.details();
-                                let rust_type = self.get_number_rust_type(inferred, details);
-                                SchemaType::Primitive {
-                                    rust_type,
-                                    serde_with: None,
-                                }
-                            }
-                            OpenApiSchemaType::Boolean => SchemaType::Primitive {
-                                rust_type: "bool".to_string(),
-                                serde_with: None,
-                            },
-                            _ => SchemaType::Primitive {
-                                rust_type: "serde_json::Value".to_string(),
-                                serde_with: None,
-                            },
-                        }
-                    } else {
-                        SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        }
-                    }
-                }
-                _ => SchemaType::Primitive {
-                    rust_type: "serde_json::Value".to_string(),
-                    serde_with: None,
-                },
-            };
-
-            Ok(SchemaType::Array {
-                item_type: Box::new(item_type),
-            })
-        } else {
-            // No items specified, fall back to generic array
-            Ok(SchemaType::Primitive {
-                rust_type: "Vec<serde_json::Value>".to_string(),
+            }
+            _ => SchemaType::Primitive {
+                rust_type: "serde_json::Value".to_string(),
                 serde_with: None,
-            })
-        }
+            },
+        };
+
+        Ok(item_type)
     }
 
     fn get_number_rust_type(
@@ -6032,6 +6120,37 @@ impl SchemaAnalyzer {
 /// untagged `Schema` enum that is "data did not match any variant of untagged
 /// enum Schema", with no field, schema name, or position. Tracking the path
 /// turns that into a JSON Pointer the author can jump straight to (issue #60).
+/// The one schema every position shares, if they are interchangeable: the same
+/// `$ref`, or the same primitive type and format. Inline objects never qualify
+/// — two structurally identical inline objects still hoist two named types, so
+/// treating them as one element type would silently drop a generated name.
+fn shared_positional_schema(positions: &[Schema]) -> Option<&Schema> {
+    let first = positions.first()?;
+    let key = positional_schema_key(first)?;
+    positions
+        .iter()
+        .skip(1)
+        .all(|position| positional_schema_key(position).as_deref() == Some(key.as_str()))
+        .then_some(first)
+}
+
+fn positional_schema_key(schema: &Schema) -> Option<String> {
+    if let Some(reference) = schema.reference() {
+        return Some(format!("$ref {reference}"));
+    }
+    let details = schema.details();
+    if details.properties.is_some() || details.enum_values.is_some() || details.items.is_some() {
+        return None;
+    }
+    match schema.schema_type()? {
+        crate::openapi::SchemaType::Object | crate::openapi::SchemaType::Array => None,
+        scalar => Some(format!(
+            "{scalar:?} {}",
+            details.format.as_deref().unwrap_or_default()
+        )),
+    }
+}
+
 fn parse_spec_document(openapi_spec: &Value) -> Result<OpenApiSpec> {
     serde_path_to_error::deserialize(openapi_spec).map_err(|error| {
         let mut pointer = json_pointer(error.path());
@@ -6485,6 +6604,11 @@ fn rewrite_schema_type_names(schema_type: &mut SchemaType, aliases: &BTreeMap<St
             }
         }
         SchemaType::Array { item_type } => rewrite_schema_type_names(item_type, aliases),
+        SchemaType::Tuple { element_types } => {
+            for element_type in element_types {
+                rewrite_schema_type_names(element_type, aliases);
+            }
+        }
         SchemaType::Reference { target } => {
             *target = renamed_schema_name(target, aliases);
         }

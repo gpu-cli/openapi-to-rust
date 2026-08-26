@@ -6,6 +6,27 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (generated API).** Positional item schemas — 2020-12
+  `prefixItems` and the draft-04 `items: [A, B]` spelling — now generate typed
+  Rust tuples instead of `Vec<serde_json::Value>`, when the spec pins the
+  array's length (`minItems`/`maxItems`, `items: false`, or
+  `additionalItems: false`). A `[string, integer]` pair becomes
+  `(String, i64)`; a `$ref` position keeps its named type, and an inline object
+  position is hoisted to one. When no extras are allowed but the length varies
+  and every position shares a type, the array becomes `Vec<T>`.
+
+  An *open* `prefixItems` still generates `Vec<serde_json::Value>` on purpose:
+  it permits extra elements of any type, and a fixed-arity tuple would reject
+  payloads the spec allows (#62).
+
+### Fixed
+
+- `items: false` and `items: true` — 2020-12 boolean schemas, and the canonical
+  way to close a tuple — now parse instead of failing the document with "data
+  did not match any variant of untagged enum Schema" (#62).
+
 ## [0.13.0] - 2026-08-26
 
 ### Changed
