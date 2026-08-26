@@ -6,6 +6,20 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-26
+
+### Changed
+
+- **Breaking (library API).** `SchemaDetails.items` is now `Option<Items>`
+  rather than `Option<Box<Schema>>`, so the keyword can hold either the
+  2020-12 single-schema form or a draft-04 positional tuple. Read the former
+  through `SchemaDetails::item_schema()` and the latter — unified with
+  `prefixItems` — through `SchemaDetails::positional_items()`. Generated code
+  is unaffected.
+- **Breaking (library API).** `GeneratorError` gained a `ParseErrorAt`
+  variant carrying the JSON Pointer of a located parse failure. Exhaustive
+  matches over the enum need a new arm.
+
 ### Fixed
 
 - The draft-04 positional tuple form `items: [A, B]` — still emitted under
