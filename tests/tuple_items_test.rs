@@ -128,3 +128,96 @@ fn positional_items_reach_the_server_validator_as_prefix_items() {
         validation.content
     );
 }
+
+#[test]
+fn schema_parse_failures_name_the_offending_node() {
+    let mut spec = spec_with_pair_keyword("items");
+    spec["components"]["schemas"]["Body"]["properties"]["pair"]["items"] = json!(5);
+
+    let error = match SchemaAnalyzer::new(spec) {
+        Ok(_) => panic!("a numeric `items` is not a schema"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(
+        error.contains("#/components/schemas/Body/properties/pair/items"),
+        "the error must point at the offending node, got: {error}"
+    );
+}
+
+#[test]
+fn inline_schema_parse_failures_name_the_offending_node() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "repro", "version": "1.0.0" },
+        "paths": { "/example": { "post": {
+            "operationId": "example",
+            "requestBody": { "required": true, "content": {
+                "application/json": { "schema": {
+                    "type": "object",
+                    "properties": { "pair": { "type": "array", "items": 5 } }
+                }}
+            }},
+            "responses": { "200": { "description": "OK" } }
+        }}}
+    });
+
+    let error = match SchemaAnalyzer::new(spec) {
+        Ok(_) => panic!("a numeric `items` is not a schema"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(
+        error.contains(
+            "#/paths/~1example/post/requestBody/content/application~1json/schema/properties/pair/items"
+        ),
+        "the error must point at the offending node, got: {error}"
+    );
+}
+
+#[test]
+fn parse_failures_skip_valid_schemas_whose_property_names_look_like_keywords() {
+    // A `properties` map holding one property named `properties` fails to parse
+    // as a schema even though the document is valid, so shape alone cannot
+    // decide what is a schema. Ordered before the real failure on purpose.
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "repro", "version": "1.0.0" },
+        "paths": {
+            "/a-valid": { "post": {
+                "operationId": "valid",
+                "requestBody": { "required": true, "content": {
+                    "application/json": { "schema": {
+                        "type": "object",
+                        "properties": { "properties": {
+                            "type": "array",
+                            "description": "custom properties",
+                            "items": { "type": "string" }
+                        }}
+                    }}
+                }},
+                "responses": { "200": { "description": "OK" } }
+            }},
+            "/b-broken": { "post": {
+                "operationId": "broken",
+                "requestBody": { "required": true, "content": {
+                    "application/json": { "schema": {
+                        "type": "object",
+                        "properties": { "pair": { "type": "array", "items": 5 } }
+                    }}
+                }},
+                "responses": { "200": { "description": "OK" } }
+            }}
+        }
+    });
+
+    let error = match SchemaAnalyzer::new(spec) {
+        Ok(_) => panic!("a numeric `items` is not a schema"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(
+        error.contains("#/paths/~1b-broken/post/requestBody/content/application~1json/schema/properties/pair/items"),
+        "the error must name the malformed schema, not the valid one, got: {error}"
+    );
+}

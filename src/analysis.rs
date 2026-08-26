@@ -1,6 +1,7 @@
 use crate::openapi::{Discriminator, OpenApiSpec, Schema, SchemaType as OpenApiSchemaType};
 use crate::type_mapping::TypeMapper;
 use crate::{GeneratorError, Result};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -1092,8 +1093,7 @@ impl SchemaAnalyzer {
     /// points use this so user TOML config drives type generation.
     pub fn with_type_mapper(mut openapi_spec: Value, type_mapper: TypeMapper) -> Result<Self> {
         disambiguate_component_schema_names(&mut openapi_spec);
-        let spec: OpenApiSpec =
-            serde_json::from_value(openapi_spec.clone()).map_err(GeneratorError::ParseError)?;
+        let spec: OpenApiSpec = parse_spec_document(&openapi_spec)?;
         let schemas = Self::extract_schemas(&spec)?;
 
         let component_parameters = spec
@@ -4616,8 +4616,7 @@ impl SchemaAnalyzer {
 
     /// Analyze OpenAPI operations to extract request/response schemas
     fn analyze_operations(&mut self, analysis: &mut SchemaAnalysis) -> Result<()> {
-        let spec: crate::openapi::OpenApiSpec = serde_json::from_value(self.openapi_spec.clone())
-            .map_err(GeneratorError::ParseError)?;
+        let spec: crate::openapi::OpenApiSpec = parse_spec_document(&self.openapi_spec)?;
         // Operation IDs are emitted into one Rust module, so collision
         // detection spans paths and webhooks. Index their canonical Rust type
         // names once instead of re-canonicalizing every previously analyzed
@@ -6024,6 +6023,241 @@ impl SchemaAnalyzer {
             _ => false,
         }
     }
+}
+
+/// Deserialize the whole document, locating any failure to the node that
+/// caused it.
+///
+/// `serde_json::from_value` reports only serde's innermost message — for the
+/// untagged `Schema` enum that is "data did not match any variant of untagged
+/// enum Schema", with no field, schema name, or position. Tracking the path
+/// turns that into a JSON Pointer the author can jump straight to (issue #60).
+fn parse_spec_document(openapi_spec: &Value) -> Result<OpenApiSpec> {
+    serde_path_to_error::deserialize(openapi_spec).map_err(|error| {
+        let mut pointer = json_pointer(error.path());
+        // Untagged enums deserialize from a buffered copy, so serde's path
+        // stops at the outermost `Schema` — usually the component schema.
+        // Walk the failing subtree to name the node that actually failed.
+        pointer.push_str(&refine_schema_failure(openapi_spec, &pointer));
+        GeneratorError::ParseErrorAt {
+            pointer,
+            message: error.into_inner().to_string(),
+        }
+    })
+}
+
+/// Schema keywords holding a single subschema.
+const SUBSCHEMA_KEYWORDS: [&str; 11] = [
+    "items",
+    "additionalProperties",
+    "propertyNames",
+    "unevaluatedProperties",
+    "unevaluatedItems",
+    "contains",
+    "contentSchema",
+    "if",
+    "then",
+    "else",
+    "not",
+];
+
+/// Schema keywords holding a list of subschemas.
+const SUBSCHEMA_LIST_KEYWORDS: [&str; 4] = ["oneOf", "anyOf", "allOf", "prefixItems"];
+
+/// Schema keywords holding a map of named subschemas.
+const SUBSCHEMA_MAP_KEYWORDS: [&str; 5] = [
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "$defs",
+    "definitions",
+];
+
+/// Budget on parse attempts while refining a located failure. Refinement runs
+/// only on the error path, but a multi-megabyte document should still not turn
+/// one bad keyword into an unbounded search.
+const REFINE_PARSE_BUDGET: usize = 20_000;
+
+/// Extend a located parse failure with the pointer suffix of the malformed
+/// schema below it, so the reported pointer names the offending keyword rather
+/// than the enclosing component schema, path item, or `paths` map.
+///
+/// Serde's own path stops at the first `#[serde(flatten)]` or untagged enum it
+/// buffers through — for a document that is `#/paths` or the component schema —
+/// so the rest of the descent happens here.
+fn refine_schema_failure(openapi_spec: &Value, pointer: &str) -> String {
+    let Some(path) = pointer.strip_prefix('#') else {
+        return String::new();
+    };
+    let Some(node) = openapi_spec.pointer(path) else {
+        return String::new();
+    };
+    let segments = path.split('/').skip(1).collect::<Vec<_>>();
+    let last = segments.last().copied().unwrap_or_default();
+    let parent = segments
+        .len()
+        .checked_sub(2)
+        .map(|index| segments[index])
+        .unwrap_or_default();
+
+    if last == "schema" || holds_schemas(parent) {
+        return if parses_as_schema(node) {
+            String::new()
+        } else {
+            deepest_schema_failure(node)
+        };
+    }
+
+    let mut budget = REFINE_PARSE_BUDGET;
+    locate_failing_schema(node, holds_schemas(last), &mut budget).unwrap_or_default()
+}
+
+/// Whether a key's members are schemas: the Components `schemas` map and the
+/// JSON Schema `$defs` / `definitions` maps.
+fn holds_schemas(key: &str) -> bool {
+    matches!(key, "schemas" | "$defs" | "definitions")
+}
+
+/// Walk OpenAPI structure looking for the malformed schema, then drill into it
+/// keyword-first.
+///
+/// Only nodes in a schema position are tested. Guessing from shape does not
+/// work: a `properties` map whose single property is named `properties` is
+/// indistinguishable from a schema by its keys alone, and fails to parse as one
+/// — naming it would point the author at a node that is perfectly valid.
+fn locate_failing_schema(
+    node: &Value,
+    children_are_schemas: bool,
+    budget: &mut usize,
+) -> Option<String> {
+    for (segment, key, child) in child_nodes(node) {
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        if children_are_schemas || key == "schema" {
+            if !parses_as_schema(child) {
+                return Some(format!("/{segment}{}", deepest_schema_failure(child)));
+            }
+            continue;
+        }
+        if let Some(rest) = locate_failing_schema(child, holds_schemas(key), budget) {
+            return Some(format!("/{segment}{rest}"));
+        }
+    }
+    None
+}
+
+fn parses_as_schema(node: &Value) -> bool {
+    Schema::deserialize(node).is_ok()
+}
+
+/// Depth-first search inside a malformed schema for the deepest subschema that
+/// also fails to parse, so the pointer names the offending keyword rather than
+/// the schema that contains it. The caller guarantees `node` already failed.
+fn deepest_schema_failure(node: &Value) -> String {
+    let Some(object) = node.as_object() else {
+        return String::new();
+    };
+
+    let descend = |segment: String, child: &Value| -> Option<String> {
+        if parses_as_schema(child) {
+            return None;
+        }
+        Some(format!("/{segment}{}", deepest_schema_failure(child)))
+    };
+
+    for keyword in SUBSCHEMA_KEYWORDS {
+        if let Some(child) = object.get(keyword)
+            && let Some(suffix) = descend(escape_pointer_segment(keyword), child)
+        {
+            return suffix;
+        }
+    }
+    for keyword in SUBSCHEMA_LIST_KEYWORDS {
+        if let Some(Value::Array(children)) = object.get(keyword) {
+            for (index, child) in children.iter().enumerate() {
+                if let Some(suffix) = descend(
+                    format!("{}/{index}", escape_pointer_segment(keyword)),
+                    child,
+                ) {
+                    return suffix;
+                }
+            }
+        }
+    }
+    for keyword in SUBSCHEMA_MAP_KEYWORDS {
+        if let Some(Value::Object(children)) = object.get(keyword) {
+            for (name, child) in children {
+                if let Some(suffix) = descend(
+                    format!(
+                        "{}/{}",
+                        escape_pointer_segment(keyword),
+                        escape_pointer_segment(name)
+                    ),
+                    child,
+                ) {
+                    return suffix;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Object members and array elements, paired with their JSON Pointer segment
+/// and raw key. Scalars have no children and are skipped, as are members that
+/// hold data rather than schemas: an `x-` extension or an `example` payload is
+/// free-form JSON that never fails to deserialize, so anything schema-shaped
+/// found in there is a coincidence, not the failure being located.
+fn child_nodes(node: &Value) -> Vec<(String, &str, &Value)> {
+    const DATA_KEYWORDS: [&str; 5] = ["example", "examples", "default", "enum", "const"];
+
+    match node {
+        Value::Object(members) => members
+            .iter()
+            .filter(|(name, child)| {
+                (child.is_object() || child.is_array())
+                    && !name.starts_with("x-")
+                    && !DATA_KEYWORDS.contains(&name.as_str())
+            })
+            .map(|(name, child)| (escape_pointer_segment(name), name.as_str(), child))
+            .collect(),
+        Value::Array(elements) => elements
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| child.is_object() || child.is_array())
+            .map(|(index, child)| (index.to_string(), "", child))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn escape_pointer_segment(segment: &str) -> String {
+    segment.replace('~', "~0").replace('/', "~1")
+}
+
+/// Render a serde path as an RFC 6901 JSON Pointer (`#/components/schemas/Foo`)
+/// so it can be pasted into any spec tooling. `~` and `/` inside a key are
+/// escaped per the RFC.
+fn json_pointer(path: &serde_path_to_error::Path) -> String {
+    use serde_path_to_error::Segment;
+
+    let mut pointer = String::from("#");
+    for segment in path.iter() {
+        match segment {
+            Segment::Seq { index } => {
+                pointer.push('/');
+                pointer.push_str(&index.to_string());
+            }
+            Segment::Map { key } | Segment::Enum { variant: key } => {
+                pointer.push('/');
+                pointer.push_str(&escape_pointer_segment(key));
+            }
+            Segment::Unknown => pointer.push_str("/?"),
+        }
+    }
+    pointer
 }
 
 fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
