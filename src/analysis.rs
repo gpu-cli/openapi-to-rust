@@ -103,6 +103,270 @@ pub struct SchemaAnalysis {
     pub validation_context: ValidationContext,
 }
 
+/// Convert any `serde_json::Value` still carried as a stringly-typed
+/// `Primitive` into [`SchemaType::Untyped`].
+///
+/// Several fallbacks build their type from a [`TypeMapper`] result rather than
+/// through the analyzer's helpers, so this runs over the finished IR as a net.
+/// Anything it catches is reported as [`UntypedReason::Unclassified`] — a
+/// visible gap in the taxonomy rather than a silently missing count.
+///
+/// [`TypeMapper`]: crate::type_mapping::TypeMapper
+fn normalize_untyped(schema_type: &mut SchemaType, depth: usize) {
+    if depth > UNTYPED_WALK_DEPTH {
+        return;
+    }
+    match schema_type {
+        SchemaType::Primitive { rust_type, .. } => {
+            let shape = match rust_type.as_str() {
+                "serde_json::Value" => Some(UntypedShape::Value),
+                "Vec<serde_json::Value>" => Some(UntypedShape::ValueArray),
+                _ => None,
+            };
+            if let Some(shape) = shape {
+                *schema_type = SchemaType::Untyped {
+                    shape,
+                    reason: UntypedReason::Unclassified,
+                };
+            }
+        }
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            for property in properties.values_mut() {
+                normalize_untyped(&mut property.schema_type, depth + 1);
+            }
+            if let ObjectAdditionalProperties::Typed { value_type } = additional_properties {
+                normalize_untyped(value_type, depth + 1);
+            }
+        }
+        SchemaType::Array { item_type } => normalize_untyped(item_type, depth + 1),
+        SchemaType::Tuple { element_types } => {
+            for element_type in element_types {
+                normalize_untyped(element_type, depth + 1);
+            }
+        }
+        SchemaType::Untyped { .. }
+        | SchemaType::StringEnum { .. }
+        | SchemaType::ExtensibleEnum { .. }
+        | SchemaType::DiscriminatedUnion { .. }
+        | SchemaType::Union { .. }
+        | SchemaType::Composition { .. }
+        | SchemaType::Reference { .. } => {}
+    }
+}
+
+impl SchemaAnalysis {
+    /// Every generated field that carries `serde_json::Value`, with the reason.
+    ///
+    /// Derived from the analyzed types rather than recorded as analysis runs,
+    /// so the count tracks generated output: a schema referenced by fifty
+    /// properties contributes fifty findings, and a pruned one contributes
+    /// none.
+    pub fn untyped_fields(&self) -> Vec<UntypedFinding> {
+        let mut findings = Vec::new();
+        for (name, schema) in &self.schemas {
+            collect_untyped(&schema.schema_type, name, &mut findings, 0);
+        }
+        findings.sort();
+        findings
+    }
+}
+
+/// Depth limit for the census walk. Generated types bottom out well before
+/// this; the bound only stops a cycle that slipped through analysis from
+/// hanging a diagnostic.
+const UNTYPED_WALK_DEPTH: usize = 32;
+
+fn collect_untyped(
+    schema_type: &SchemaType,
+    context: &str,
+    findings: &mut Vec<UntypedFinding>,
+    depth: usize,
+) {
+    if depth > UNTYPED_WALK_DEPTH {
+        return;
+    }
+    match schema_type {
+        SchemaType::Untyped { shape, reason } => findings.push(UntypedFinding {
+            context: context.to_string(),
+            shape: *shape,
+            reason: *reason,
+        }),
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            for (property_name, property) in properties {
+                collect_untyped(
+                    &property.schema_type,
+                    &format!("{context}.{property_name}"),
+                    findings,
+                    depth + 1,
+                );
+            }
+            match additional_properties {
+                ObjectAdditionalProperties::Untyped => findings.push(UntypedFinding {
+                    context: format!("{context}.<additionalProperties>"),
+                    shape: UntypedShape::ValueMap,
+                    reason: UntypedReason::UntypedAdditionalProperties,
+                }),
+                ObjectAdditionalProperties::Typed { value_type } => collect_untyped(
+                    value_type,
+                    &format!("{context}.<additionalProperties>"),
+                    findings,
+                    depth + 1,
+                ),
+                ObjectAdditionalProperties::Forbidden => {}
+            }
+        }
+        SchemaType::Array { item_type } => {
+            collect_untyped(item_type, &format!("{context}[]"), findings, depth + 1)
+        }
+        SchemaType::Tuple { element_types } => {
+            for (index, element_type) in element_types.iter().enumerate() {
+                collect_untyped(
+                    element_type,
+                    &format!("{context}[{index}]"),
+                    findings,
+                    depth + 1,
+                );
+            }
+        }
+        // A union branch that mapped to an untyped Rust type is carried as a
+        // variant target string, so it is recognized by name here.
+        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+            for (index, variant) in variants.iter().enumerate() {
+                if let Some(shape) = untyped_shape_of(&variant.target) {
+                    findings.push(UntypedFinding {
+                        context: format!("{context}|{index}"),
+                        shape,
+                        reason: UntypedReason::UntypedUnionBranch,
+                    });
+                }
+            }
+        }
+        SchemaType::Primitive { .. }
+        | SchemaType::StringEnum { .. }
+        | SchemaType::ExtensibleEnum { .. }
+        | SchemaType::DiscriminatedUnion { .. }
+        | SchemaType::Reference { .. } => {}
+    }
+}
+
+/// The untyped shape a generated Rust type name denotes, if any.
+fn untyped_shape_of(rust_type: &str) -> Option<UntypedShape> {
+    match rust_type {
+        "serde_json::Value" => Some(UntypedShape::Value),
+        "Vec<serde_json::Value>" => Some(UntypedShape::ValueArray),
+        _ => None,
+    }
+}
+
+/// One generated field (or type) that carries `serde_json::Value` instead of a
+/// generated Rust type.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+pub struct UntypedFinding {
+    /// Where it surfaced, as far as analysis knows: usually
+    /// `Schema.property`, or a synthesized operation type.
+    pub context: String,
+    /// The shape the generator will emit.
+    pub shape: UntypedShape,
+    /// Why the schema produced no better type.
+    pub reason: UntypedReason,
+}
+
+/// The generated shape carrying the untyped payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntypedShape {
+    /// `serde_json::Value`
+    Value,
+    /// `Vec<serde_json::Value>`
+    ValueArray,
+    /// `BTreeMap<String, serde_json::Value>`
+    ValueMap,
+}
+
+/// Why a schema produced an untyped value.
+///
+/// The split that matters is [`UntypedReason::verdict`]: a schema that says
+/// "any JSON" has no better Rust type and is generated correctly, while a
+/// schema that carried type information the generator dropped is a defect with
+/// a fix. Counting the two together would make the corpus look worse than it is
+/// and hide which cases are worth work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UntypedReason {
+    /// `{}`, `true`, or a schema with no constraining keyword at all: the spec
+    /// declares any JSON value.
+    AnySchema,
+    /// `type: object` with no `properties` and no typed `additionalProperties`:
+    /// an object of unknown shape.
+    OpaqueObject,
+    /// `additionalProperties: true` or absent, so map values are unconstrained.
+    UntypedAdditionalProperties,
+    /// `type: array` with no `items` at all.
+    ArrayWithoutItems,
+    /// Positional items that permit extra elements of any type (issue #62,
+    /// tier 3), so neither a tuple nor a `Vec<T>` is sound.
+    OpenPositionalItems,
+    /// A union (`oneOf`/`anyOf`) whose branches did not reduce to one
+    /// generated Rust type.
+    UnrepresentableUnion,
+    /// An `allOf` composition that could not be merged into a struct.
+    UnrepresentableComposition,
+    /// The schema declared a type keyword the generator has no mapping for.
+    UnsupportedTypeKeyword,
+    /// A `$ref` that analysis could not resolve to a generated schema.
+    UnresolvedReference,
+    /// A `oneOf`/`anyOf` branch that mapped to an untyped value, so the
+    /// generated union carries a `serde_json::Value` variant. Whether that is
+    /// faithful depends on the branch, which the analyzed type no longer says.
+    UntypedUnionBranch,
+    /// Reached a fallback that has not been classified yet. Every one of these
+    /// is a gap in this taxonomy, not in the generator.
+    Unclassified,
+}
+
+impl UntypedReason {
+    /// Whether the untyped output is the honest reading of the schema, or a
+    /// case where the generator can do better.
+    pub fn verdict(self) -> UntypedVerdict {
+        match self {
+            // The spec genuinely declares an unconstrained value.
+            Self::AnySchema | Self::OpaqueObject | Self::UntypedAdditionalProperties => {
+                UntypedVerdict::Faithful
+            }
+            // An array with no `items` says nothing about elements, and open
+            // positional items permit extras of any type: both are the spec's
+            // choice, not a dropped constraint.
+            Self::ArrayWithoutItems | Self::OpenPositionalItems => UntypedVerdict::Faithful,
+            // These carried type information that did not survive analysis.
+            Self::UnrepresentableUnion
+            | Self::UnrepresentableComposition
+            | Self::UnsupportedTypeKeyword
+            | Self::UnresolvedReference => UntypedVerdict::Recoverable,
+            Self::UntypedUnionBranch | Self::Unclassified => UntypedVerdict::Unknown,
+        }
+    }
+}
+
+/// Whether an untyped output is worth working on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntypedVerdict {
+    /// The schema declares an unconstrained value; `serde_json::Value` is correct.
+    Faithful,
+    /// The schema carried type information the generator dropped.
+    Recoverable,
+    /// Not yet classified.
+    Unknown,
+}
+
 /// Server-relevant semantics of one OpenAPI Response Object.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct OperationResponse {
@@ -215,6 +479,16 @@ pub enum SchemaType {
     Composition { schemas: Vec<SchemaRef> },
     /// Reference to another schema
     Reference { target: String },
+    /// A value the generator could not type, rendered as `serde_json::Value`.
+    ///
+    /// The reason travels with the type rather than in a side table, so the
+    /// census counts what is actually generated: a schema analyzed once but
+    /// referenced by fifty properties yields fifty untyped fields, and one that
+    /// is pruned yields none.
+    Untyped {
+        shape: UntypedShape,
+        reason: UntypedReason,
+    },
 }
 
 /// How an Object handles `additionalProperties`. Q2.3 split the
@@ -1080,6 +1354,38 @@ pub struct SchemaAnalyzer {
 }
 
 impl SchemaAnalyzer {
+    /// The type to emit when a schema gives analysis nothing to work with.
+    /// Every `serde_json::Value` that analysis produces goes through here or
+    /// [`Self::untyped_value_array`], so a fallback cannot escape the census.
+    fn untyped_value(&self, _context: impl Into<String>, reason: UntypedReason) -> SchemaType {
+        SchemaType::Untyped {
+            shape: UntypedShape::Value,
+            reason,
+        }
+    }
+
+    /// As [`Self::untyped_value`], for an array of unconstrained elements.
+    fn untyped_value_array(
+        &self,
+        _context: impl Into<String>,
+        reason: UntypedReason,
+    ) -> SchemaType {
+        SchemaType::Untyped {
+            shape: UntypedShape::ValueArray,
+            reason,
+        }
+    }
+
+    /// The schema currently being analyzed, for finding context.
+    fn untyped_context(&self, detail: &str) -> String {
+        match (&self.current_schema_name, detail) {
+            (Some(schema), "") => schema.clone(),
+            (Some(schema), detail) => format!("{schema}.{detail}"),
+            (None, "") => "<anonymous>".to_string(),
+            (None, detail) => detail.to_string(),
+        }
+    }
+
     fn uses_aws_query_conventions(&self) -> bool {
         self.openapi_spec
             .pointer("/info/x-providerName")
@@ -1369,6 +1675,10 @@ impl SchemaAnalyzer {
             if let Some(ext) = extract_enum_extensions(&analyzed.original, enum_value_count, name) {
                 analysis.enum_extensions.insert(name.clone(), ext);
             }
+        }
+
+        for schema in analysis.schemas.values_mut() {
+            normalize_untyped(&mut schema.schema_type, 0);
         }
 
         Ok(analysis)
@@ -1732,10 +2042,10 @@ impl SchemaAnalyzer {
                             "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
                             reference
                         );
-                        SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        }
+                        self.untyped_value(
+                            format!("$ref {reference}"),
+                            UntypedReason::UnresolvedReference,
+                        )
                     }
                 }
             }
@@ -1820,10 +2130,10 @@ impl SchemaAnalyzer {
                     match inferred {
                         OpenApiSchemaType::Object => {
                             if self.should_use_dynamic_json(schema) {
-                                SchemaType::Primitive {
-                                    rust_type: "serde_json::Value".to_string(),
-                                    serde_with: None,
-                                }
+                                self.untyped_value(
+                                    self.untyped_context(""),
+                                    UntypedReason::OpaqueObject,
+                                )
                             } else {
                                 self.analyze_object_schema(schema, &mut dependencies)?
                             }
@@ -1833,16 +2143,13 @@ impl SchemaAnalyzer {
                                 values: details.string_enum_values().unwrap_or_default(),
                             }
                         }
-                        _ => SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        },
+                        _ => self.untyped_value(
+                            self.untyped_context(""),
+                            UntypedReason::UnsupportedTypeKeyword,
+                        ),
                     }
                 } else {
-                    SchemaType::Primitive {
-                        rust_type: "serde_json::Value".to_string(),
-                        serde_with: None,
-                    }
+                    self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema)
                 }
             }
         };
@@ -1903,18 +2210,15 @@ impl SchemaAnalyzer {
             }
             OpenApiSchemaType::Object => {
                 if self.should_use_dynamic_json(schema) {
-                    SchemaType::Primitive {
-                        rust_type: self.type_mapper.dynamic_json().rust_type,
-                        serde_with: None,
-                    }
+                    self.untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject)
                 } else {
                     self.analyze_object_schema(schema, dependencies)?
                 }
             }
-            _ => SchemaType::Primitive {
-                rust_type: self.type_mapper.dynamic_json().rust_type,
-                serde_with: None,
-            },
+            _ => self.untyped_value(
+                self.untyped_context(""),
+                UntypedReason::UnsupportedTypeKeyword,
+            ),
         })
     }
 
@@ -1940,10 +2244,10 @@ impl SchemaAnalyzer {
                     // First check if this should be a dynamic JSON pattern
                     if self.should_use_dynamic_json(prop_schema) {
                         // This is a dynamic JSON pattern, use serde_json::Value directly
-                        SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        }
+                        self.untyped_value(
+                            self.untyped_context(prop_name),
+                            UntypedReason::OpaqueObject,
+                        )
                     } else if prop_schema.is_nullable_pattern()
                         && let Some(non_null) = prop_schema.non_null_variant()
                     {
@@ -2279,10 +2583,10 @@ impl SchemaAnalyzer {
                         "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
                         ref_str
                     );
-                    return Ok(SchemaType::Primitive {
-                        rust_type: "serde_json::Value".to_string(),
-                        serde_with: None,
-                    });
+                    return Ok(self.untyped_value(
+                        format!("$ref {ref_str}"),
+                        UntypedReason::UnresolvedReference,
+                    ));
                 }
             }
         }
@@ -2431,10 +2735,8 @@ impl SchemaAnalyzer {
                 OpenApiSchemaType::Object => {
                     // Check if this is a dynamic JSON object
                     if self.should_use_dynamic_json(schema) {
-                        return Ok(SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        });
+                        return Ok(self
+                            .untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
                     }
                     // Inline object in property - create a named schema for it
                     let object_type_name = if let Some(prop_name) = property_name {
@@ -2478,10 +2780,10 @@ impl SchemaAnalyzer {
                     });
                 }
                 _ => {
-                    return Ok(SchemaType::Primitive {
-                        rust_type: "serde_json::Value".to_string(),
-                        serde_with: None,
-                    });
+                    return Ok(self.untyped_value(
+                        self.untyped_context(""),
+                        UntypedReason::UnsupportedTypeKeyword,
+                    ));
                 }
             }
         }
@@ -2499,10 +2801,7 @@ impl SchemaAnalyzer {
 
         // Check if this should be dynamic JSON before further analysis
         if self.should_use_dynamic_json(schema) {
-            return Ok(SchemaType::Primitive {
-                rust_type: "serde_json::Value".to_string(),
-                serde_with: None,
-            });
+            return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
         }
 
         // Handle allOf composition patterns
@@ -2620,10 +2919,8 @@ impl SchemaAnalyzer {
                 OpenApiSchemaType::Object => {
                     // Double-check for dynamic JSON pattern even for inferred objects
                     if self.should_use_dynamic_json(schema) {
-                        return Ok(SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        });
+                        return Ok(self
+                            .untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
                     }
                     return self.analyze_object_schema(schema, dependencies);
                 }
@@ -2665,10 +2962,7 @@ impl SchemaAnalyzer {
             }
         }
 
-        Ok(SchemaType::Primitive {
-            rust_type: "serde_json::Value".to_string(),
-            serde_with: None,
-        })
+        Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema))
     }
 
     fn analyze_allof_composition(
@@ -3221,10 +3515,10 @@ impl SchemaAnalyzer {
             }
 
             // Only fall back to serde_json::Value if we truly can't analyze the union
-            return Ok(SchemaType::Primitive {
-                rust_type: "serde_json::Value".to_string(),
-                serde_with: None,
-            });
+            return Ok(self.untyped_value(
+                self.untyped_context(""),
+                UntypedReason::UnrepresentableUnion,
+            ));
         }
 
         Ok(SchemaType::DiscriminatedUnion {
@@ -3414,10 +3708,10 @@ impl SchemaAnalyzer {
         }
 
         // Only fall back to serde_json::Value if we truly can't analyze the union
-        Ok(SchemaType::Primitive {
-            rust_type: "serde_json::Value".to_string(),
-            serde_with: None,
-        })
+        Ok(self.untyped_value(
+            self.untyped_context(""),
+            UntypedReason::UnrepresentableUnion,
+        ))
     }
 
     fn add_inline_schema(
@@ -3997,10 +4291,12 @@ impl SchemaAnalyzer {
             })
         } else {
             // No items specified, fall back to generic array
-            Ok(SchemaType::Primitive {
-                rust_type: "Vec<serde_json::Value>".to_string(),
-                serde_with: None,
-            })
+            Ok(
+                self.untyped_value_array(
+                    self.untyped_context(""),
+                    UntypedReason::ArrayWithoutItems,
+                ),
+            )
         }
     }
 
@@ -4053,10 +4349,7 @@ impl SchemaAnalyzer {
             });
         }
 
-        Ok(SchemaType::Primitive {
-            rust_type: "Vec<serde_json::Value>".to_string(),
-            serde_with: None,
-        })
+        Ok(self.untyped_value_array(self.untyped_context(""), UntypedReason::OpenPositionalItems))
     }
 
     /// Analyze one element schema into its generated type.
@@ -4168,10 +4461,10 @@ impl SchemaAnalyzer {
                         // Array of arrays - recursively analyze
                         self.analyze_array_schema(items_schema, parent_schema_name, dependencies)?
                     }
-                    _ => SchemaType::Primitive {
-                        rust_type: "serde_json::Value".to_string(),
-                        serde_with: None,
-                    },
+                    _ => self.untyped_value(
+                        self.untyped_context(""),
+                        UntypedReason::UnsupportedTypeKeyword,
+                    ),
                 }
             }
             Schema::OneOf { .. } | Schema::AnyOf { .. } => {
@@ -4266,22 +4559,19 @@ impl SchemaAnalyzer {
                             rust_type: "bool".to_string(),
                             serde_with: None,
                         },
-                        _ => SchemaType::Primitive {
-                            rust_type: "serde_json::Value".to_string(),
-                            serde_with: None,
-                        },
+                        _ => self.untyped_value(
+                            self.untyped_context(""),
+                            UntypedReason::UnsupportedTypeKeyword,
+                        ),
                     }
                 } else {
-                    SchemaType::Primitive {
-                        rust_type: "serde_json::Value".to_string(),
-                        serde_with: None,
-                    }
+                    self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema)
                 }
             }
-            _ => SchemaType::Primitive {
-                rust_type: "serde_json::Value".to_string(),
-                serde_with: None,
-            },
+            _ => self.untyped_value(
+                self.untyped_context(""),
+                UntypedReason::UnrepresentableComposition,
+            ),
         };
 
         Ok(item_type)
@@ -4325,10 +4615,7 @@ impl SchemaAnalyzer {
                 .cloned()
                 .collect();
             if filtered_owned.is_empty() {
-                return Ok(SchemaType::Primitive {
-                    rust_type: "serde_json::Value".to_string(),
-                    serde_with: None,
-                });
+                return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
             }
             if filtered_owned.len() == 1 {
                 return self
@@ -4595,10 +4882,10 @@ impl SchemaAnalyzer {
         }
 
         // Pattern 4: Mixed primitives = fall back to serde_json::Value
-        Ok(SchemaType::Primitive {
-            rust_type: "serde_json::Value".to_string(),
-            serde_with: None,
-        })
+        Ok(self.untyped_value(
+            self.untyped_context(""),
+            UntypedReason::UnrepresentableUnion,
+        ))
     }
 
     /// Find the schema with $recursiveAnchor: true for resolving $recursiveRef: "#"
@@ -6604,6 +6891,7 @@ fn rewrite_schema_type_names(schema_type: &mut SchemaType, aliases: &BTreeMap<St
             }
         }
         SchemaType::Array { item_type } => rewrite_schema_type_names(item_type, aliases),
+        SchemaType::Untyped { .. } => {}
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
                 rewrite_schema_type_names(element_type, aliases);

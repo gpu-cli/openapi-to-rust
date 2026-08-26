@@ -366,6 +366,25 @@ pub struct CodeGenerator {
     source_provenance: Option<String>,
 }
 
+/// The Rust type an untyped schema renders to.
+fn untyped_rust_type(shape: crate::analysis::UntypedShape) -> &'static str {
+    use crate::analysis::UntypedShape;
+    match shape {
+        UntypedShape::Value => "serde_json::Value",
+        UntypedShape::ValueArray => "Vec<serde_json::Value>",
+        UntypedShape::ValueMap => "std::collections::BTreeMap<String, serde_json::Value>",
+    }
+}
+
+fn untyped_tokens(shape: crate::analysis::UntypedShape) -> TokenStream {
+    use crate::analysis::UntypedShape;
+    match shape {
+        UntypedShape::Value => quote! { serde_json::Value },
+        UntypedShape::ValueArray => quote! { Vec<serde_json::Value> },
+        UntypedShape::ValueMap => quote! { std::collections::BTreeMap<String, serde_json::Value> },
+    }
+}
+
 impl CodeGenerator {
     pub fn new(config: GeneratorConfig) -> Self {
         Self {
@@ -1501,6 +1520,9 @@ impl CodeGenerator {
                     // Same name as target, no need for alias
                     Ok(TokenStream::new())
                 }
+            }
+            SchemaType::Untyped { shape, .. } => {
+                self.generate_type_alias(schema, untyped_rust_type(*shape))
             }
             SchemaType::Tuple { element_types } => {
                 let tuple_type = self.generate_tuple_type(element_types, analysis);
@@ -2733,6 +2755,7 @@ impl CodeGenerator {
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)
             }
+            SchemaType::Untyped { shape, .. } => untyped_tokens(*shape),
             _ => {
                 // Fallback for complex types
                 quote! { serde_json::Value }
@@ -3471,6 +3494,7 @@ impl CodeGenerator {
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)
             }
+            SchemaType::Untyped { shape, .. } => untyped_tokens(*shape),
             _ => {
                 // Fallback for complex types
                 quote! { serde_json::Value }
