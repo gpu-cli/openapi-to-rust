@@ -52,8 +52,8 @@ fn positional_items_generate_the_same_types_as_prefix_items() {
     let canonical_form = generate(spec_with_pair_keyword("prefixItems"));
 
     assert!(
-        tuple_form.contains("pub pair: Vec<serde_json::Value>"),
-        "positional items must produce an array field, got:\n{tuple_form}"
+        tuple_form.contains("pub pair: (String, String)"),
+        "positional items must produce the typed tuple, got:\n{tuple_form}"
     );
     assert_eq!(
         tuple_form, canonical_form,

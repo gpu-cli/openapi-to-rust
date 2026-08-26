@@ -385,6 +385,10 @@ pub enum Items {
     Single(Box<Schema>),
     /// Draft-04 tuple form: one schema per position.
     Positional(Vec<Schema>),
+    /// 2020-12 boolean schema. `items: false` is the canonical way to close a
+    /// tuple — no elements beyond `prefixItems` — and `items: true` is the
+    /// no-op "anything goes" schema.
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -865,7 +869,7 @@ impl Schema {
                 // Infer from structure
                 if details.properties.is_some() {
                     Some(SchemaType::Object)
-                } else if details.items.is_some() {
+                } else if details.items.is_some() || details.prefix_items.is_some() {
                     Some(SchemaType::Array)
                 } else if details.enum_values.is_some() {
                     Some(SchemaType::String) // Assume string enum
@@ -882,11 +886,12 @@ impl SchemaDetails {
     /// The schema every array element must satisfy, i.e. `items` in its
     /// 2020-12 single-schema spelling. Returns `None` for the draft-04 tuple
     /// form, which constrains positions rather than every element — read that
-    /// through [`Self::positional_items`].
+    /// through [`Self::positional_items`] — and for a boolean schema, which
+    /// constrains nothing worth typing.
     pub fn item_schema(&self) -> Option<&Schema> {
         match self.items.as_ref()? {
             Items::Single(schema) => Some(schema),
-            Items::Positional(_) => None,
+            Items::Positional(_) | Items::Bool(_) => None,
         }
     }
 
@@ -898,8 +903,40 @@ impl SchemaDetails {
         }
         match self.items.as_ref()? {
             Items::Positional(schemas) => Some(schemas),
-            Items::Single(_) => None,
+            Items::Single(_) | Items::Bool(_) => None,
         }
+    }
+
+    /// Whether the array admits no elements beyond its positional schemas.
+    ///
+    /// This is not the default: `prefixItems: [A, B]` on its own permits extra
+    /// elements of any type. An array is closed only when 2020-12 `items:
+    /// false`, draft-04 `additionalItems: false`, or `maxItems` says so.
+    pub fn positional_items_are_closed(&self) -> bool {
+        let Some(positions) = self.positional_items() else {
+            return false;
+        };
+        if matches!(self.items, Some(Items::Bool(false))) {
+            return true;
+        }
+        if self.extra.get("additionalItems") == Some(&Value::Bool(false)) {
+            return true;
+        }
+        self.max_items
+            .is_some_and(|maximum| maximum <= positions.len() as u64)
+    }
+
+    /// Whether every valid instance has exactly one element per positional
+    /// schema — the only case a fixed-arity Rust tuple can represent. A closed
+    /// array that also permits shorter instances is not exact.
+    pub fn positional_items_are_exact(&self) -> bool {
+        let Some(positions) = self.positional_items() else {
+            return false;
+        };
+        self.positional_items_are_closed()
+            && self
+                .min_items
+                .is_some_and(|minimum| minimum >= positions.len() as u64)
     }
 
     /// Check if this schema is nullable

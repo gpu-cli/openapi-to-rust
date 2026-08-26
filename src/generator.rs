@@ -1502,6 +1502,20 @@ impl CodeGenerator {
                     Ok(TokenStream::new())
                 }
             }
+            SchemaType::Tuple { element_types } => {
+                let tuple_type = self.generate_tuple_type(element_types, analysis);
+                let type_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
+                let doc_comment = if let Some(description) = &schema.description {
+                    let sanitized = self.sanitize_doc_comment(description);
+                    quote! { #[doc = #sanitized] }
+                } else {
+                    TokenStream::new()
+                };
+                Ok(quote! {
+                    #doc_comment
+                    pub type #type_name = #tuple_type;
+                })
+            }
             SchemaType::Array { item_type } => {
                 // Generate type alias for named array schemas.
                 //
@@ -2716,11 +2730,35 @@ impl CodeGenerator {
                 let inner_type = self.generate_array_item_type(item_type, analysis);
                 quote! { Vec<#inner_type> }
             }
+            SchemaType::Tuple { element_types } => {
+                self.generate_tuple_type(element_types, analysis)
+            }
             _ => {
                 // Fallback for complex types
                 quote! { serde_json::Value }
             }
         }
+    }
+
+    /// Render positional element types as a Rust tuple. serde reads and writes
+    /// these as JSON arrays of exactly this length, which is what makes the
+    /// analyzer's exact-length rule load-bearing.
+    fn generate_tuple_type(
+        &self,
+        element_types: &[crate::analysis::SchemaType],
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> TokenStream {
+        let elements = element_types
+            .iter()
+            .map(|element_type| self.generate_array_item_type(element_type, analysis))
+            .collect::<Vec<_>>();
+        // A one-element Rust tuple needs the trailing comma; `(T)` is just `T`,
+        // which serde would read as a bare value instead of a single-element
+        // array.
+        if let [only] = elements.as_slice() {
+            return quote! { (#only,) };
+        }
+        quote! { (#(#elements),*) }
     }
 
     fn generate_serde_field_attrs(
@@ -3429,6 +3467,9 @@ impl CodeGenerator {
                 // Nested arrays
                 let inner_type = self.generate_array_item_type(item_type, analysis);
                 quote! { Vec<#inner_type> }
+            }
+            SchemaType::Tuple { element_types } => {
+                self.generate_tuple_type(element_types, analysis)
             }
             _ => {
                 // Fallback for complex types
