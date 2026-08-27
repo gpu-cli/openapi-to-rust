@@ -1504,9 +1504,157 @@ fn extract_schema_variants(obj: &Value) -> Option<Vec<Value>> {
     None
 }
 
+/// The source identity of a generated schema is distinct from the Rust-facing
+/// name eventually allocated to it. Component names are reserved before any
+/// traversal, while inline and deep-pointer identities retain enough
+/// provenance to reuse their own allocation without impersonating a component.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SchemaIdentity {
+    Component(String),
+    Pointer(String),
+    Inline {
+        context: String,
+        kind: &'static str,
+        preferred_name: String,
+        fingerprint: String,
+    },
+}
+
+#[derive(Debug, Default)]
+struct SchemaNameRegistry {
+    names_by_identity: BTreeMap<SchemaIdentity, String>,
+    identities_by_name: BTreeMap<String, SchemaIdentity>,
+}
+
+impl SchemaNameRegistry {
+    fn with_components(component_names: impl IntoIterator<Item = String>) -> Self {
+        let mut registry = Self::default();
+        for name in component_names {
+            let identity = SchemaIdentity::Component(name.clone());
+            registry
+                .names_by_identity
+                .insert(identity.clone(), name.clone());
+            registry.identities_by_name.insert(name, identity);
+        }
+        registry
+    }
+
+    fn component_name(&self, source_name: &str) -> Option<&str> {
+        self.names_by_identity
+            .get(&SchemaIdentity::Component(source_name.to_string()))
+            .map(String::as_str)
+    }
+
+    fn allocate(
+        &mut self,
+        identity: SchemaIdentity,
+        preferred_name: &str,
+        collision_name: &str,
+    ) -> String {
+        if let Some(existing) = self.names_by_identity.get(&identity) {
+            return existing.clone();
+        }
+
+        let allocated = if !self.identities_by_name.contains_key(preferred_name) {
+            preferred_name.to_string()
+        } else if !self.identities_by_name.contains_key(collision_name) {
+            collision_name.to_string()
+        } else {
+            let hash = stable_schema_identity_hash(&identity);
+            let hashed = format!("{collision_name}{hash:016X}");
+            if !self.identities_by_name.contains_key(&hashed) {
+                hashed
+            } else {
+                let mut suffix = 2;
+                loop {
+                    let candidate = format!("{hashed}{suffix}");
+                    if !self.identities_by_name.contains_key(&candidate) {
+                        break candidate;
+                    }
+                    suffix += 1;
+                }
+            }
+        };
+
+        self.names_by_identity
+            .insert(identity.clone(), allocated.clone());
+        self.identities_by_name.insert(allocated.clone(), identity);
+        allocated
+    }
+}
+
+/// Stable FNV-1a rather than `DefaultHasher`, whose output is deliberately not
+/// a cross-version contract. This suffix is only a final fallback after both a
+/// preferred and human-readable collision name are occupied.
+fn stable_schema_identity_hash(identity: &SchemaIdentity) -> u64 {
+    let bytes = format!("{identity:?}");
+    bytes
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+}
+
+#[cfg(test)]
+mod schema_name_registry_tests {
+    use super::{SchemaIdentity, SchemaNameRegistry};
+
+    #[test]
+    fn component_reservations_are_independent_of_input_traversal_order() {
+        let component_names = ["ModelApi".to_string(), "OutputFormatContainer".to_string()];
+        let mut forward = SchemaNameRegistry::with_components(component_names.clone());
+        let mut reverse = SchemaNameRegistry::with_components(component_names.into_iter().rev());
+        let inline = SchemaIdentity::Inline {
+            context: "Model".to_string(),
+            kind: "property-object",
+            preferred_name: "ModelApi".to_string(),
+            fingerprint: r#"{"type":"object"}"#.to_string(),
+        };
+
+        assert_eq!(
+            forward.allocate(inline.clone(), "ModelApi", "ModelApiInline"),
+            "ModelApiInline"
+        );
+        assert_eq!(
+            reverse.allocate(inline, "ModelApi", "ModelApiInline"),
+            "ModelApiInline"
+        );
+        assert_eq!(forward.component_name("ModelApi"), Some("ModelApi"));
+        assert_eq!(reverse.component_name("ModelApi"), Some("ModelApi"));
+        assert_eq!(
+            forward.component_name("OutputFormatContainer"),
+            Some("OutputFormatContainer")
+        );
+        assert_eq!(
+            reverse.component_name("OutputFormatContainer"),
+            Some("OutputFormatContainer")
+        );
+    }
+
+    #[test]
+    fn an_identity_reuses_its_exact_allocated_name() {
+        let mut registry = SchemaNameRegistry::with_components(["ModelApi".to_string()]);
+        let inline = SchemaIdentity::Inline {
+            context: "Model".to_string(),
+            kind: "property-object",
+            preferred_name: "ModelApi".to_string(),
+            fingerprint: r#"{"type":"object"}"#.to_string(),
+        };
+
+        let first = registry.allocate(inline.clone(), "ModelApi", "ModelApiInline");
+        let repeated = registry.allocate(inline, "Ignored", "IgnoredInline");
+
+        assert_eq!(first, "ModelApiInline");
+        assert_eq!(repeated, first);
+        assert_eq!(registry.component_name("ModelApi"), Some("ModelApi"));
+    }
+}
+
 pub struct SchemaAnalyzer {
     schemas: BTreeMap<String, Schema>,
     resolved_cache: BTreeMap<String, AnalyzedSchema>,
+    schema_names: SchemaNameRegistry,
     openapi_spec: Value,
     current_schema_name: Option<String>,
     component_parameters: BTreeMap<String, crate::openapi::Parameter>,
@@ -1553,6 +1701,54 @@ impl SchemaAnalyzer {
         }
     }
 
+    fn allocate_inline_schema_name(
+        &mut self,
+        preferred_name: &str,
+        collision_name: &str,
+        kind: &'static str,
+        schema: &Schema,
+    ) -> String {
+        let identity = SchemaIdentity::Inline {
+            context: self
+                .current_schema_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string()),
+            kind,
+            preferred_name: preferred_name.to_string(),
+            fingerprint: serde_json::to_string(schema).unwrap_or_else(|_| format!("{schema:?}")),
+        };
+        self.schema_names
+            .allocate(identity, preferred_name, collision_name)
+    }
+
+    fn allocate_pointer_schema_name(&mut self, pointer: &str, preferred_name: &str) -> String {
+        self.schema_names.allocate(
+            SchemaIdentity::Pointer(pointer.to_string()),
+            preferred_name,
+            &format!("{preferred_name}Pointer"),
+        )
+    }
+
+    fn allocate_synthetic_schema_name(
+        &mut self,
+        preferred_name: &str,
+        collision_name: &str,
+        kind: &'static str,
+        fingerprint: String,
+    ) -> String {
+        let identity = SchemaIdentity::Inline {
+            context: self
+                .current_schema_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string()),
+            kind,
+            preferred_name: preferred_name.to_string(),
+            fingerprint,
+        };
+        self.schema_names
+            .allocate(identity, preferred_name, collision_name)
+    }
+
     fn uses_aws_query_conventions(&self) -> bool {
         self.openapi_spec
             .pointer("/info/x-providerName")
@@ -1581,9 +1777,11 @@ impl SchemaAnalyzer {
             .and_then(|c| c.parameters.as_ref())
             .cloned()
             .unwrap_or_default();
+        let schema_names = SchemaNameRegistry::with_components(schemas.keys().cloned());
         Ok(Self {
             schemas,
             resolved_cache: BTreeMap::new(),
+            schema_names,
             openapi_spec,
             current_schema_name: None,
             component_parameters,
@@ -2189,13 +2387,20 @@ impl SchemaAnalyzer {
     }
 
     fn analyze_schema(&mut self, schema_name: &str) -> Result<AnalyzedSchema> {
-        // Check cache first
-        if let Some(cached) = self.resolved_cache.get(schema_name) {
+        // Component lookup is provenance-typed: an inline schema can never
+        // satisfy this cache request merely because it preferred the same
+        // emitted name.
+        let emitted_name = self
+            .schema_names
+            .component_name(schema_name)
+            .ok_or_else(|| GeneratorError::UnresolvedReference(schema_name.to_string()))?
+            .to_string();
+        if let Some(cached) = self.resolved_cache.get(&emitted_name) {
             return Ok(cached.clone());
         }
 
         // Set current schema name for context
-        self.current_schema_name = Some(schema_name.to_string());
+        self.current_schema_name = Some(emitted_name.clone());
 
         let schema = self
             .schemas
@@ -2205,9 +2410,9 @@ impl SchemaAnalyzer {
 
         // Prevent infinite recursion with placeholder
         self.resolved_cache.insert(
-            schema_name.to_string(),
+            emitted_name.clone(),
             AnalyzedSchema {
-                name: schema_name.to_string(),
+                name: emitted_name.clone(),
                 original: serde_json::to_value(&schema).unwrap_or(Value::Null),
                 schema_type: SchemaType::Reference {
                     target: "placeholder".to_string(),
@@ -2219,11 +2424,10 @@ impl SchemaAnalyzer {
             },
         );
 
-        let analyzed = self.analyze_schema_value(&schema, schema_name)?;
+        let analyzed = self.analyze_schema_value(&schema, &emitted_name)?;
 
         // Update cache with real result
-        self.resolved_cache
-            .insert(schema_name.to_string(), analyzed.clone());
+        self.resolved_cache.insert(emitted_name, analyzed.clone());
 
         Ok(analyzed)
     }
@@ -2570,28 +2774,13 @@ impl SchemaAnalyzer {
 
                         // Generate a name based on both the schema and property name
                         let prop_pascal = self.to_pascal_case(prop_name);
-                        let mut union_type_name = format!("{context_name}{prop_pascal}");
-
-                        // Avoid colliding with an existing component schema or
-                        // an inline name that's already in resolved_cache.
-                        if self.schemas.contains_key(&union_type_name)
-                            || self.resolved_cache.contains_key(&union_type_name)
-                        {
-                            let mut suffix = 2;
-                            loop {
-                                let candidate = format!("{union_type_name}Union{suffix}");
-                                if !self.schemas.contains_key(&candidate)
-                                    && !self.resolved_cache.contains_key(&candidate)
-                                {
-                                    union_type_name = candidate;
-                                    break;
-                                }
-                                suffix += 1;
-                                if suffix > 1000 {
-                                    break;
-                                }
-                            }
-                        }
+                        let preferred_union_name = format!("{context_name}{prop_pascal}");
+                        let union_type_name = self.allocate_inline_schema_name(
+                            &preferred_union_name,
+                            &format!("{preferred_union_name}Union2"),
+                            "property-anyof",
+                            prop_schema,
+                        );
 
                         // Analyze the union
                         let union_schema_type = self.analyze_anyof_union(
@@ -2676,26 +2865,13 @@ impl SchemaAnalyzer {
                         .clone()
                         .unwrap_or_else(|| "Unknown".to_string());
                     let prop_pascal = self.to_pascal_case(prop_name);
-                    let mut union_type_name = format!("{context_name}{prop_pascal}");
-                    // Same collision-suffix dance as the anyOf branch above.
-                    if self.schemas.contains_key(&union_type_name)
-                        || self.resolved_cache.contains_key(&union_type_name)
-                    {
-                        let mut suffix = 2;
-                        loop {
-                            let candidate = format!("{union_type_name}Union{suffix}");
-                            if !self.schemas.contains_key(&candidate)
-                                && !self.resolved_cache.contains_key(&candidate)
-                            {
-                                union_type_name = candidate;
-                                break;
-                            }
-                            suffix += 1;
-                            if suffix > 1000 {
-                                break;
-                            }
-                        }
-                    }
+                    let preferred_union_name = format!("{context_name}{prop_pascal}");
+                    let union_type_name = self.allocate_inline_schema_name(
+                        &preferred_union_name,
+                        &format!("{preferred_union_name}Union2"),
+                        "property-oneof",
+                        prop_schema,
+                    );
 
                     // Analyze the discriminated union
                     let union_schema_type = self.analyze_oneof_union(
@@ -2930,7 +3106,13 @@ impl SchemaAnalyzer {
     ) -> Result<SchemaRef> {
         match member_type {
             OpenApiSchemaType::Array => {
-                let array_type_name = format!("{union_type_name}Array");
+                let preferred_array_type_name = format!("{union_type_name}Array");
+                let array_type_name = self.allocate_inline_schema_name(
+                    &preferred_array_type_name,
+                    &format!("{preferred_array_type_name}Inline"),
+                    "typed-multi-array",
+                    schema,
+                );
                 let array_type =
                     self.analyze_array_schema(schema, &array_type_name, dependencies)?;
                 self.resolved_cache.insert(
@@ -2952,7 +3134,13 @@ impl SchemaAnalyzer {
                 })
             }
             OpenApiSchemaType::Object => {
-                let object_type_name = format!("{union_type_name}Object");
+                let preferred_object_type_name = format!("{union_type_name}Object");
+                let object_type_name = self.allocate_inline_schema_name(
+                    &preferred_object_type_name,
+                    &format!("{preferred_object_type_name}Inline"),
+                    "typed-multi-object",
+                    schema,
+                );
                 let object_type = self.analyze_object_schema(schema, dependencies)?;
                 self.resolved_cache.insert(
                     object_type_name.clone(),
@@ -3046,25 +3234,13 @@ impl SchemaAnalyzer {
             let prop_pascal = property_name
                 .map(|name| self.to_pascal_case(name))
                 .unwrap_or_default();
-            let mut union_type_name = format!("{context_name}{prop_pascal}");
-            if self.schemas.contains_key(&union_type_name)
-                || self.resolved_cache.contains_key(&union_type_name)
-            {
-                let mut suffix = 2;
-                loop {
-                    let candidate = format!("{union_type_name}Union{suffix}");
-                    if !self.schemas.contains_key(&candidate)
-                        && !self.resolved_cache.contains_key(&candidate)
-                    {
-                        union_type_name = candidate;
-                        break;
-                    }
-                    suffix += 1;
-                    if suffix > 1000 {
-                        break;
-                    }
-                }
-            }
+            let preferred_union_name = format!("{context_name}{prop_pascal}");
+            let union_type_name = self.allocate_inline_schema_name(
+                &preferred_union_name,
+                &format!("{preferred_union_name}Union2"),
+                "property-typed-multi",
+                schema,
+            );
 
             let details = schema.details();
             let mut variants = Vec::with_capacity(non_null_types.len());
@@ -3183,7 +3359,7 @@ impl SchemaAnalyzer {
                             .untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
                     }
                     // Inline object in property - create a named schema for it
-                    let object_type_name = if let Some(prop_name) = property_name {
+                    let preferred_object_type_name = if let Some(prop_name) = property_name {
                         // Use property name for context
                         let prop_pascal = self.to_pascal_case(prop_name);
                         format!(
@@ -3198,6 +3374,12 @@ impl SchemaAnalyzer {
                             self.current_schema_name.as_deref().unwrap_or("Unknown")
                         )
                     };
+                    let object_type_name = self.allocate_inline_schema_name(
+                        &preferred_object_type_name,
+                        &format!("{preferred_object_type_name}Inline"),
+                        "property-object",
+                        schema,
+                    );
 
                     // Analyze the object schema
                     let object_type = self.analyze_object_schema(schema, dependencies)?;
@@ -3288,6 +3470,12 @@ impl SchemaAnalyzer {
                         ..
                     } = schema
                     {
+                        let union_name = self.allocate_inline_schema_name(
+                            &union_name,
+                            &format!("{union_name}Union2"),
+                            "fallback-property-oneof",
+                            schema,
+                        );
                         // This is a oneOf - analyze it properly with potential discriminator
                         let oneof_result = self.analyze_oneof_union(
                             one_of,
@@ -3961,15 +4149,17 @@ impl SchemaAnalyzer {
                 // Use the discriminator value as-is from the schema
                 let final_discriminator_value = discriminator_value;
 
+                // Store inline schema before recording the variant so a
+                // reserved component collision can return the actual name.
+                let inline_type_name =
+                    self.add_inline_schema(&inline_type_name, variant_schema, dependencies)?;
+
                 variants.push(UnionVariant {
                     rust_name,
                     type_name: inline_type_name.clone(),
                     discriminator_value: final_discriminator_value,
                     schema_ref: format!("inline_{variant_index}"),
                 });
-
-                // Store inline schema for later analysis and generation
-                self.add_inline_schema(&inline_type_name, variant_schema, dependencies)?;
             }
         }
 
@@ -4053,7 +4243,7 @@ impl SchemaAnalyzer {
                                         variant_index,
                                         None,
                                     );
-                                    self.add_inline_schema(
+                                    let inline_type_name = self.add_inline_schema(
                                         &inline_type_name,
                                         variant_schema,
                                         dependencies,
@@ -4076,7 +4266,7 @@ impl SchemaAnalyzer {
                         _ => {
                             let inline_type_name =
                                 format!("{}Variant{}", parent_name, variant_index + 1);
-                            self.add_inline_schema(
+                            let inline_type_name = self.add_inline_schema(
                                 &inline_type_name,
                                 variant_schema,
                                 dependencies,
@@ -4226,7 +4416,7 @@ impl SchemaAnalyzer {
                                             variant_index,
                                             None,
                                         );
-                                        self.add_inline_schema(
+                                        let inline_type_name = self.add_inline_schema(
                                             &inline_type_name,
                                             variant_schema,
                                             dependencies,
@@ -4246,7 +4436,7 @@ impl SchemaAnalyzer {
                                     variant_index,
                                     None,
                                 );
-                                self.add_inline_schema(
+                                let inline_type_name = self.add_inline_schema(
                                     &inline_type_name,
                                     variant_schema,
                                     dependencies,
@@ -4273,7 +4463,11 @@ impl SchemaAnalyzer {
                             variant_index,
                             None,
                         );
-                        self.add_inline_schema(&inline_type_name, variant_schema, dependencies)?;
+                        let inline_type_name = self.add_inline_schema(
+                            &inline_type_name,
+                            variant_schema,
+                            dependencies,
+                        )?;
                         union_variants.push(SchemaRef {
                             target: inline_type_name,
                             nullable: false,
@@ -4301,7 +4495,13 @@ impl SchemaAnalyzer {
         type_name: &str,
         schema: &Schema,
         dependencies: &mut HashSet<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        let allocated_name = self.allocate_inline_schema_name(
+            type_name,
+            &format!("{type_name}Inline"),
+            "inline-schema",
+            schema,
+        );
         // For primitive types, we need to ensure they are stored as type aliases
         if let Some(schema_type) = schema.schema_type() {
             match schema_type {
@@ -4314,9 +4514,9 @@ impl SchemaAnalyzer {
 
                     // Store as a type alias
                     self.resolved_cache.insert(
-                        type_name.to_string(),
+                        allocated_name.clone(),
                         AnalyzedSchema {
-                            name: type_name.to_string(),
+                            name: allocated_name.clone(),
                             original: serde_json::to_value(schema).unwrap_or(Value::Null),
                             schema_type: SchemaType::Primitive {
                                 rust_type,
@@ -4328,7 +4528,7 @@ impl SchemaAnalyzer {
                             default: None,
                         },
                     );
-                    return Ok(());
+                    return Ok(allocated_name);
                 }
                 _ => {}
             }
@@ -4338,21 +4538,21 @@ impl SchemaAnalyzer {
         // Set current_schema_name so nested inline properties (enums, unions, objects)
         // get named with the correct parent context instead of inheriting a stale name
         let previous_schema_name = self.current_schema_name.take();
-        self.current_schema_name = Some(type_name.to_string());
-        let analyzed = self.analyze_schema_value(schema, type_name)?;
+        self.current_schema_name = Some(allocated_name.clone());
+        let analyzed = self.analyze_schema_value(schema, &allocated_name)?;
         self.current_schema_name = previous_schema_name;
 
         // Add to resolved cache so it can be generated
-        self.resolved_cache.insert(type_name.to_string(), analyzed);
+        self.resolved_cache.insert(allocated_name.clone(), analyzed);
 
         // Add dependencies
-        if let Some(cached) = self.resolved_cache.get(type_name) {
+        if let Some(cached) = self.resolved_cache.get(&allocated_name) {
             for dep in &cached.dependencies {
                 dependencies.insert(dep.clone());
             }
         }
 
-        Ok(())
+        Ok(allocated_name)
     }
 
     fn extract_inline_discriminator_value(
@@ -4760,59 +4960,14 @@ impl SchemaAnalyzer {
         primary_name: String,
         dependencies: &mut HashSet<String>,
     ) -> SchemaType {
-        fn matches_values(existing: &AnalyzedSchema, values: &[String]) -> bool {
-            matches!(
-                &existing.schema_type,
-                SchemaType::StringEnum { values: existing_values }
-                    if existing_values == values
-            )
-        }
-
-        let mut enum_type_name = primary_name.clone();
-        let should_insert = match self.resolved_cache.get(&enum_type_name) {
-            None => true,
-            Some(existing) if matches_values(existing, &enum_values) => false,
-            Some(_) => {
-                // Collision with different values — try a
-                // value-suffixed name first.
-                let suffix = enum_values
-                    .first()
-                    .map(|v| self.to_pascal_case(v))
-                    .unwrap_or_else(|| "Variant".to_string());
-                let candidate = format!("{primary_name}{suffix}");
-
-                let resolved = match self.resolved_cache.get(&candidate) {
-                    None => Some((candidate.clone(), true)),
-                    Some(existing) if matches_values(existing, &enum_values) => {
-                        Some((candidate.clone(), false))
-                    }
-                    Some(_) => {
-                        // Walk a numeric suffix until we find
-                        // a slot that's free or matches.
-                        let mut found = None;
-                        for n in 2..1000 {
-                            let numbered = format!("{candidate}_{n}");
-                            match self.resolved_cache.get(&numbered) {
-                                None => {
-                                    found = Some((numbered, true));
-                                    break;
-                                }
-                                Some(existing) if matches_values(existing, &enum_values) => {
-                                    found = Some((numbered, false));
-                                    break;
-                                }
-                                Some(_) => continue,
-                            }
-                        }
-                        found
-                    }
-                };
-
-                let (resolved_name, insert) = resolved.unwrap_or((candidate, true));
-                enum_type_name = resolved_name;
-                insert
-            }
-        };
+        let suffix = enum_values
+            .first()
+            .map(|value| self.to_pascal_case(value))
+            .unwrap_or_else(|| "Variant".to_string());
+        let collision_name = format!("{primary_name}{suffix}");
+        let enum_type_name =
+            self.allocate_inline_schema_name(&primary_name, &collision_name, "string-enum", schema);
+        let should_insert = !self.resolved_cache.contains_key(&enum_type_name);
 
         // Store the enum as a named schema if this is the
         // first time we've seen this exact (name, values) pair.
@@ -5026,7 +5181,13 @@ impl SchemaAnalyzer {
             return Ok(None);
         };
 
-        let variant_name = self.unique_hoisted_name(schema_name, "Variant");
+        let preferred_variant_name = format!("{schema_name}Variant");
+        let variant_name = self.allocate_inline_schema_name(
+            &preferred_variant_name,
+            &format!("{preferred_variant_name}Inline"),
+            "object-variant",
+            schema,
+        );
         let variant_type = self.analyze_anyof_union(
             branches,
             schema.discriminator(),
@@ -5185,10 +5346,11 @@ impl SchemaAnalyzer {
         if pointer.is_empty() || !pointer.starts_with('/') {
             return Ok(None);
         }
-        let name = pointer_type_name(pointer);
-        if name.is_empty() {
+        let preferred_name = pointer_type_name(pointer);
+        if preferred_name.is_empty() {
             return Ok(None);
         }
+        let name = self.allocate_pointer_schema_name(pointer, &preferred_name);
         // Already resolved once, or currently being resolved further up the
         // stack: reference the name rather than expanding it again.
         if self.resolved_cache.contains_key(&name) || !self.resolving_pointers.insert(name.clone())
@@ -5245,7 +5407,15 @@ impl SchemaAnalyzer {
             return schema_type;
         }
 
-        let hoisted_name = self.unique_hoisted_name(schema_name, property_name);
+        use heck::ToPascalCase;
+
+        let preferred_name = format!("{schema_name}{}", property_name.to_pascal_case());
+        let hoisted_name = self.allocate_synthetic_schema_name(
+            &preferred_name,
+            &format!("{preferred_name}Inline"),
+            "hoisted-property",
+            format!("{schema_type:?}"),
+        );
         let hoisted_dependencies = schema_type_dependencies(&schema_type);
         self.resolved_cache.insert(
             hoisted_name.clone(),
@@ -5262,28 +5432,6 @@ impl SchemaAnalyzer {
         dependencies.insert(hoisted_name.clone());
         SchemaType::Reference {
             target: hoisted_name,
-        }
-    }
-
-    /// A generated name for a hoisted property type that no other schema has
-    /// claimed. Collisions are resolved by suffix rather than by overwriting,
-    /// which would silently retype an unrelated schema.
-    fn unique_hoisted_name(&self, schema_name: &str, property_name: &str) -> String {
-        use heck::ToPascalCase;
-
-        let base = format!("{schema_name}{}", property_name.to_pascal_case());
-        if !self.schemas.contains_key(&base) && !self.resolved_cache.contains_key(&base) {
-            return base;
-        }
-        let mut suffix = 2;
-        loop {
-            let candidate = format!("{base}{suffix}");
-            if !self.schemas.contains_key(&candidate)
-                && !self.resolved_cache.contains_key(&candidate)
-            {
-                return candidate;
-            }
-            suffix += 1;
         }
     }
 
@@ -5434,7 +5582,13 @@ impl SchemaAnalyzer {
                     },
                     OpenApiSchemaType::Object => {
                         // Inline object in array - create a named schema for it
-                        let object_type_name = inline_name.to_string();
+                        let preferred_object_type_name = inline_name.to_string();
+                        let object_type_name = self.allocate_inline_schema_name(
+                            &preferred_object_type_name,
+                            &format!("{preferred_object_type_name}Inline"),
+                            "array-item-object",
+                            items_schema,
+                        );
 
                         // Analyze the object schema
                         let object_type = self.analyze_object_schema(items_schema, dependencies)?;
@@ -5479,7 +5633,13 @@ impl SchemaAnalyzer {
                     SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => {
                         // Generate a unique name for the union schema based on the parent context
                         // Use the parent context directly to maintain consistent naming
-                        let union_name = format!("{inline_name}Union");
+                        let preferred_union_name = format!("{inline_name}Union");
+                        let union_name = self.allocate_inline_schema_name(
+                            &preferred_union_name,
+                            &format!("{preferred_union_name}Inline"),
+                            "array-item-union",
+                            items_schema,
+                        );
 
                         // Create a new analyzed schema with the correct name
                         let mut union_schema = analyzed;
@@ -5503,7 +5663,13 @@ impl SchemaAnalyzer {
                     match inferred {
                         OpenApiSchemaType::Object => {
                             // Inline object in array - create a named schema for it
-                            let object_type_name = inline_name.to_string();
+                            let preferred_object_type_name = inline_name.to_string();
+                            let object_type_name = self.allocate_inline_schema_name(
+                                &preferred_object_type_name,
+                                &format!("{preferred_object_type_name}Inline"),
+                                "array-item-object",
+                                items_schema,
+                            );
 
                             // Analyze the object schema
                             let object_type =
@@ -5741,24 +5907,29 @@ impl SchemaAnalyzer {
                     let inline_type_name = self.generate_inline_type_name(schema, inline_index);
 
                     // Store inline schema for later analysis and generation
-                    self.add_inline_schema(&inline_type_name, schema, dependencies)?;
+                    let inline_type_name =
+                        self.add_inline_schema(&inline_type_name, schema, dependencies)?;
 
                     variants.push(SchemaRef {
                         target: inline_type_name,
                         nullable: false,
                     });
                 } else if matches!(schema.schema_type(), Some(OpenApiSchemaType::Array)) {
-                    // Handle array types in unions by creating a type alias
-                    let array_type =
-                        self.analyze_array_schema(schema, context_name, dependencies)?;
-
                     // Create a unique name for this array type in the union
-                    let array_type_name = if let Some(items_schema) = schema.details().item_schema()
-                    {
-                        if let Some(ref_str) = items_schema.reference() {
-                            if let Some(item_type_name) = self.extract_schema_name(ref_str) {
-                                dependencies.insert(item_type_name.to_string());
-                                format!("{item_type_name}Array")
+                    let preferred_array_type_name =
+                        if let Some(items_schema) = schema.details().item_schema() {
+                            if let Some(ref_str) = items_schema.reference() {
+                                if let Some(item_type_name) = self.extract_schema_name(ref_str) {
+                                    dependencies.insert(item_type_name.to_string());
+                                    format!("{item_type_name}Array")
+                                } else {
+                                    self.generate_context_aware_name(
+                                        context_name,
+                                        "Array",
+                                        variants.len(),
+                                        Some(schema),
+                                    )
+                                }
                             } else {
                                 self.generate_context_aware_name(
                                     context_name,
@@ -5774,15 +5945,16 @@ impl SchemaAnalyzer {
                                 variants.len(),
                                 Some(schema),
                             )
-                        }
-                    } else {
-                        self.generate_context_aware_name(
-                            context_name,
-                            "Array",
-                            variants.len(),
-                            Some(schema),
-                        )
-                    };
+                        };
+                    let array_type_name = self.allocate_inline_schema_name(
+                        &preferred_array_type_name,
+                        &format!("{preferred_array_type_name}Inline"),
+                        "anyof-array-variant",
+                        schema,
+                    );
+                    // Handle array types in unions by creating a type alias.
+                    let array_type =
+                        self.analyze_array_schema(schema, context_name, dependencies)?;
 
                     // Store the array as a type alias
                     self.resolved_cache.insert(
@@ -5828,7 +6000,7 @@ impl SchemaAnalyzer {
                         });
                     } else {
                         let inline_index = variants.len();
-                        let inline_type_name = match schema_type {
+                        let preferred_inline_type_name = match schema_type {
                             OpenApiSchemaType::String => {
                                 if inline_index == 0 {
                                     format!("{context_name}String")
@@ -5859,6 +6031,12 @@ impl SchemaAnalyzer {
                             }
                             _ => format!("{context_name}Variant{inline_index}"),
                         };
+                        let inline_type_name = self.allocate_inline_schema_name(
+                            &preferred_inline_type_name,
+                            &format!("{preferred_inline_type_name}Inline"),
+                            "anyof-primitive-alias",
+                            schema,
+                        );
 
                         let rust_type =
                             self.openapi_type_to_rust_type(schema_type.clone(), schema.details());
@@ -5901,7 +6079,8 @@ impl SchemaAnalyzer {
                         inline_index,
                         Some(schema),
                     );
-                    self.add_inline_schema(&inline_type_name, schema, dependencies)?;
+                    let inline_type_name =
+                        self.add_inline_schema(&inline_type_name, schema, dependencies)?;
                     dependencies.insert(inline_type_name.clone());
                     variants.push(SchemaRef {
                         target: inline_type_name,
@@ -6453,7 +6632,8 @@ impl SchemaAnalyzer {
 
                         // Use the existing inline schema infrastructure
                         let mut deps = HashSet::new();
-                        self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
+                        let synthetic_name =
+                            self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
 
                         op_info
                             .response_schemas
@@ -6849,8 +7029,7 @@ impl SchemaAnalyzer {
             self.generate_inline_response_type_name(operation_id, "")
         };
         let mut deps = HashSet::new();
-        self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
-        Ok(synthetic_name)
+        self.add_inline_schema(&synthetic_name, schema, &mut deps)
     }
 
     /// Resolve a parameter reference ($ref) to the actual parameter definition.
@@ -7042,7 +7221,7 @@ impl SchemaAnalyzer {
                 let param_pascal = name.to_pascal_case();
                 let synthetic_name = format!("{op_pascal}{param_pascal}");
                 let mut deps = HashSet::new();
-                self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
+                let synthetic_name = self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
                 schema_ref = Some(synthetic_name.clone());
                 query_serialization = if form_exploded && self.uses_aws_query_conventions() {
                     match self.referenced_array_struct_item_type(&synthetic_name, 1) {
