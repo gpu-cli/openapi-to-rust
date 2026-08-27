@@ -236,7 +236,7 @@ fn render_test_source(
         let pointer = format!("{:?}", case.pointer);
         let samples = format!("{:?}", serde_json::to_string(&case.samples)?);
         calls.push_str(&format!(
-            "    assert_model::<crate::generated::types::{}>(&validators, {}, {}, {});\n",
+            "    failures.extend(check_model::<crate::generated::types::{}>(&validators, {}, {}, {}));\n",
             case.rust_type, schema_name, pointer, samples
         ));
     }
@@ -255,47 +255,84 @@ fn errors(validator: &jsonschema::Validator, value: &Value) -> String {{
         .join("; ")
 }}
 
-fn assert_model<T>(
+fn check_model<T>(
     validators: &jsonschema::ValidatorMap,
     schema_name: &str,
     pointer: &str,
     samples_json: &str,
-) where
+) -> Vec<String>
+where
     T: DeserializeOwned + Serialize,
 {{
-    let validator = validators
-        .get(pointer)
-        .unwrap_or_else(|| panic!("{{schema_name}}: missing validator {{pointer}}"));
-    let samples: Vec<Value> = serde_json::from_str(samples_json)
-        .unwrap_or_else(|error| panic!("{{schema_name}}: invalid embedded samples: {{error}}"));
+    let mut failures = Vec::new();
+    let Some(validator) = validators.get(pointer) else {{
+        failures.push(format!("{{schema_name}}: missing validator {{pointer}}"));
+        return failures;
+    }};
+    let samples: Vec<Value> = match serde_json::from_str(samples_json) {{
+        Ok(samples) => samples,
+        Err(error) => {{
+            failures.push(format!("{{schema_name}}: invalid embedded samples: {{error}}"));
+            return failures;
+        }}
+    }};
     for (sample_index, input) in samples.into_iter().enumerate() {{
-        assert!(
-            validator.is_valid(&input),
-            "{{schema_name}} sample {{sample_index}} synthetic precondition failed: {{}}; input={{input}}",
-            errors(validator, &input),
-        );
-        let hydrated: T = serde_json::from_value(input.clone()).unwrap_or_else(|error| {{
-            panic!("{{schema_name}} sample {{sample_index}} failed Rust hydration: {{error}}; input={{input}}")
-        }});
-        let output = serde_json::to_value(&hydrated).unwrap_or_else(|error| {{
-            panic!("{{schema_name}} sample {{sample_index}} failed Rust serialization: {{error}}")
-        }});
-        assert!(
-            validator.is_valid(&output),
-            "{{schema_name}} sample {{sample_index}} emitted schema-invalid JSON: {{}}; input={{input}}; output={{output}}",
-            errors(validator, &output),
-        );
-        let hydrated_again: T = serde_json::from_value(output.clone()).unwrap_or_else(|error| {{
-            panic!("{{schema_name}} sample {{sample_index}} output could not hydrate again: {{error}}; output={{output}}")
-        }});
-        let stable = serde_json::to_value(&hydrated_again).unwrap_or_else(|error| {{
-            panic!("{{schema_name}} sample {{sample_index}} second serialization failed: {{error}}")
-        }});
-        assert_eq!(
-            output, stable,
-            "{{schema_name}} sample {{sample_index}} did not reach a stable wire representation",
-        );
+        if !validator.is_valid(&input) {{
+            failures.push(format!(
+                "{{schema_name}} sample {{sample_index}} synthetic precondition failed: {{}}; input={{input}}",
+                errors(validator, &input),
+            ));
+            continue;
+        }}
+        let hydrated: T = match serde_json::from_value(input.clone()) {{
+            Ok(hydrated) => hydrated,
+            Err(error) => {{
+                failures.push(format!(
+                    "{{schema_name}} sample {{sample_index}} failed Rust hydration: {{error}}; input={{input}}"
+                ));
+                continue;
+            }}
+        }};
+        let output = match serde_json::to_value(&hydrated) {{
+            Ok(output) => output,
+            Err(error) => {{
+                failures.push(format!(
+                    "{{schema_name}} sample {{sample_index}} failed Rust serialization: {{error}}; input={{input}}"
+                ));
+                continue;
+            }}
+        }};
+        if !validator.is_valid(&output) {{
+            failures.push(format!(
+                "{{schema_name}} sample {{sample_index}} emitted schema-invalid JSON: {{}}; input={{input}}; output={{output}}",
+                errors(validator, &output),
+            ));
+        }}
+        let hydrated_again: T = match serde_json::from_value(output.clone()) {{
+            Ok(hydrated) => hydrated,
+            Err(error) => {{
+                failures.push(format!(
+                    "{{schema_name}} sample {{sample_index}} output could not hydrate again: {{error}}; input={{input}}; output={{output}}"
+                ));
+                continue;
+            }}
+        }};
+        let stable = match serde_json::to_value(&hydrated_again) {{
+            Ok(stable) => stable,
+            Err(error) => {{
+                failures.push(format!(
+                    "{{schema_name}} sample {{sample_index}} second serialization failed: {{error}}; input={{input}}; output={{output}}"
+                ));
+                continue;
+            }}
+        }};
+        if output != stable {{
+            failures.push(format!(
+                "{{schema_name}} sample {{sample_index}} did not reach a stable wire representation; input={{input}}; output={{output}}; stable={{stable}}"
+            ));
+        }}
     }}
+    failures
 }}
 
 #[test]
@@ -308,7 +345,15 @@ fn generated_models_preserve_schema_valid_json() {{
         .with_pattern_options(jsonschema::PatternOptions::regex())
         .build_map(&document)
         .unwrap_or_else(|error| panic!("schema bundle did not compile: {{error}}"));
-{calls}}}
+    let mut failures: Vec<String> = Vec::new();
+{calls}    if !failures.is_empty() {{
+        panic!(
+            "{{}} schema round-trip failure(s):\n\n{{}}",
+            failures.len(),
+            failures.join("\n\n"),
+        );
+    }}
+}}
 "#,
         draft = dialect.rust_variant(),
     ))
@@ -890,6 +935,56 @@ mod tests {
         assert!(plan.source.contains("crate::generated::types::Item"));
         assert!(plan.source.contains("crate::generated::types::State"));
         assert!(plan.source.contains("validator.is_valid(&output)"));
+    }
+
+    #[test]
+    fn rendered_test_collects_every_model_failure_before_panicking() {
+        let document = json!({
+            "$schema": Dialect::Draft202012.schema_uri(),
+            "$defs": {
+                "First": { "type": "string" },
+                "Second": { "type": "integer" }
+            }
+        });
+        let cases = vec![
+            ModelCase {
+                schema_name: "First".to_string(),
+                rust_type: "First".to_string(),
+                pointer: "#/$defs/First".to_string(),
+                samples: vec![json!("one"), json!("two")],
+            },
+            ModelCase {
+                schema_name: "Second".to_string(),
+                rust_type: "Second".to_string(),
+                pointer: "#/$defs/Second".to_string(),
+                samples: vec![json!(1), json!(2)],
+            },
+        ];
+
+        let source = render_test_source(&document, Dialect::Draft202012, &cases)
+            .expect("rendered test source");
+        let model_check = source.split("#[test]").next().expect("model check helper");
+        assert!(model_check.contains("fn check_model<T>("));
+        assert!(model_check.contains(") -> Vec<String>"));
+        assert!(model_check.contains("missing validator {pointer}"));
+        assert!(model_check.contains("invalid embedded samples: {error}"));
+        assert!(!model_check.contains("panic!("));
+        assert!(!model_check.contains("assert!("));
+        assert!(!model_check.contains("assert_eq!("));
+
+        let first_call = source
+            .find("failures.extend(check_model::<crate::generated::types::First>")
+            .expect("first model call");
+        let second_call = source
+            .find("failures.extend(check_model::<crate::generated::types::Second>")
+            .expect("second model call");
+        let aggregate_panic = source
+            .rfind("if !failures.is_empty()")
+            .expect("aggregate failure guard");
+        assert!(first_call < second_call);
+        assert!(second_call < aggregate_panic);
+        assert!(source[aggregate_panic..].contains("failures.join(\"\\n\\n\")"));
+        assert!(!source.contains("assert_model"));
     }
 
     #[test]
