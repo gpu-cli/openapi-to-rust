@@ -6,6 +6,23 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-27
+
+### Added
+
+- `openapi-to-rust generate --report-untyped` reports every generated field that
+  carries `serde_json::Value`, grouped by why, and marks each **faithful** (the
+  schema declared an unconstrained value) or **recoverable** (the generator
+  dropped type information the schema carried). `--json` emits the findings with
+  paths for tooling.
+- `scripts/untyped-census.sh` runs that across `specs/` and rewrites
+  `tests/conformance/untyped-report.md`, so a change that alters which fields
+  get typed shows its corpus delta in review; `--check` fails when the report is
+  stale.
+- Generated extensible enums now expose `as_str` and implement `Display` and
+  `AsRef<str>`, matching what generated string enums already had. Needed because
+  a multipart form field, query parameter, or header can now be one.
+
 ### Changed
 
 - **Breaking (generated API).** Positional item schemas — 2020-12
@@ -21,11 +38,24 @@ when correcting output that was wrong or incomplete on the wire.
   it permits extra elements of any type, and a fixed-arity tuple would reject
   payloads the spec allows (#62).
 
+- **Breaking (library API).** `SchemaType` gained `Untyped { shape, reason }`,
+  which replaces the stringly-typed `Primitive { rust_type: "serde_json::Value" }`
+  fallbacks and carries why a value could not be typed, and `Tuple {
+  element_types }` for fixed-length positional items. `SchemaType::Object`
+  gained a `variant` field holding a union declared alongside its properties.
+  Exhaustive matches and struct literals need updating.
+- **Breaking (library API).** `Schema::OneOf` gained a `schema_type` field, so a
+  union that also declares `type` keeps it; `Items` gained a `Bool` variant for
+  2020-12 boolean schemas. `SchemaAnalysis::untyped_fields()` returns the
+  census.
+
 ### Fixed
 
 - Schemas that carried enough information to type no longer degrade to
-  `serde_json::Value`. Across the 57-spec corpus this types 3,341 fields that
-  were previously opaque (#62):
+  `serde_json::Value`. Across the 57-spec corpus this types every field the
+  census could attribute to a dropped type — 3,347 of them — taking the total
+  untyped surface from 13,226 fields to 8,829, all of which are schemas that
+  genuinely declared an unconstrained value (#62, #65):
   - `anyOf: [$ref, {type: object, nullable: true}]` — how OData spells "that
     type, or null" — becomes `Option<T>` instead of an untyped union (2,127
     fields in Microsoft Graph alone);
@@ -49,6 +79,12 @@ when correcting output that was wrong or incomplete on the wire.
 - `items: false` and `items: true` — 2020-12 boolean schemas, and the canonical
   way to close a tuple — now parse instead of failing the document with "data
   did not match any variant of untagged enum Schema" (#62).
+
+- Reference cycles that run through a synthesized type — a hoisted union, a
+  hoisted property type — are detected, so the generated enum is boxed instead
+  of having infinite size. Typing a field that was previously
+  `serde_json::Value` can close a cycle the untyped value had been breaking by
+  accident.
 
 ## [0.13.0] - 2026-08-26
 
