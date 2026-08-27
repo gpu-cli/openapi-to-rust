@@ -6,12 +6,16 @@
 //! validator accepts them, then emitted into a scratch-crate test that runs
 //! the exact generated Rust model through Serde twice.
 
-use crate::{SchemaAnalyzer, analysis::component_schema_name_aliases, generator::rust_type_name};
+use crate::{
+    SchemaAnalyzer, analysis::component_schema_name_aliases, generator::rust_type_name,
+    spec_source::parse_oas_version, type_mapping::normalize_builtin_format,
+};
 use serde_json::{Map, Number, Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ATTEMPTS_PER_SCHEMA: usize = 96;
 const MAX_SYNTHESIS_DEPTH: usize = 20;
+const MAX_DYNAMIC_REF_OCCURRENCES: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dialect {
@@ -25,12 +29,10 @@ impl Dialect {
             .get("openapi")
             .and_then(Value::as_str)
             .ok_or("OpenAPI document has no string `openapi` version")?;
-        if version.starts_with("3.0.") {
-            Ok(Self::Draft4)
-        } else if version.starts_with("3.1.") || version.starts_with("3.2.") {
-            Ok(Self::Draft202012)
-        } else {
-            Err(format!("unsupported OpenAPI version `{version}`").into())
+        match parse_oas_version(version) {
+            Some((3, 0)) => Ok(Self::Draft4),
+            Some((3, 1 | 2)) => Ok(Self::Draft202012),
+            _ => Err(format!("unsupported OpenAPI version `{version}`").into()),
         }
     }
 
@@ -61,14 +63,31 @@ pub struct RoundTripStats {
     pub component_schemas: usize,
     pub tested_schemas: usize,
     pub skipped_schemas: usize,
+    pub source_invalid_schemas: usize,
+    pub dependent_schemas: usize,
+    pub synthesis_skipped_schemas: usize,
     pub samples: usize,
 }
 
 impl RoundTripStats {
     pub fn to_shell(&self) -> String {
         format!(
-            "component_schemas={}\ntested_schemas={}\nskipped_schemas={}\nsamples={}\n",
-            self.component_schemas, self.tested_schemas, self.skipped_schemas, self.samples
+            concat!(
+                "component_schemas={}\n",
+                "tested_schemas={}\n",
+                "skipped_schemas={}\n",
+                "source_invalid_schemas={}\n",
+                "dependent_schemas={}\n",
+                "synthesis_skipped_schemas={}\n",
+                "samples={}\n"
+            ),
+            self.component_schemas,
+            self.tested_schemas,
+            self.skipped_schemas,
+            self.source_invalid_schemas,
+            self.dependent_schemas,
+            self.synthesis_skipped_schemas,
+            self.samples
         )
     }
 }
@@ -94,6 +113,18 @@ struct ModelCase {
     samples: Vec<Value>,
 }
 
+#[derive(Debug, Default)]
+struct SchemaQuarantine {
+    source_invalid: BTreeMap<String, String>,
+    dependent: BTreeMap<String, String>,
+}
+
+impl SchemaQuarantine {
+    fn contains(&self, name: &str) -> bool {
+        self.source_invalid.contains_key(name) || self.dependent.contains_key(name)
+    }
+}
+
 /// Build the Rust integration test mounted into a generated scratch crate.
 pub fn build_round_trip_plan(
     spec: &Value,
@@ -113,19 +144,41 @@ pub fn build_round_trip_plan(
     let analysis = SchemaAnalyzer::new(spec.clone())?.analyze()?;
     let mut normalized = Map::new();
     for (name, schema) in &raw_components {
-        normalized.insert(name.clone(), normalize_schema(schema, dialect));
+        normalized.insert(
+            name.clone(),
+            normalize_component_schema(name, schema, dialect),
+        );
     }
+    let quarantine = quarantine_invalid_components(&normalized, dialect);
+    let valid_components = normalized
+        .into_iter()
+        .filter(|(name, _)| !quarantine.contains(name))
+        .collect::<Map<_, _>>();
     let document = json!({
         "$schema": dialect.schema_uri(),
-        dialect.definitions_key(): Value::Object(normalized),
+        dialect.definitions_key(): Value::Object(valid_components),
     });
 
     let validators = validator_options(dialect).build_map(&document)?;
-    let generator = SyntheticGenerator { root: &document };
+    let generator = SyntheticGenerator::new(&document);
     let mut cases = Vec::new();
     let mut skipped = Vec::new();
 
     for (name, raw_schema) in &raw_components {
+        if let Some(reason) = quarantine.source_invalid.get(name) {
+            skipped.push(SkippedSchema {
+                schema: name.clone(),
+                reason: reason.clone(),
+            });
+            continue;
+        }
+        if let Some(reason) = quarantine.dependent.get(name) {
+            skipped.push(SkippedSchema {
+                schema: name.clone(),
+                reason: reason.clone(),
+            });
+            continue;
+        }
         let analyzed_name = component_aliases.get(name).unwrap_or(name);
         let Some(model) = analysis.schemas.get(analyzed_name) else {
             skipped.push(SkippedSchema {
@@ -204,8 +257,21 @@ pub fn build_round_trip_plan(
         component_schemas: raw_components.len(),
         tested_schemas: cases.len(),
         skipped_schemas: skipped.len(),
+        source_invalid_schemas: quarantine.source_invalid.len(),
+        dependent_schemas: quarantine.dependent.len(),
+        synthesis_skipped_schemas: skipped
+            .len()
+            .saturating_sub(quarantine.source_invalid.len() + quarantine.dependent.len()),
         samples: cases.iter().map(|case| case.samples.len()).sum(),
     };
+    debug_assert_eq!(
+        stats.skipped_schemas,
+        stats.source_invalid_schemas + stats.dependent_schemas + stats.synthesis_skipped_schemas
+    );
+    debug_assert_eq!(
+        stats.component_schemas,
+        stats.tested_schemas + stats.skipped_schemas
+    );
     let source = render_test_source(&document, dialect, &cases)?;
     Ok(RoundTripPlan {
         source,
@@ -222,6 +288,177 @@ fn validator_options(dialect: Dialect) -> jsonschema::ValidationOptions<'static>
         })
         .should_validate_formats(true)
         .with_pattern_options(jsonschema::PatternOptions::regex())
+}
+
+fn quarantine_invalid_components(
+    normalized: &Map<String, Value>,
+    dialect: Dialect,
+) -> SchemaQuarantine {
+    let known: BTreeSet<&str> = normalized.keys().map(String::as_str).collect();
+    let mut quarantine = SchemaQuarantine::default();
+    let mut dependencies = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for (name, schema) in normalized {
+        if let Some(reason) = legacy_recursive_scope_error(name, schema, dialect) {
+            quarantine.source_invalid.insert(name.clone(), reason);
+        }
+        let mut isolated = schema.clone();
+        neutralize_local_component_refs(&mut isolated, dialect);
+        if let Some(reason) = meta_validation_error(name, &isolated, dialect) {
+            quarantine
+                .source_invalid
+                .entry(name.clone())
+                .or_insert(reason);
+        }
+
+        let mut refs = Vec::new();
+        collect_local_component_refs(schema, dialect, "", &mut refs);
+        let mut component_dependencies = BTreeSet::new();
+        for local_ref in refs {
+            if known.contains(local_ref.target.as_str()) {
+                component_dependencies.insert(local_ref.target);
+            } else {
+                quarantine.source_invalid.entry(name.clone()).or_insert_with(|| {
+                    format!(
+                        "source schema invalid at #/components/schemas/{}{}: unresolved local component reference `{}`",
+                        escape_pointer_segment(name), local_ref.location, local_ref.reference
+                    )
+                });
+            }
+        }
+        dependencies.insert(name.clone(), component_dependencies);
+    }
+
+    let mut blocked: BTreeSet<String> = quarantine.source_invalid.keys().cloned().collect();
+    loop {
+        let mut added = Vec::new();
+        for (name, referenced) in &dependencies {
+            if blocked.contains(name) {
+                continue;
+            }
+            if let Some(dependency) = referenced.iter().find(|target| blocked.contains(*target)) {
+                added.push((name.clone(), dependency.clone()));
+            }
+        }
+        if added.is_empty() {
+            break;
+        }
+        for (name, dependency) in added {
+            blocked.insert(name.clone());
+            quarantine.dependent.insert(
+                name,
+                format!(
+                    "depends on quarantined component at #/components/schemas/{}",
+                    escape_pointer_segment(&dependency)
+                ),
+            );
+        }
+    }
+
+    quarantine
+}
+
+fn meta_validation_error(name: &str, schema: &Value, dialect: Dialect) -> Option<String> {
+    let error = match dialect {
+        Dialect::Draft4 => jsonschema::draft4::meta::validate(schema).err(),
+        Dialect::Draft202012 => jsonschema::draft202012::meta::validate(schema).err(),
+    }?;
+    Some(format!(
+        "source schema invalid at #/components/schemas/{}{}: {} (meta-schema path {})",
+        escape_pointer_segment(name),
+        error.instance_path(),
+        error,
+        error.schema_path()
+    ))
+}
+
+fn neutralize_local_component_refs(value: &mut Value, dialect: Dialect) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                neutralize_local_component_refs(value, dialect);
+            }
+        }
+        Value::Object(object) => {
+            if object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| normalized_component_ref_target(reference, dialect))
+                .is_some()
+            {
+                object.remove("$ref");
+            }
+            for value in object.values_mut() {
+                neutralize_local_component_refs(value, dialect);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug)]
+struct LocalComponentRef {
+    location: String,
+    target: String,
+    reference: String,
+}
+
+fn collect_local_component_refs(
+    value: &Value,
+    dialect: Dialect,
+    location: &str,
+    refs: &mut Vec<LocalComponentRef>,
+) {
+    match value {
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_local_component_refs(value, dialect, &format!("{location}/{index}"), refs);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+                && let Some(target) = normalized_component_ref_target(reference, dialect)
+            {
+                refs.push(LocalComponentRef {
+                    location: format!("{location}/$ref"),
+                    target,
+                    reference: reference.to_string(),
+                });
+            }
+            for (key, value) in object {
+                collect_local_component_refs(
+                    value,
+                    dialect,
+                    &format!("{location}/{}", escape_pointer_segment(key)),
+                    refs,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalized_component_ref_target(reference: &str, dialect: Dialect) -> Option<String> {
+    let prefix = format!("#/{}/", dialect.definitions_key());
+    let segment = reference.strip_prefix(&prefix)?.split('/').next()?;
+    unescape_pointer_segment(segment)
+}
+
+fn unescape_pointer_segment(value: &str) -> Option<String> {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '~' {
+            output.push(character);
+            continue;
+        }
+        match chars.next()? {
+            '0' => output.push('~'),
+            '1' => output.push('/'),
+            _ => return None,
+        }
+    }
+    Some(output)
 }
 
 fn render_test_source(
@@ -359,6 +596,196 @@ fn generated_models_preserve_schema_valid_json() {{
     ))
 }
 
+fn normalize_component_schema(name: &str, value: &Value, dialect: Dialect) -> Value {
+    let mut normalized = normalize_schema(value, dialect);
+    if dialect == Dialect::Draft202012 {
+        migrate_safe_recursive_scope(name, &mut normalized);
+    }
+    normalized
+}
+
+#[derive(Debug)]
+struct RecursiveScopeIssue {
+    location: String,
+    message: String,
+}
+
+#[derive(Debug, Default)]
+struct LegacyRecursiveScopeAudit {
+    has_legacy_keyword: bool,
+    recursive_refs: usize,
+    issue: Option<RecursiveScopeIssue>,
+}
+
+impl LegacyRecursiveScopeAudit {
+    fn record_issue(&mut self, location: String, message: impl Into<String>) {
+        if self.issue.is_none() {
+            self.issue = Some(RecursiveScopeIssue {
+                location,
+                message: message.into(),
+            });
+        }
+    }
+}
+
+fn migrate_safe_recursive_scope(component_name: &str, schema: &mut Value) {
+    let audit = audit_legacy_recursive_scope(schema);
+    if !audit.has_legacy_keyword || audit.issue.is_some() {
+        return;
+    }
+
+    let anchor = component_dynamic_anchor(component_name);
+    rewrite_recursive_scope(schema, &anchor, true);
+}
+
+fn audit_legacy_recursive_scope(schema: &Value) -> LegacyRecursiveScopeAudit {
+    let mut audit = LegacyRecursiveScopeAudit::default();
+    inspect_legacy_recursive_scope(schema, "", true, &mut audit);
+
+    if audit.has_legacy_keyword {
+        let root_anchor = schema
+            .as_object()
+            .and_then(|object| object.get("$recursiveAnchor"));
+        if root_anchor != Some(&Value::Bool(true)) {
+            audit.record_issue(
+                "/$recursiveAnchor".to_string(),
+                "migration requires `$recursiveAnchor: true` at the component root",
+            );
+        } else if audit.recursive_refs == 0 {
+            audit.record_issue(
+                "/$recursiveAnchor".to_string(),
+                "component-root `$recursiveAnchor` has no descendant `$recursiveRef: \"#\"` pair",
+            );
+        }
+    }
+    audit
+}
+
+fn inspect_legacy_recursive_scope(
+    value: &Value,
+    location: &str,
+    is_root: bool,
+    audit: &mut LegacyRecursiveScopeAudit,
+) {
+    match value {
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                inspect_legacy_recursive_scope(value, &format!("{location}/{index}"), false, audit);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(anchor) = object.get("$recursiveAnchor") {
+                audit.has_legacy_keyword = true;
+                if !is_root {
+                    audit.record_issue(
+                        format!("{location}/$recursiveAnchor"),
+                        "nested `$recursiveAnchor` changes the recursive scope",
+                    );
+                } else if anchor != &Value::Bool(true) {
+                    audit.record_issue(
+                        "/$recursiveAnchor".to_string(),
+                        "component-root `$recursiveAnchor` must be `true`",
+                    );
+                }
+            }
+            if let Some(reference) = object.get("$recursiveRef") {
+                audit.has_legacy_keyword = true;
+                audit.recursive_refs += 1;
+                if reference.as_str() != Some("#") {
+                    audit.record_issue(
+                        format!("{location}/$recursiveRef"),
+                        "only `$recursiveRef: \"#\"` can be migrated safely",
+                    );
+                }
+            }
+            if !is_root && object.contains_key("$id") {
+                audit.record_issue(
+                    format!("{location}/$id"),
+                    "nested `$id` creates a distinct resource scope",
+                );
+            }
+            for keyword in ["$anchor", "$dynamicAnchor"] {
+                if object.contains_key(keyword) {
+                    audit.record_issue(
+                        format!("{location}/{keyword}"),
+                        format!("existing `{keyword}` conflicts with recursive-scope migration"),
+                    );
+                }
+            }
+            for (key, value) in object {
+                inspect_legacy_recursive_scope(
+                    value,
+                    &format!("{location}/{}", escape_pointer_segment(key)),
+                    false,
+                    audit,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_recursive_scope(value: &mut Value, anchor: &str, is_root: bool) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                rewrite_recursive_scope(value, anchor, false);
+            }
+        }
+        Value::Object(object) => {
+            if is_root {
+                object.remove("$recursiveAnchor");
+                object.insert(
+                    "$dynamicAnchor".to_string(),
+                    Value::String(anchor.to_string()),
+                );
+            }
+            if object.remove("$recursiveRef").is_some() {
+                object.insert(
+                    "$dynamicRef".to_string(),
+                    Value::String(format!("#{anchor}")),
+                );
+            }
+            for value in object.values_mut() {
+                rewrite_recursive_scope(value, anchor, false);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn component_dynamic_anchor(component_name: &str) -> String {
+    let mut anchor = "roundtrip_".to_string();
+    for byte in component_name.as_bytes() {
+        anchor.push_str(&format!("{byte:02x}"));
+    }
+    anchor
+}
+
+fn legacy_recursive_scope_error(
+    component_name: &str,
+    schema: &Value,
+    dialect: Dialect,
+) -> Option<String> {
+    if dialect != Dialect::Draft202012 {
+        return None;
+    }
+    let audit = audit_legacy_recursive_scope(schema);
+    if !audit.has_legacy_keyword {
+        return None;
+    }
+    let issue = audit.issue.unwrap_or_else(|| RecursiveScopeIssue {
+        location: String::new(),
+        message: "legacy recursive keywords were not migrated".to_string(),
+    });
+    Some(format!(
+        "source schema invalid at #/components/schemas/{}{}: unsafe legacy recursive scope: {}",
+        escape_pointer_segment(component_name),
+        issue.location,
+        issue.message
+    ))
+}
+
 fn normalize_schema(value: &Value, dialect: Dialect) -> Value {
     let Value::Object(source) = value else {
         return value.clone();
@@ -372,6 +799,9 @@ fn normalize_schema(value: &Value, dialect: Dialect) -> Value {
         if let Some(name) = reference.strip_prefix(prefix) {
             *reference = format!("#/{}/{name}", dialect.definitions_key());
         }
+    }
+    if let Some(Value::String(format)) = schema.get_mut("format") {
+        *format = normalize_builtin_format(format).to_string();
     }
     if dialect == Dialect::Draft4
         && schema.remove("nullable").and_then(|value| value.as_bool()) == Some(true)
@@ -439,9 +869,19 @@ fn contains_required_binary_format(schema: &Value, root: &Value, depth: usize) -
 
 struct SyntheticGenerator<'a> {
     root: &'a Value,
+    dynamic_anchors: BTreeMap<String, &'a Value>,
 }
 
-impl SyntheticGenerator<'_> {
+impl<'a> SyntheticGenerator<'a> {
+    fn new(root: &'a Value) -> Self {
+        let mut dynamic_anchors = BTreeMap::new();
+        collect_dynamic_anchors(root, &mut dynamic_anchors);
+        Self {
+            root,
+            dynamic_anchors,
+        }
+    }
+
     fn generate(
         &self,
         schema: &Value,
@@ -489,6 +929,22 @@ impl SyntheticGenerator<'_> {
             }
             let target = resolve_local_ref(self.root, reference)?;
             refs.push(reference.to_string());
+            let generated = self.generate(target, seed + 2, depth + 1, refs);
+            refs.pop();
+            return generated;
+        }
+        if let Some(reference) = object.get("$dynamicRef").and_then(Value::as_str) {
+            let anchor = reference
+                .strip_prefix('#')
+                .filter(|anchor| !anchor.is_empty() && !anchor.contains('/'))?;
+            let target = *self.dynamic_anchors.get(anchor)?;
+            let recursion_key = format!("$dynamicRef:{reference}");
+            if refs.iter().filter(|seen| *seen == &recursion_key).count()
+                >= MAX_DYNAMIC_REF_OCCURRENCES
+            {
+                return None;
+            }
+            refs.push(recursion_key);
             let generated = self.generate(target, seed + 2, depth + 1, refs);
             refs.pop();
             return generated;
@@ -667,6 +1123,25 @@ impl SyntheticGenerator<'_> {
     }
 }
 
+fn collect_dynamic_anchors<'a>(value: &'a Value, anchors: &mut BTreeMap<String, &'a Value>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_dynamic_anchors(value, anchors);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(anchor) = object.get("$dynamicAnchor").and_then(Value::as_str) {
+                anchors.entry(anchor.to_string()).or_insert(value);
+            }
+            for value in object.values() {
+                collect_dynamic_anchors(value, anchors);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_dependent_required(
     generator: &SyntheticGenerator<'_>,
@@ -783,7 +1258,7 @@ fn string_value(object: &Map<String, Value>, seed: usize) -> String {
         Some("date") => "2024-01-02".to_string(),
         Some("time") => "03:04:05Z".to_string(),
         Some("duration") => "P1DT2H".to_string(),
-        Some("uuid") => "123e4567-e89b-12d3-a456-426614174000".to_string(),
+        Some("uuid") => "123e4567-e89b-42d3-a456-426614174000".to_string(),
         Some("uri") | Some("url") => "https://example.com/resource".to_string(),
         Some("uri-reference") => "/resource/1".to_string(),
         Some("email") => "agent@example.com".to_string(),
@@ -878,6 +1353,250 @@ fn resolve_local_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> 
 mod tests {
     use super::*;
 
+    fn recursive_compound_filter_schema() -> Value {
+        json!({
+            "$recursiveAnchor": true,
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "filters"],
+            "properties": {
+                "type": { "type": "string", "enum": ["and", "or"] },
+                "filters": {
+                    "type": "array",
+                    "items": {
+                        "anyOf": [
+                            { "$ref": "#/components/schemas/ComparisonFilter" },
+                            { "$recursiveRef": "#" }
+                        ]
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn selects_schema_dialect_from_canonical_openapi_versions() {
+        for version in ["3.0", "3.0.0", "3.0.4"] {
+            let spec = json!({ "openapi": version });
+            assert_eq!(Dialect::from_spec(&spec).expect("draft 4"), Dialect::Draft4);
+        }
+        for version in ["3.1", "3.1.2", "3.2", "3.2.0"] {
+            let spec = json!({ "openapi": version });
+            assert_eq!(
+                Dialect::from_spec(&spec).expect("draft 2020-12"),
+                Dialect::Draft202012
+            );
+        }
+        for version in ["3", "v3.0", "2.0", "3.3.0", "not-a-version"] {
+            let spec = json!({ "openapi": version });
+            let error = Dialect::from_spec(&spec).expect_err("unsupported version");
+            assert!(error.to_string().contains(version), "{error}");
+        }
+    }
+
+    #[test]
+    fn normalizes_uuid_aliases_for_validation_and_v4_synthesis() {
+        for format in ["uuid", "uuid4", "uuid_v4", "UUID"] {
+            let normalized = normalize_schema(
+                &json!({ "type": "string", "format": format }),
+                Dialect::Draft202012,
+            );
+            assert_eq!(normalized.get("format"), Some(&json!("uuid")));
+
+            let validator = validator_options(Dialect::Draft202012)
+                .build(&normalized)
+                .expect("UUID schema");
+            let candidate = SyntheticGenerator::new(&normalized)
+                .generate(&normalized, 2, 0, &mut Vec::new())
+                .expect("UUID candidate");
+            assert_eq!(candidate, json!("123e4567-e89b-42d3-a456-426614174000"));
+            assert!(
+                validator.is_valid(&candidate),
+                "format={format}: {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_uuid_alias_examples_and_preserves_unknown_formats() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "round trip", "version": "1" },
+            "paths": {},
+            "components": { "schemas": {
+                "AliasedUuid": {
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string", "format": "uuid4" }
+                    },
+                    "examples": [{
+                        "id": "e3c6ee77-48cb-416b-b204-11b492cc776e3"
+                    }]
+                }
+            }}
+        });
+        let plan = build_round_trip_plan(&spec, 2).expect("plan");
+        assert_eq!(plan.stats.tested_schemas, 1, "skipped: {:?}", plan.skipped);
+        assert_eq!(plan.stats.samples, 1, "malformed example must be rejected");
+
+        let unknown = normalize_schema(
+            &json!({ "type": "string", "format": "vendor-id" }),
+            Dialect::Draft202012,
+        );
+        assert_eq!(unknown.get("format"), Some(&json!("vendor-id")));
+        let candidate = SyntheticGenerator::new(&unknown)
+            .generate(&unknown, 7, 0, &mut Vec::new())
+            .expect("unknown-format candidate");
+        assert_eq!(candidate, json!("synthetic7"));
+    }
+
+    #[test]
+    fn atomically_migrates_safe_component_recursive_scope_to_dynamic_keywords() {
+        let normalized = normalize_component_schema(
+            "CompoundFilter",
+            &recursive_compound_filter_schema(),
+            Dialect::Draft202012,
+        );
+        let anchor = "roundtrip_436f6d706f756e6446696c746572";
+
+        assert_eq!(normalized.get("$dynamicAnchor"), Some(&json!(anchor)));
+        assert!(normalized.get("$recursiveAnchor").is_none());
+        assert_eq!(
+            normalized.pointer("/properties/filters/items/anyOf/1/$dynamicRef"),
+            Some(&json!(format!("#{anchor}")))
+        );
+        assert!(
+            normalized
+                .pointer("/properties/filters/items/anyOf/1/$recursiveRef")
+                .is_none()
+        );
+        jsonschema::draft202012::meta::validate(&normalized)
+            .expect("migrated component must satisfy the Draft 2020-12 meta-schema");
+    }
+
+    #[test]
+    fn leaves_unsafe_recursive_scopes_unchanged_and_quarantines_them() {
+        let cases = [
+            (
+                "NestedId",
+                json!({
+                    "$recursiveAnchor": true,
+                    "properties": {
+                        "child": { "$id": "nested", "$recursiveRef": "#" }
+                    }
+                }),
+                "/properties/child/$id",
+            ),
+            (
+                "AnchorConflict",
+                json!({
+                    "$recursiveAnchor": true,
+                    "$anchor": "existing",
+                    "properties": { "child": { "$recursiveRef": "#" } }
+                }),
+                "/$anchor",
+            ),
+            (
+                "NonLocalRef",
+                json!({
+                    "$recursiveAnchor": true,
+                    "properties": {
+                        "child": { "$recursiveRef": "#/other" }
+                    }
+                }),
+                "/properties/child/$recursiveRef",
+            ),
+        ];
+
+        for (name, source, expected_pointer) in cases {
+            let normalized = normalize_component_schema(name, &source, Dialect::Draft202012);
+            assert_eq!(normalized.get("$recursiveAnchor"), Some(&json!(true)));
+            assert!(normalized.get("$dynamicAnchor").is_none());
+
+            let components = [(name.to_string(), normalized)]
+                .into_iter()
+                .collect::<Map<_, _>>();
+            let quarantine = quarantine_invalid_components(&components, Dialect::Draft202012);
+            let reason = &quarantine.source_invalid[name];
+            assert!(reason.contains("unsafe legacy recursive scope"), "{reason}");
+            assert!(reason.contains(expected_pointer), "{reason}");
+        }
+    }
+
+    #[test]
+    fn synthesizes_and_validates_a_bounded_nested_dynamic_filter() {
+        let comparison = normalize_component_schema(
+            "ComparisonFilter",
+            &json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "value"],
+                "properties": {
+                    "type": { "type": "string", "enum": ["eq"] },
+                    "value": { "type": "string" }
+                }
+            }),
+            Dialect::Draft202012,
+        );
+        let compound = normalize_component_schema(
+            "CompoundFilter",
+            &recursive_compound_filter_schema(),
+            Dialect::Draft202012,
+        );
+        let document = json!({
+            "$schema": Dialect::Draft202012.schema_uri(),
+            "$defs": {
+                "ComparisonFilter": comparison,
+                "CompoundFilter": compound
+            }
+        });
+        let validators = validator_options(Dialect::Draft202012)
+            .build_map(&document)
+            .expect("recursive validator bundle");
+        let validator = validators
+            .get("#/$defs/CompoundFilter")
+            .expect("CompoundFilter validator");
+        let target = document
+            .pointer("/$defs/CompoundFilter")
+            .expect("CompoundFilter schema");
+        let generator = SyntheticGenerator::new(&document);
+        let nested = (0..MAX_ATTEMPTS_PER_SCHEMA)
+            .filter_map(|seed| generator.generate(target, seed, 0, &mut Vec::new()))
+            .find(|candidate| {
+                candidate
+                    .get("filters")
+                    .and_then(Value::as_array)
+                    .is_some_and(|filters| {
+                        filters.iter().any(|filter| filter.get("filters").is_some())
+                    })
+            })
+            .expect("a bounded nested CompoundFilter sample");
+        assert!(
+            validator.is_valid(&nested),
+            "nested sample {nested}; errors: {:?}",
+            validator
+                .iter_errors(&nested)
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        let source = render_test_source(
+            &document,
+            Dialect::Draft202012,
+            &[ModelCase {
+                schema_name: "CompoundFilter".to_string(),
+                rust_type: "CompoundFilter".to_string(),
+                pointer: "#/$defs/CompoundFilter".to_string(),
+                samples: vec![nested],
+            }],
+        )
+        .expect("rendered recursive test");
+        assert!(source.contains("$dynamicAnchor"));
+        assert!(source.contains("$dynamicRef"));
+        assert!(source.contains("crate::generated::types::CompoundFilter"));
+    }
+
     #[test]
     fn builds_valid_varied_samples_and_compiled_test_source() {
         let spec = json!({
@@ -916,7 +1635,7 @@ mod tests {
             .expect("validators");
         let validator = validators.get("#/$defs/Item").expect("item validator");
         let target = document.pointer("/$defs/Item").expect("item target");
-        let candidate = SyntheticGenerator { root: &document }
+        let candidate = SyntheticGenerator::new(&document)
             .generate(target, 0, 0, &mut Vec::new())
             .expect("item candidate");
         assert!(
@@ -988,6 +1707,130 @@ mod tests {
     }
 
     #[test]
+    fn quarantines_invalid_type_and_still_plans_independent_components() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "round trip", "version": "1" },
+            "paths": {},
+            "components": { "schemas": {
+                "Bad": { "type": "any" },
+                "Independent": { "type": "string", "enum": ["ready"] }
+            }}
+        });
+
+        let plan = build_round_trip_plan(&spec, 2).expect("plan independent component");
+        assert_eq!(plan.stats.component_schemas, 2);
+        assert_eq!(plan.stats.tested_schemas, 1, "skipped: {:?}", plan.skipped);
+        assert_eq!(plan.stats.source_invalid_schemas, 1);
+        assert_eq!(plan.stats.dependent_schemas, 0);
+        assert_eq!(plan.stats.synthesis_skipped_schemas, 0);
+        assert_eq!(plan.stats.skipped_schemas, 1);
+        assert!(plan.source.contains("crate::generated::types::Independent"));
+        assert!(!plan.source.contains("crate::generated::types::Bad"));
+        assert_eq!(plan.skipped[0].schema, "Bad");
+        assert!(
+            plan.skipped[0]
+                .reason
+                .contains("#/components/schemas/Bad/type"),
+            "{}",
+            plan.skipped[0].reason
+        );
+        assert!(plan.skipped[0].reason.contains("meta-schema path"));
+    }
+
+    #[test]
+    fn quarantines_oas30_empty_required_and_one_of_independently() {
+        let spec = json!({
+            "openapi": "3.0.3",
+            "info": { "title": "round trip", "version": "1" },
+            "paths": {},
+            "components": { "schemas": {
+                "EmptyOneOf": { "oneOf": [] },
+                "EmptyRequired": { "type": "object", "required": [] },
+                "Independent": { "type": "integer", "enum": [7] }
+            }}
+        });
+
+        let plan = build_round_trip_plan(&spec, 2).expect("plan independent component");
+        assert_eq!(plan.stats.component_schemas, 3);
+        assert_eq!(plan.stats.tested_schemas, 1, "skipped: {:?}", plan.skipped);
+        assert_eq!(plan.stats.source_invalid_schemas, 2);
+        assert_eq!(plan.stats.dependent_schemas, 0);
+        let reasons = plan
+            .skipped
+            .iter()
+            .map(|skipped| skipped.reason.as_str())
+            .collect::<Vec<_>>();
+        assert!(reasons.iter().any(|reason| reason.contains("/oneOf")));
+        assert!(reasons.iter().any(|reason| reason.contains("/required")));
+        assert!(plan.source.contains("crate::generated::types::Independent"));
+    }
+
+    #[test]
+    fn transitively_quarantines_multi_hop_component_dependents() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "round trip", "version": "1" },
+            "paths": {},
+            "components": { "schemas": {
+                "Bad": { "type": "any" },
+                "Middle": { "$ref": "#/components/schemas/Bad" },
+                "Outer": {
+                    "type": "object",
+                    "required": ["middle"],
+                    "properties": {
+                        "middle": { "$ref": "#/components/schemas/Middle" }
+                    }
+                },
+                "Independent": { "type": "string", "enum": ["valid"] }
+            }}
+        });
+
+        let plan = build_round_trip_plan(&spec, 2).expect("plan independent component");
+        assert_eq!(plan.stats.component_schemas, 4);
+        assert_eq!(plan.stats.tested_schemas, 1, "skipped: {:?}", plan.skipped);
+        assert_eq!(plan.stats.source_invalid_schemas, 1);
+        assert_eq!(plan.stats.dependent_schemas, 2);
+        assert_eq!(plan.stats.synthesis_skipped_schemas, 0);
+        assert_eq!(plan.stats.skipped_schemas, 3);
+        let skipped = plan
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.schema.as_str(), skipped.reason.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        assert!(skipped["Middle"].contains("#/components/schemas/Bad"));
+        assert!(skipped["Outer"].contains("#/components/schemas/Middle"));
+        assert!(plan.source.contains("crate::generated::types::Independent"));
+        assert!(!plan.source.contains("crate::generated::types::Middle"));
+        assert!(!plan.source.contains("crate::generated::types::Outer"));
+    }
+
+    #[test]
+    fn serializes_partitioned_round_trip_stats_for_corpus_aggregation() {
+        let stats = RoundTripStats {
+            component_schemas: 10,
+            tested_schemas: 4,
+            skipped_schemas: 6,
+            source_invalid_schemas: 1,
+            dependent_schemas: 2,
+            synthesis_skipped_schemas: 3,
+            samples: 16,
+        };
+        assert_eq!(
+            stats.to_shell(),
+            concat!(
+                "component_schemas=10\n",
+                "tested_schemas=4\n",
+                "skipped_schemas=6\n",
+                "source_invalid_schemas=1\n",
+                "dependent_schemas=2\n",
+                "synthesis_skipped_schemas=3\n",
+                "samples=16\n"
+            )
+        );
+    }
+
+    #[test]
     fn classifies_false_schema_as_uninhabited() {
         let spec = json!({
             "openapi": "3.1.0",
@@ -998,6 +1841,7 @@ mod tests {
         let plan = build_round_trip_plan(&spec, 2).expect("plan");
         assert_eq!(plan.stats.tested_schemas, 0);
         assert_eq!(plan.stats.skipped_schemas, 1);
+        assert_eq!(plan.stats.synthesis_skipped_schemas, 1);
         assert!(plan.skipped[0].reason.contains("uninhabited"));
     }
 

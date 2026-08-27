@@ -684,6 +684,17 @@ fn builtin_format_aliases() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// Normalize a built-in format alias without applying user configuration.
+///
+/// Internal schema tooling uses this alongside [`TypeMapper`] so synthesis,
+/// validation, and Rust type selection agree on vendor spellings.
+pub(crate) fn normalize_builtin_format(format: &str) -> &str {
+    builtin_format_aliases()
+        .iter()
+        .find_map(|(from, to)| (*from == format).then_some(*to))
+        .unwrap_or(format)
+}
+
 impl TypeMappingConfig {
     /// Q2.4: constraint-doc emission mode. Defaults to
     /// [`ConstraintMode::Doc`] when the
@@ -891,12 +902,7 @@ impl TypeMapper {
         if let Some(target) = self.config.format_aliases.get(raw) {
             return Some(target.clone());
         }
-        for (from, to) in builtin_format_aliases() {
-            if *from == raw {
-                return Some((*to).to_string());
-            }
-        }
-        Some(raw.to_string())
+        Some(normalize_builtin_format(raw).to_string())
     }
 
     fn map_date_time(&self, strat: DateStrategy) -> MappedType {
@@ -1254,9 +1260,11 @@ mod tests {
     fn builtin_aliases_normalize_uuid_variants_to_uuid() {
         let m = TypeMapper::default();
         for fmt in ["uuid4", "uuid_v4", "UUID"] {
+            assert_eq!(normalize_builtin_format(fmt), "uuid", "format = {fmt}");
             let mt = m.string_format(Some(fmt));
             assert_eq!(mt.rust_type, "uuid::Uuid", "format = {fmt}");
         }
+        assert_eq!(normalize_builtin_format("vendor-id"), "vendor-id");
     }
 
     #[test]

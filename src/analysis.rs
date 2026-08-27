@@ -654,8 +654,10 @@ pub enum SchemaType {
 /// value-type schema instead of degrading to `serde_json::Value`.
 #[derive(Debug, Clone)]
 pub enum ObjectAdditionalProperties {
-    /// `additionalProperties: false` or absent — extra keys are
-    /// rejected and no extra field is emitted.
+    /// No catch-all field is emitted. This is exact for
+    /// `additionalProperties: false`; for an omitted keyword it is the
+    /// generator's historical closed-model projection and is used only while
+    /// no required unknown member forces an open carrier.
     Forbidden,
     /// `additionalProperties: true` — extra keys captured as
     /// `BTreeMap<String, serde_json::Value>`.
@@ -680,6 +682,11 @@ pub struct PropertyInfo {
     pub description: Option<String>,
     pub default: Option<serde_json::Value>,
     pub serde_attrs: Vec<String>,
+    /// True when this field was synthesized from a `required` name that the
+    /// schema did not also declare in `properties`. Keeping that provenance
+    /// lets allOf merging prefer a real sibling declaration regardless of
+    /// branch order.
+    pub synthesized_required: bool,
     /// Q2.4: OpenAPI constraint annotations captured from the
     /// property schema. Surfaced by the generator as `/// Constraint:
     /// …` doc lines and/or `#[validate(...)]` attributes depending on
@@ -2013,7 +2020,7 @@ impl SchemaAnalyzer {
     /// target may be `anyOf: [T, null]`, `type: [T, null]`, or OpenAPI 3.0
     /// `nullable: true`.
     fn schema_or_reference_is_nullable(&self, schema: &Schema) -> bool {
-        let mut current = schema;
+        let mut current = schema.clone();
         let mut visited = HashSet::new();
         loop {
             if current.is_nullable_any() {
@@ -2022,13 +2029,10 @@ impl SchemaAnalyzer {
             let Some(reference) = current.reference() else {
                 return false;
             };
-            let Some(name) = self.extract_schema_name(reference) else {
-                return false;
-            };
-            if !visited.insert(name.to_string()) {
+            if !visited.insert(reference.to_string()) {
                 return false;
             }
-            let Some(target) = self.schemas.get(name) else {
+            let Some(target) = self.reference_target_schema(reference) else {
                 return false;
             };
             current = target;
@@ -2129,15 +2133,24 @@ impl SchemaAnalyzer {
 
         let parts: Vec<&str> = ref_str.split('/').collect();
 
-        // Standard 3.x pattern: #/components/schemas/{SchemaName}[/deeper/path]
-        if parts.len() >= 4 && parts[0] == "#" && parts[2] == "schemas" {
+        // Standard 3.x pattern: #/components/schemas/{SchemaName}. A longer
+        // pointer names a node *inside* the component and must be resolved at
+        // that exact JSON Pointer rather than being truncated to the root.
+        if parts.len() == 4 && parts[0] == "#" && parts[2] == "schemas" {
             return Some(parts[3]);
         }
 
         // Swagger 2.0 carry-over: some 3.x specs (Google) still use
         // `#/definitions/{SchemaName}`. Treat it as an alias.
-        if parts.len() >= 3 && parts[0] == "#" && parts[1] == "definitions" {
+        if parts.len() == 3 && parts[0] == "#" && parts[1] == "definitions" {
             return Some(parts[2]);
+        }
+
+        // Other local fragments are JSON Pointers, not component names. Let
+        // the exact-pointer resolver handle them before applying the legacy
+        // last-segment fallback used by non-pointer reference shapes.
+        if ref_str.starts_with("#/") {
+            return None;
         }
 
         // Last-segment fallback for other ref shapes — but only if the
@@ -2160,6 +2173,19 @@ impl SchemaAnalyzer {
             return None;
         }
         Some(last)
+    }
+
+    /// Return the exact local schema named by a reference, whether the
+    /// reference targets a component root or a node deeper in the document.
+    fn reference_target_schema(&self, reference: &str) -> Option<Schema> {
+        if let Some(name) = self.extract_schema_name(reference) {
+            return self.schemas.get(name).cloned();
+        }
+        let pointer = reference.strip_prefix('#')?;
+        if !pointer.starts_with('/') {
+            return None;
+        }
+        Schema::deserialize(self.openapi_spec.pointer(pointer)?).ok()
     }
 
     fn analyze_schema(&mut self, schema_name: &str) -> Result<AnalyzedSchema> {
@@ -2637,6 +2663,7 @@ impl SchemaAnalyzer {
                                 description: prop_description,
                                 default: prop_default,
                                 serde_attrs: Vec::new(),
+                                synthesized_required: false,
                                 constraints: PropertyConstraints::from_schema_details(prop_details),
                             },
                         );
@@ -2727,6 +2754,7 @@ impl SchemaAnalyzer {
                         description: prop_description,
                         default: prop_default,
                         serde_attrs: Vec::new(),
+                        synthesized_required: false,
                         constraints: PropertyConstraints::from_schema_details(prop_details),
                     },
                 );
@@ -2748,26 +2776,81 @@ impl SchemaAnalyzer {
             .and_then(|s| s.additional_properties_typed)
             .unwrap_or(true);
 
-        let additional_properties = match &details.additional_properties {
-            Some(crate::openapi::AdditionalProperties::Boolean(true)) => {
-                ObjectAdditionalProperties::Untyped
-            }
-            Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
-                ObjectAdditionalProperties::Forbidden
-            }
-            Some(crate::openapi::AdditionalProperties::Schema(value_schema)) if typed_enabled => {
-                let analyzed =
-                    self.analyze_property_schema_with_context(value_schema, None, dependencies)?;
-                ObjectAdditionalProperties::Typed {
-                    value_type: Box::new(analyzed),
-                }
-            }
-            Some(crate::openapi::AdditionalProperties::Schema(_)) => {
-                // typed_enabled = false: degrade to the pre-Q2.3 behavior.
-                ObjectAdditionalProperties::Untyped
-            }
-            None => ObjectAdditionalProperties::Forbidden,
+        let untyped_required_property = || PropertyInfo {
+            schema_type: SchemaType::Untyped {
+                shape: UntypedShape::Value,
+                reason: UntypedReason::AnySchema,
+            },
+            nullable: false,
+            description: None,
+            default: None,
+            serde_attrs: Vec::new(),
+            synthesized_required: true,
+            constraints: PropertyConstraints::default(),
         };
+        let (mut additional_properties, required_additional_property, explicitly_forbidden) =
+            match &details.additional_properties {
+                Some(crate::openapi::AdditionalProperties::Boolean(true)) => (
+                    ObjectAdditionalProperties::Untyped,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+                Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
+                    (ObjectAdditionalProperties::Forbidden, None, true)
+                }
+                Some(crate::openapi::AdditionalProperties::Schema(value_schema))
+                    if typed_enabled =>
+                {
+                    let analyzed = self.analyze_property_schema_with_context(
+                        value_schema,
+                        None,
+                        dependencies,
+                    )?;
+                    let value_details = value_schema.details();
+                    let required_property = PropertyInfo {
+                        schema_type: analyzed.clone(),
+                        nullable: self.schema_or_reference_is_nullable(value_schema),
+                        description: value_details.description.clone(),
+                        // A JSON Schema `default` is an annotation, not permission
+                        // to omit a name that `required` says must be present.
+                        default: None,
+                        serde_attrs: Vec::new(),
+                        synthesized_required: true,
+                        constraints: PropertyConstraints::from_schema_details(value_details),
+                    };
+                    (
+                        ObjectAdditionalProperties::Typed {
+                            value_type: Box::new(analyzed),
+                        },
+                        Some(required_property),
+                        false,
+                    )
+                }
+                Some(crate::openapi::AdditionalProperties::Schema(_)) => (
+                    // typed_enabled = false: degrade both the catch-all map and
+                    // any required unknown member to serde_json::Value.
+                    ObjectAdditionalProperties::Untyped,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+                // JSON Schema and OpenAPI 3.0 define an omitted
+                // additionalProperties keyword as accepting any extra value.
+                // We retain the historical closed-model shape unless an
+                // undeclared required name proves that an open carrier is needed.
+                None => (
+                    ObjectAdditionalProperties::Forbidden,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+            };
+
+        self.finalize_required_object_members(
+            &mut property_info,
+            &required,
+            &mut additional_properties,
+            required_additional_property,
+            explicitly_forbidden,
+        )?;
 
         Ok(SchemaType::Object {
             properties: property_info,
@@ -2775,6 +2858,58 @@ impl SchemaAnalyzer {
             required,
             additional_properties,
         })
+    }
+
+    /// Materialize names asserted by `required` but omitted from `properties`.
+    /// A flattened map preserves arbitrary extras, but it cannot express that a
+    /// particular wire key must exist, so each such name also needs a normal
+    /// required field in the generated struct.
+    fn finalize_required_object_members(
+        &self,
+        properties: &mut BTreeMap<String, PropertyInfo>,
+        required: &HashSet<String>,
+        additional_properties: &mut ObjectAdditionalProperties,
+        required_additional_property: Option<PropertyInfo>,
+        explicitly_forbidden: bool,
+    ) -> Result<()> {
+        let mut missing = required
+            .iter()
+            .filter(|name| !properties.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        if explicitly_forbidden {
+            let owner = self
+                .current_schema_name
+                .as_deref()
+                .unwrap_or("<inline object>");
+            return Err(GeneratorError::InvalidSchema(format!(
+                "object schema `{owner}` is unsatisfiable: required member(s) {} are not declared in properties while additionalProperties: false",
+                missing
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+
+        let required_additional_property = required_additional_property.ok_or_else(|| {
+            GeneratorError::InvalidSchema(
+                "undeclared required members have no additional-properties carrier".to_string(),
+            )
+        })?;
+        for name in missing {
+            properties.insert(name, required_additional_property.clone());
+        }
+
+        if matches!(additional_properties, ObjectAdditionalProperties::Forbidden) {
+            *additional_properties = ObjectAdditionalProperties::Untyped;
+        }
+        Ok(())
     }
 
     /// Build one union variant for a genuine `type: [X, Y, ...]` member.
@@ -3347,41 +3482,37 @@ impl SchemaAnalyzer {
         for schema in all_of_schemas {
             match schema {
                 Schema::Reference { reference, .. } => {
-                    // Add dependency on referenced schema
-                    if let Some(target) = self.extract_schema_name(reference) {
-                        dependencies.insert(target.to_string());
+                    let (analyzed_type, raw_target) =
+                        if let Some(target) = self.extract_schema_name(reference) {
+                            dependencies.insert(target.to_string());
+                            let analyzed_ref = self.analyze_schema(target)?;
+                            (
+                                Some(analyzed_ref.schema_type),
+                                self.schemas.get(target).cloned(),
+                            )
+                        } else {
+                            (
+                                self.resolve_pointer_schema(reference, dependencies)?,
+                                self.reference_target_schema(reference),
+                            )
+                        };
 
-                        // First ensure the referenced schema is analyzed
-                        let analyzed_ref = self.analyze_schema(target)?;
-
-                        // Now merge the analyzed schema's properties
-                        match &analyzed_ref.schema_type {
-                            SchemaType::Object {
-                                properties,
-                                required,
-                                ..
-                            } => {
-                                // Merge properties from the analyzed schema
-                                for (prop_name, prop_info) in properties {
-                                    merged_properties.insert(prop_name.clone(), prop_info.clone());
-                                }
-                                // Merge required fields
-                                for req in required {
-                                    merged_required.insert(req.clone());
-                                }
-                            }
-                            _ => {
-                                // If the referenced schema is not an object, fall back to raw merge
-                                if let Some(ref_schema) = self.schemas.get(target).cloned() {
-                                    self.merge_schema_into_properties(
-                                        &ref_schema,
-                                        &mut merged_properties,
-                                        &mut merged_required,
-                                        dependencies,
-                                    )?;
-                                }
-                            }
-                        }
+                    let merged = if let Some(analyzed_type) = analyzed_type {
+                        self.merge_analyzed_object_properties(
+                            &analyzed_type,
+                            &mut merged_properties,
+                            &mut merged_required,
+                        )?
+                    } else {
+                        false
+                    };
+                    if !merged && let Some(raw_target) = raw_target {
+                        self.merge_schema_into_properties(
+                            &raw_target,
+                            &mut merged_properties,
+                            &mut merged_required,
+                            dependencies,
+                        )?;
                     }
                 }
                 Schema::Typed {
@@ -3422,12 +3553,41 @@ impl SchemaAnalyzer {
             }
         }
 
-        // If we successfully merged properties, return an object
-        if !merged_properties.is_empty() {
+        // If we successfully merged properties, reconcile required names only
+        // after every allOf sibling has contributed its declarations. Doing it
+        // per branch would turn a sibling-declared typed field into an opaque
+        // placeholder depending on branch order.
+        if !merged_properties.is_empty() || !merged_required.is_empty() {
+            let mut additional_properties = if merged_properties
+                .values()
+                .any(|property| property.synthesized_required)
+            {
+                ObjectAdditionalProperties::Untyped
+            } else {
+                ObjectAdditionalProperties::Forbidden
+            };
+            self.finalize_required_object_members(
+                &mut merged_properties,
+                &merged_required,
+                &mut additional_properties,
+                Some(PropertyInfo {
+                    schema_type: SchemaType::Untyped {
+                        shape: UntypedShape::Value,
+                        reason: UntypedReason::AnySchema,
+                    },
+                    nullable: false,
+                    description: None,
+                    default: None,
+                    serde_attrs: Vec::new(),
+                    synthesized_required: true,
+                    constraints: PropertyConstraints::default(),
+                }),
+                false,
+            )?;
             Ok(SchemaType::Object {
                 properties: merged_properties,
                 required: merged_required,
-                additional_properties: ObjectAdditionalProperties::Forbidden,
+                additional_properties,
                 variant: None,
             })
         } else {
@@ -3452,6 +3612,54 @@ impl SchemaAnalyzer {
                     })
                     .collect(),
             })
+        }
+    }
+
+    /// Merge the object reached by an analyzed type, following aliases through
+    /// the analysis cache. Deep-pointer resolution hoists inline objects and
+    /// returns a reference to that cache entry, so allOf composition needs the
+    /// same alias-following behavior as a direct component reference.
+    fn merge_analyzed_object_properties(
+        &mut self,
+        schema_type: &SchemaType,
+        merged_properties: &mut BTreeMap<String, PropertyInfo>,
+        merged_required: &mut HashSet<String>,
+    ) -> Result<bool> {
+        let mut current = schema_type.clone();
+        let mut visited = HashSet::new();
+        loop {
+            match current {
+                SchemaType::Object {
+                    properties,
+                    required,
+                    ..
+                } => {
+                    for (name, property) in properties {
+                        let keep_declared_sibling =
+                            merged_properties.get(&name).is_some_and(|existing| {
+                                !existing.synthesized_required && property.synthesized_required
+                            });
+                        if !keep_declared_sibling {
+                            merged_properties.insert(name, property);
+                        }
+                    }
+                    merged_required.extend(required);
+                    return Ok(true);
+                }
+                SchemaType::Reference { target } => {
+                    if !visited.insert(target.clone()) {
+                        return Ok(false);
+                    }
+                    current = if let Some(analyzed) = self.resolved_cache.get(&target) {
+                        analyzed.schema_type.clone()
+                    } else if self.schemas.contains_key(&target) {
+                        self.analyze_schema(&target)?.schema_type
+                    } else {
+                        return Ok(false);
+                    };
+                }
+                _ => return Ok(false),
+            }
         }
     }
 
@@ -3499,6 +3707,7 @@ impl SchemaAnalyzer {
                         description: prop_details.description.clone(),
                         default: prop_details.default.clone(),
                         serde_attrs: Vec::new(),
+                        synthesized_required: false,
                         constraints: PropertyConstraints::from_schema_details(prop_details),
                     },
                 );
@@ -4997,15 +5206,24 @@ impl SchemaAnalyzer {
             return Ok(None);
         };
 
-        let analyzed = self.analyze_property_schema_with_context(&schema, None, dependencies);
+        // Analyze the target as the named schema represented by the pointer.
+        // Property analysis invents names from the caller's current context
+        // (`ActionObject`, `HolderItem`), which makes two uses of the same
+        // pointer diverge and can overwrite recursive targets.
+        let saved_context = self.current_schema_name.clone();
+        self.current_schema_name = Some(name.clone());
+        let analyzed = self.analyze_schema_value(&schema, &name);
+        self.current_schema_name = saved_context;
         self.resolving_pointers.remove(&name);
         let analyzed = analyzed?;
-        Ok(Some(self.hoist_inline_property_type(
-            &name,
-            "",
-            analyzed,
-            dependencies,
-        )))
+        dependencies.extend(analyzed.dependencies.iter().cloned());
+        if analyzed.schema_type.renders_inline() {
+            return Ok(Some(analyzed.schema_type));
+        }
+
+        self.resolved_cache.insert(name.clone(), analyzed);
+        dependencies.insert(name.clone());
+        Ok(Some(SchemaType::Reference { target: name }))
     }
 
     /// Give a property type a name when it needs one.
@@ -5151,12 +5369,14 @@ impl SchemaAnalyzer {
             ),
             Schema::Reference { reference, .. } => {
                 // Array of referenced types
-                let target = self
-                    .extract_schema_name(reference)
-                    .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
-                    .to_string();
-                dependencies.insert(target.clone());
-                SchemaType::Reference { target }
+                if let Some(target) = self.extract_schema_name(reference) {
+                    let target = target.to_string();
+                    dependencies.insert(target.clone());
+                    SchemaType::Reference { target }
+                } else {
+                    self.resolve_pointer_schema(reference, dependencies)?
+                        .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
+                }
             }
             Schema::RecursiveRef { recursive_ref, .. } => {
                 // Array of recursive references
@@ -5825,7 +6045,7 @@ impl SchemaAnalyzer {
             let has_structural_constraints = details
                 .required
                 .as_ref()
-                .map(|req| req.iter().any(|r| r != "type"))
+                .map(|req| !req.is_empty())
                 .unwrap_or(false)
                 || details.pattern_properties.is_some()
                 || details.property_names.is_some()

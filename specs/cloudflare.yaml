@@ -92371,8 +92371,7 @@
           "code": { "type": "integer" },
           "documentation_url": { "type": "string" },
           "source": { "type": "object", "properties": { "pointer": { "type": "string" } } }
-        },
-        "required": []
+        }
       },
       "pagination_info": {
         "type": "object",
@@ -92397,8 +92396,7 @@
             "description": "Total results available without any search parameters",
             "example": 2000
           }
-        },
-        "required": []
+        }
       },
       "dns-records_dns-record": {
         "type": "object",

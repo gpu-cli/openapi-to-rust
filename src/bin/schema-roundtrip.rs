@@ -35,8 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&stats_path, plan.stats.to_shell())?;
 
     println!(
-        "schema-roundtrip: {} schema(s), {} sample(s), {} skipped",
-        plan.stats.tested_schemas, plan.stats.samples, plan.stats.skipped_schemas
+        "schema-roundtrip: {} schema(s), {} sample(s), {} skipped ({} source-invalid, {} dependent, {} synthesis-skipped)",
+        plan.stats.tested_schemas,
+        plan.stats.samples,
+        plan.stats.skipped_schemas,
+        plan.stats.source_invalid_schemas,
+        plan.stats.dependent_schemas,
+        plan.stats.synthesis_skipped_schemas
     );
     for skipped in plan.skipped.iter().take(12) {
         println!("  skip {}: {}", skipped.schema, skipped.reason);

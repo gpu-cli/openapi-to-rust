@@ -363,30 +363,21 @@ fn a_union_that_only_alternates_requiredness_is_the_object_it_describes() {
 
 #[test]
 fn union_branches_that_are_deep_pointers_are_expanded() {
-    // PagerDuty builds a request body from three pointers into a response's
-    // `oneOf`. Every branch resolves, but a union of unresolvable references
-    // had nothing to build variants from.
-    let spec = json!({
-        "openapi": "3.1.0",
-        "info": { "title": "typing", "version": "1.0.0" },
-        "components": {
-            "responses": { "CacheData": {
-                "description": "cache data",
-                "content": { "application/json": { "schema": {
-                    "oneOf": [{ "type": "string" }, { "type": "number" }]
-                }}}
-            }},
-            "schemas": {
-                "PutRequest": { "type": "object", "oneOf": [
-                    { "$ref": "#/components/responses/CacheData/content/application~1json/schema/oneOf/0" },
-                    { "$ref": "#/components/responses/CacheData/content/application~1json/schema/oneOf/1" }
-                ]},
-                "Holder": { "type": "object", "additionalProperties": false, "properties": {
-                    "data": { "$ref": "#/components/schemas/PutRequest" }
-                }}
-            }
-        }
-    });
+    // A component-root prefix must not make these look like two references to
+    // the whole `CacheData` schema. Each pointer names one union member.
+    let spec = spec_with_schemas(json!({
+        "CacheData": { "oneOf": [
+            { "type": "string" },
+            { "type": "number" }
+        ]},
+        "PutRequest": { "oneOf": [
+            { "$ref": "#/components/schemas/CacheData/oneOf/0" },
+            { "$ref": "#/components/schemas/CacheData/oneOf/1" }
+        ]},
+        "Holder": { "type": "object", "additionalProperties": false, "properties": {
+            "data": { "$ref": "#/components/schemas/PutRequest" }
+        }}
+    }));
 
     let (generated, recoverable) = generate_and_census(spec);
     assert!(
@@ -400,22 +391,163 @@ fn union_branches_that_are_deep_pointers_are_expanded() {
 
 #[test]
 fn a_pointer_into_a_composition_resolves_to_that_member() {
-    // The other pointer form PagerDuty uses: one member of another schema's
-    // `allOf`, addressed by index.
+    // PagerDuty points at one allOf member. Give the root a second, visibly
+    // different member so truncating the pointer to `Tag` cannot pass.
     let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
         "Tag": { "allOf": [
             { "type": "object", "additionalProperties": false,
+              "required": ["id"],
+              "properties": { "id": { "type": "string" } } },
+            { "type": "object", "additionalProperties": false,
+              "required": ["label"],
               "properties": { "label": { "type": "string" } } }
         ]},
-        "Action": { "type": "object", "additionalProperties": false, "properties": {
-            "base": { "$ref": "#/components/schemas/Tag/allOf/0" }
+        "Action": { "type": "object", "additionalProperties": false,
+          "required": ["base", "again"], "properties": {
+            "base": { "$ref": "#/components/schemas/Tag/allOf/0" },
+            "again": { "$ref": "#/components/schemas/Tag/allOf/0" }
+        }}
+    })));
+
+    let Some(action) = generated
+        .split("pub struct Action {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n}").next())
+    else {
+        panic!("missing Action struct:\n{generated}");
+    };
+    let Some(exact_member) = generated
+        .split("pub struct TagAllOf0 {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n}").next())
+    else {
+        panic!("missing exact allOf member struct:\n{generated}");
+    };
+    assert!(
+        action.contains("pub base: TagAllOf0") && action.contains("pub again: TagAllOf0"),
+        "both uses must share the exact pointer target:\n{generated}"
+    );
+    assert!(
+        exact_member.contains("pub id: String") && !exact_member.contains("label"),
+        "the first member must not inherit its sibling's fields:\n{generated}"
+    );
+    assert_eq!(
+        generated.matches("pub struct TagAllOf0 {").count(),
+        1,
+        "reusing a pointer must not generate duplicate target types"
+    );
+    assert!(recoverable.is_empty(), "{recoverable:?}");
+}
+
+#[test]
+fn an_escaped_deep_scalar_pointer_preserves_type_and_nullability() {
+    let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
+        "AHolder": { "type": "object", "additionalProperties": false,
+          "required": ["selected"], "properties": {
+            "selected": {
+              "$ref": "#/components/schemas/Source/properties/media~1type"
+            }
+        }},
+        "Source": { "type": "object", "additionalProperties": false, "properties": {
+            "media/type": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+            "unrelated": { "type": "integer" }
         }}
     })));
 
     assert!(
-        !generated.contains("pub base: Option<serde_json::Value>"),
-        "a pointer into a composition must resolve:\n{generated}"
+        generated.contains("pub selected: Option<String>"),
+        "escaped pointer token must select the nullable scalar, not Source:\n{generated}"
     );
+    assert!(recoverable.is_empty(), "{recoverable:?}");
+}
+
+#[test]
+fn array_items_can_reuse_a_deep_object_pointer() {
+    let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
+        "AHolder": { "type": "object", "additionalProperties": false,
+          "required": ["first", "second"], "properties": {
+            "first": { "type": "array", "items": {
+              "$ref": "#/components/schemas/Source/properties/entries/items"
+            }},
+            "second": { "type": "array", "items": {
+              "$ref": "#/components/schemas/Source/properties/entries/items"
+            }}
+        }},
+        "Source": { "type": "object", "additionalProperties": false, "properties": {
+            "entries": { "type": "array", "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["code"], "properties": { "code": { "type": "string" } }
+            }}
+        }}
+    })));
+
+    assert!(
+        generated.contains("pub first: Vec<SourceEntriesItems>")
+            && generated.contains("pub second: Vec<SourceEntriesItems>"),
+        "deep item refs must use the exact shared object type:\n{generated}"
+    );
+    assert_eq!(
+        generated.matches("pub struct SourceEntriesItems {").count(),
+        1
+    );
+    assert!(recoverable.is_empty(), "{recoverable:?}");
+}
+
+#[test]
+fn allof_merges_the_exact_deep_object_target() {
+    let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
+        "Composite": { "allOf": [
+            { "$ref": "#/components/schemas/Source/properties/fragment" },
+            { "type": "object", "additionalProperties": false,
+              "required": ["own"], "properties": { "own": { "type": "boolean" } } }
+        ]},
+        "Source": { "type": "object", "additionalProperties": false, "properties": {
+            "fragment": { "type": "object", "additionalProperties": false,
+              "required": ["selected"],
+              "properties": { "selected": { "type": "string" } } },
+            "unrelated": { "type": "integer" }
+        }}
+    })));
+
+    let Some(composite) = generated
+        .split("pub struct Composite {")
+        .nth(1)
+        .and_then(|tail| tail.split("\n}").next())
+    else {
+        panic!("missing Composite struct:\n{generated}");
+    };
+    assert!(
+        composite.contains("pub selected: String") && composite.contains("pub own: bool"),
+        "allOf must merge the exact object and its sibling:\n{generated}"
+    );
+    assert!(
+        !composite.contains("unrelated") && !composite.contains("pub fragment:"),
+        "allOf must not merge the component root:\n{generated}"
+    );
+    assert!(recoverable.is_empty(), "{recoverable:?}");
+}
+
+#[test]
+fn a_recursive_deep_object_pointer_terminates_and_is_reused() {
+    let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
+        "AHolder": { "type": "object", "additionalProperties": false,
+          "required": ["node"], "properties": {
+            "node": { "$ref": "#/components/schemas/Source/properties/node" }
+        }},
+        "Source": { "type": "object", "additionalProperties": false, "properties": {
+            "node": { "type": "object", "additionalProperties": false, "properties": {
+                "next": { "$ref": "#/components/schemas/Source/properties/node" }
+            }}
+        }}
+    })));
+
+    assert!(
+        generated.contains("pub node: Box<SourceNode>")
+            && generated.contains("pub struct SourceNode {")
+            && generated.contains("pub next: Option<Box<SourceNode>>"),
+        "recursive deep pointer must terminate as a recursive named object:\n{generated}"
+    );
+    assert_eq!(generated.matches("pub struct SourceNode {").count(), 1);
     assert!(recoverable.is_empty(), "{recoverable:?}");
 }
 

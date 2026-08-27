@@ -568,14 +568,23 @@ fn rewrite_references(
         Value::Object(map) => {
             if let Some(Value::String(reference)) = map.get_mut("$ref") {
                 if let Some(token) = reference.strip_prefix("#/components/schemas/") {
-                    let name = unescape_pointer_token(token);
+                    // Only the first pointer token names the component. Keep a
+                    // deeper suffix verbatim so `Tag/allOf/0` still targets
+                    // that member after the component root is embedded.
+                    let (component_token, suffix) = token.split_once('/').unwrap_or((token, ""));
+                    let name = unescape_pointer_token(component_token);
                     if queued_components.insert(name.clone()) {
                         component_queue.push_back(name.clone());
                     }
-                    *reference = format!(
+                    let mut rewritten = format!(
                         "{BUNDLE_ID}#/{definitions_key}/components/{}",
                         escape_pointer_token(&component_bundle_key(&name))
                     );
+                    if !suffix.is_empty() {
+                        rewritten.push('/');
+                        rewritten.push_str(suffix);
+                    }
+                    *reference = rewritten;
                 } else if reference.starts_with(BUNDLE_ID) || !reference.starts_with('#') {
                     return Err(ValidationPreparationError::UnsupportedReference {
                         context: context.to_string(),
@@ -1373,6 +1382,59 @@ mod tests {
             prepare_validation_bundle(&context, &[&reserved]),
             Err(ValidationPreparationError::UnsupportedReference { .. })
         ));
+    }
+
+    #[test]
+    fn deep_component_ref_keeps_its_suffix_in_the_validation_bundle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let context = ValidationContext {
+            openapi_version: "3.1.0".to_string(),
+            component_schemas: BTreeMap::from([(
+                "Tag/Kind".to_string(),
+                json!({"allOf": [
+                    {"type": "string", "minLength": 3},
+                    {"type": "string", "maxLength": 12}
+                ]}),
+            )]),
+            ..Default::default()
+        };
+        let operation = OperationInfo {
+            operation_id: "deepTag".to_string(),
+            parameters: vec![ParameterInfo {
+                name: "tag".to_string(),
+                location: "query".to_string(),
+                required: true,
+                schema_ref: None,
+                rust_type: "String".to_string(),
+                description: None,
+                enum_values: None,
+                enum_varnames: None,
+                rust_ident: None,
+                query_serialization: None,
+                validation_schema: Some(json!({
+                    "$ref": "#/components/schemas/Tag~1Kind/allOf/0"
+                })),
+            }],
+            ..Default::default()
+        };
+
+        let bundle = prepare_validation_bundle(&context, &[&operation])?;
+        let document: Value = serde_json::from_str(&bundle.document_json)?;
+        let target = bundle
+            .target_for("deepTag", "query", Some("tag"))
+            .ok_or_else(|| std::io::Error::other("missing validation target"))?;
+        let rewritten = document
+            .pointer(target.pointer.trim_start_matches('#'))
+            .ok_or_else(|| std::io::Error::other("missing exported target schema"))?;
+        assert_eq!(
+            rewritten["$ref"],
+            format!("{BUNDLE_ID}#/$defs/components/component_Tag~1Kind/allOf/0")
+        );
+        let embedded = document
+            .pointer("/$defs/components/component_Tag~1Kind/allOf/0")
+            .ok_or_else(|| std::io::Error::other("missing embedded deep component target"))?;
+        assert_eq!(embedded["minLength"], 3,);
+        Ok(())
     }
 
     #[test]

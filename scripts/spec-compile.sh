@@ -137,6 +137,9 @@ roundtrip_tested=()
 roundtrip_schema_total=0
 roundtrip_schema_tested=0
 roundtrip_schema_skipped=0
+roundtrip_schema_source_invalid=0
+roundtrip_schema_dependent=0
+roundtrip_schema_synthesis_skipped=0
 roundtrip_sample_total=0
 for entry in "${SPECS[@]}"; do
   IFS='|' read -r name spec_path <<<"$entry"
@@ -195,6 +198,9 @@ EOF
   rt_components=0
   rt_tested=0
   rt_skipped=0
+  rt_source_invalid=0
+  rt_dependent=0
+  rt_synthesis_skipped=0
   rt_samples=0
   if [ "$ROUNDTRIP_ENABLED" = "1" ] && ! is_generate_only "$name"; then
     mkdir -p "$dir/tests"
@@ -215,6 +221,9 @@ EOF
         component_schemas) rt_components="$value" ;;
         tested_schemas) rt_tested="$value" ;;
         skipped_schemas) rt_skipped="$value" ;;
+        source_invalid_schemas) rt_source_invalid="$value" ;;
+        dependent_schemas) rt_dependent="$value" ;;
+        synthesis_skipped_schemas) rt_synthesis_skipped="$value" ;;
         samples) rt_samples="$value" ;;
       esac
     done <"$rt_stats"
@@ -223,6 +232,9 @@ EOF
     roundtrip_schema_total=$((roundtrip_schema_total + rt_components))
     roundtrip_schema_tested=$((roundtrip_schema_tested + rt_tested))
     roundtrip_schema_skipped=$((roundtrip_schema_skipped + rt_skipped))
+    roundtrip_schema_source_invalid=$((roundtrip_schema_source_invalid + rt_source_invalid))
+    roundtrip_schema_dependent=$((roundtrip_schema_dependent + rt_dependent))
+    roundtrip_schema_synthesis_skipped=$((roundtrip_schema_synthesis_skipped + rt_synthesis_skipped))
     roundtrip_sample_total=$((roundtrip_sample_total + rt_samples))
   fi
 
@@ -246,7 +258,7 @@ EOF
   } >"$dir/Cargo.toml"
 
   if [ "$roundtrip_ready" = "1" ]; then
-    echo "GEN+RT-OK ($rt_tested/$rt_components schemas, $rt_samples samples)"
+    echo "GEN+RT-OK ($rt_tested/$rt_components schemas, $rt_samples samples; skips: $rt_source_invalid source-invalid, $rt_dependent dependent, $rt_synthesis_skipped synthesis)"
   else
     echo "GEN-OK"
   fi
@@ -308,7 +320,7 @@ echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed
 [ ${#failed_roundtrip[@]} -gt 0 ] && echo "  roundtrip-fail: ${failed_roundtrip[*]}"
 [ ${#skipped[@]}      -gt 0 ] && echo "  skipped:    ${skipped[*]}"
 if [ "$ROUNDTRIP_ENABLED" = "1" ]; then
-  echo "  roundtrip: ${#roundtrip_tested[@]}/${#roundtrip_planned[@]} spec(s), $roundtrip_schema_tested/$roundtrip_schema_total component schema(s), $roundtrip_sample_total sample(s), $roundtrip_schema_skipped schema skip(s)"
+  echo "  roundtrip: ${#roundtrip_tested[@]}/${#roundtrip_planned[@]} spec(s), $roundtrip_schema_tested/$roundtrip_schema_total component schema(s), $roundtrip_sample_total sample(s), $roundtrip_schema_skipped schema skip(s) ($roundtrip_schema_source_invalid source-invalid, $roundtrip_schema_dependent dependent, $roundtrip_schema_synthesis_skipped synthesis)"
 fi
 if [ ${#generate_only[@]} -gt 0 ]; then
   echo "  generate-only (NOT compile-verified): ${generate_only[*]}"

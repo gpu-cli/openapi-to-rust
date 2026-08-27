@@ -1958,17 +1958,14 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Default is safe only when no emitted wire property is required.
+        // Default is safe only when the schema requires no wire property.
         // Optional fields are represented as Option<T>, and the generated
         // additional-properties map (when present) is empty by default. We do
         // not invent values for required data, even when the Rust type itself
         // happens to implement Default.
         // A flattened variant is one of several shapes, and picking one would
         // invent data the same way a required field would.
-        let can_derive_default = variant.is_none()
-            && emitted_properties
-                .iter()
-                .all(|property| !property.is_required);
+        let can_derive_default = variant.is_none() && required.is_empty();
 
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
