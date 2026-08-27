@@ -149,6 +149,68 @@ impl UntypedReason {
     }
 }
 
+/// The schemas a generated type refers to.
+///
+/// Synthesized types — a hoisted property type, a named union — need these to
+/// be accurate, not merely non-empty: the dependency graph is what
+/// `detect_recursive_schemas` reads, and a cycle that runs through a
+/// synthesized type is invisible without them. Stripe's
+/// `Quote → QuotesResourceFromQuote → QuotesResourceFromQuoteQuote → Quote`
+/// compiled to an infinitely-sized enum until the middle link declared where it
+/// pointed.
+fn schema_type_dependencies(schema_type: &SchemaType) -> HashSet<String> {
+    let mut targets = HashSet::new();
+    collect_type_dependencies(schema_type, &mut targets, 0);
+    targets
+}
+
+fn collect_type_dependencies(
+    schema_type: &SchemaType,
+    targets: &mut HashSet<String>,
+    depth: usize,
+) {
+    if depth > UNTYPED_WALK_DEPTH {
+        return;
+    }
+    match schema_type {
+        SchemaType::Reference { target } => {
+            targets.insert(target.clone());
+        }
+        SchemaType::Array { item_type } => collect_type_dependencies(item_type, targets, depth + 1),
+        SchemaType::Tuple { element_types } => {
+            for element_type in element_types {
+                collect_type_dependencies(element_type, targets, depth + 1);
+            }
+        }
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            for property in properties.values() {
+                collect_type_dependencies(&property.schema_type, targets, depth + 1);
+            }
+            if let ObjectAdditionalProperties::Typed { value_type } = additional_properties {
+                collect_type_dependencies(value_type, targets, depth + 1);
+            }
+        }
+        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+            for variant in variants {
+                targets.insert(variant.target.clone());
+            }
+        }
+        SchemaType::DiscriminatedUnion { variants, .. } => {
+            for variant in variants {
+                targets.insert(variant.type_name.clone());
+            }
+        }
+        SchemaType::Primitive { .. }
+        | SchemaType::StringEnum { .. }
+        | SchemaType::ExtensibleEnum { .. }
+        | SchemaType::Untyped { .. } => {}
+    }
+}
+
 /// Convert any `serde_json::Value` still carried as a stringly-typed
 /// `Primitive` into [`SchemaType::Untyped`].
 ///
@@ -2434,8 +2496,8 @@ impl SchemaAnalyzer {
                             AnalyzedSchema {
                                 name: union_type_name.clone(),
                                 original: serde_json::to_value(prop_schema).unwrap_or(Value::Null),
+                                dependencies: schema_type_dependencies(&union_schema_type),
                                 schema_type: union_schema_type,
-                                dependencies: HashSet::new(),
                                 nullable: false,
                                 description: prop_schema.details().description.clone(),
                                 default: None,
@@ -4745,20 +4807,17 @@ impl SchemaAnalyzer {
             return schema_type;
         }
 
-        let description = match &schema_type {
-            SchemaType::Object { .. } => None,
-            _ => None,
-        };
         let hoisted_name = self.unique_hoisted_name(schema_name, property_name);
+        let hoisted_dependencies = schema_type_dependencies(&schema_type);
         self.resolved_cache.insert(
             hoisted_name.clone(),
             AnalyzedSchema {
                 name: hoisted_name.clone(),
                 original: Value::Null,
                 schema_type,
-                dependencies: dependencies.clone(),
+                dependencies: hoisted_dependencies,
                 nullable: false,
-                description,
+                description: None,
                 default: None,
             },
         );

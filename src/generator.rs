@@ -1729,11 +1729,28 @@ impl CodeGenerator {
                 where
                     S: serde::Serializer,
                 {
-                    let value = match self {
+                    serializer.serialize_str(self.as_str())
+                }
+            }
+
+            impl #enum_name {
+                pub fn as_str(&self) -> &str {
+                    match self {
                         #(#match_arms_ser)*
                         #enum_name::Custom(s) => s.as_str(),
-                    };
-                    serializer.serialize_str(value)
+                    }
+                }
+            }
+
+            impl ::std::fmt::Display for #enum_name {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    f.write_str(self.as_str())
+                }
+            }
+
+            impl AsRef<str> for #enum_name {
+                fn as_ref(&self) -> &str {
+                    self.as_str()
                 }
             }
         })

@@ -36,12 +36,26 @@ impl serde::Serialize for FlexibleEnum {
     where
         S: serde::Serializer,
     {
-        let value = match self {
+        serializer.serialize_str(self.as_str())
+    }
+}
+impl FlexibleEnum {
+    pub fn as_str(&self) -> &str {
+        match self {
             FlexibleEnum::KnownValue1 => "known_value_1",
             FlexibleEnum::KnownValue2 => "known_value_2",
             FlexibleEnum::Custom(s) => s.as_str(),
-        };
-        serializer.serialize_str(value)
+        }
+    }
+}
+impl ::std::fmt::Display for FlexibleEnum {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for FlexibleEnum {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]

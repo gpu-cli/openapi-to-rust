@@ -463,6 +463,77 @@ fn items_true_parses_as_an_unconstrained_array() {
 }
 
 #[test]
+fn a_hoisted_type_declares_what_it_points_at() {
+    // Typing a field that used to be `serde_json::Value` can close a reference
+    // cycle that the `Value` had broken by accident. Recursion detection reads
+    // the dependency graph, so a synthesized type that declares no dependencies
+    // makes its half of the cycle invisible and the generated enum comes out
+    // infinitely sized (Stripe: Quote -> QuotesResourceFromQuote ->
+    // QuotesResourceFromQuoteQuote -> Quote).
+    let analysis = analyze(spec_with_schemas(json!({
+        "Quote": { "type": "object", "additionalProperties": false, "properties": {
+            "from_quote": { "$ref": "#/components/schemas/FromQuote" }
+        }},
+        "FromQuote": { "type": "object", "additionalProperties": false, "properties": {
+            "quote": { "anyOf": [{ "type": "string" }, { "$ref": "#/components/schemas/Quote" }] }
+        }}
+    })));
+
+    let hoisted = analysis
+        .schemas
+        .get("FromQuoteQuote")
+        .expect("the union is hoisted under the parent and property name");
+    assert!(
+        hoisted.dependencies.contains("Quote"),
+        "a hoisted union must declare the schemas it points at, got {:?}",
+        hoisted.dependencies
+    );
+    // The generated form is where it bites: an unboxed variant here is a type
+    // of infinite size and the crate does not compile.
+    let generated = generate(spec_with_schemas(json!({
+        "Quote": { "type": "object", "additionalProperties": false, "properties": {
+            "from_quote": { "$ref": "#/components/schemas/FromQuote" }
+        }},
+        "FromQuote": { "type": "object", "additionalProperties": false, "properties": {
+            "quote": { "anyOf": [{ "type": "string" }, { "$ref": "#/components/schemas/Quote" }] }
+        }}
+    })));
+    assert!(
+        generated.contains("Quote(Box<Quote>)"),
+        "the cycle through the hoisted type must be boxed:\n{generated}"
+    );
+}
+
+#[test]
+fn an_extensible_enum_renders_as_a_string_everywhere_a_string_is_expected() {
+    // Typing an open enum moves a field from `String` to a generated enum, and
+    // multipart form fields, query parameters, and headers all render values
+    // through `Display`. Without it the generated client stops compiling
+    // (OpenAI's `CreateTranslationRequest.model`).
+    let generated = generate(spec_with_schemas(json!({
+        "Model": { "anyOf": [
+            { "type": "string" },
+            { "type": "string", "enum": ["whisper-1"] }
+        ]},
+        "Request": { "type": "object", "additionalProperties": false,
+                     "properties": { "model": { "$ref": "#/components/schemas/Model" } } }
+    })));
+
+    assert!(
+        generated.contains("impl ::std::fmt::Display for Model"),
+        "an extensible enum must implement Display:\n{generated}"
+    );
+    assert!(
+        generated.contains("pub fn as_str(&self) -> &str"),
+        "an extensible enum must expose its wire value:\n{generated}"
+    );
+    assert!(
+        generated.contains("impl AsRef<str> for Model"),
+        "an extensible enum must borrow as a str:\n{generated}"
+    );
+}
+
+#[test]
 fn a_genuinely_unconstrained_value_stays_untyped() {
     // The counterweight to every narrowing above: when the schema says "any
     // JSON", `serde_json::Value` is the right answer and the census must call

@@ -17,17 +17,6 @@ pub struct CreateMessageParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<CreateMessageParamsSystem>,
 }
-/// Wrapper enum that re-adds the discriminator tag
-/// for array contexts where the inner struct had its
-/// discriminator field stripped for tagged enum use.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
-pub enum RequestTextBlockArrayItem {
-    #[serde(rename = "text")]
-    RequestTextBlock(RequestTextBlock),
-}
-///Array variant in union
-pub type RequestTextBlockArray = Vec<RequestTextBlockArrayItem>;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum InputContentBlock {
@@ -59,3 +48,14 @@ pub enum CreateMessageParamsSystem {
     String(String),
     RequestTextBlockArray(RequestTextBlockArray),
 }
+/// Wrapper enum that re-adds the discriminator tag
+/// for array contexts where the inner struct had its
+/// discriminator field stripped for tagged enum use.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum RequestTextBlockArrayItem {
+    #[serde(rename = "text")]
+    RequestTextBlock(RequestTextBlock),
+}
+///Array variant in union
+pub type RequestTextBlockArray = Vec<RequestTextBlockArrayItem>;
