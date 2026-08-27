@@ -105,6 +105,7 @@ fn requirements_spec() -> serde_json::Value {
                         "elapsed": { "type": "string", "format": "duration" },
                         "encoded": { "type": "string", "format": "byte" },
                         "raw": { "type": "string", "format": "binary" },
+                        "note": { "type": "string", "nullable": true },
                         "resource": { "type": "string", "format": "uri" }
                     }
                 },

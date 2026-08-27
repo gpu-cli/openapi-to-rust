@@ -39,6 +39,26 @@ fn reference_sibling_spec() -> Value {
                         "$ref": "#/components/schemas/ReasonAlias",
                         "nullable": true
                     }
+                },
+                "MinCount": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "minProperties": 2,
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "note": { "type": "string", "nullable": true }
+                    }
+                },
+                "MaxCount": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "maxProperties": 1,
+                    "required": ["id"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "note": { "type": "string", "nullable": true }
+                    }
                 }
             }
         }
@@ -81,7 +101,7 @@ fn analyzer_and_generator_honor_local_nullable_reference_siblings() {
     let compact = generated.split_whitespace().collect::<String>();
     assert!(compact.contains("pubrequired_nullable:Option<ReasonAlias>"));
     assert!(compact.contains("pubrequired_plain:ReasonAlias"));
-    assert!(compact.contains("puboptional_nullable:Option<Reason>"));
+    assert!(compact.contains("puboptional_nullable:Option<Option<Reason>>"));
     assert!(compact.contains("pubtypeNullableReasonList=Vec<Option<ReasonAlias>>"));
 
     assert!(
@@ -103,7 +123,7 @@ fn generated_required_nullable_reference_round_trips_explicit_null() {
         r#"
 #[cfg(test)]
 mod nullable_reference_sibling_roundtrip {
-    use super::Envelope;
+    use super::{Envelope, MaxCount, MinCount};
 
     #[test]
     fn required_null_is_present_and_stable() {
@@ -120,6 +140,42 @@ mod nullable_reference_sibling_roundtrip {
         });
         let hydrated: Envelope = serde_json::from_value(non_null.clone()).expect("hydrate value");
         assert_eq!(serde_json::to_value(hydrated).unwrap(), non_null);
+
+        let missing_optional = serde_json::json!({
+            "required_nullable": null,
+            "required_plain": "stop"
+        });
+        let hydrated: Envelope = serde_json::from_value(missing_optional.clone()).unwrap();
+        assert!(hydrated.optional_nullable.is_none());
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), missing_optional);
+
+        let explicit_optional_null = serde_json::json!({
+            "required_nullable": null,
+            "required_plain": "stop",
+            "optional_nullable": null
+        });
+        let hydrated: Envelope = serde_json::from_value(explicit_optional_null.clone()).unwrap();
+        assert_eq!(hydrated.optional_nullable, Some(None));
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), explicit_optional_null);
+
+        let optional_value = serde_json::json!({
+            "required_nullable": null,
+            "required_plain": "stop",
+            "optional_nullable": "length"
+        });
+        let hydrated: Envelope = serde_json::from_value(optional_value.clone()).unwrap();
+        assert!(matches!(hydrated.optional_nullable, Some(Some(_))));
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), optional_value);
+
+        let min_properties = serde_json::json!({"id": "minimum", "note": null});
+        let hydrated: MinCount = serde_json::from_value(min_properties.clone()).unwrap();
+        assert_eq!(hydrated.note, Some(None));
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), min_properties);
+
+        let max_properties = serde_json::json!({"id": "maximum"});
+        let hydrated: MaxCount = serde_json::from_value(max_properties.clone()).unwrap();
+        assert!(hydrated.note.is_none());
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), max_properties);
     }
 }
 "#,

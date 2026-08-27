@@ -168,9 +168,10 @@ fn binary_model_round_trip_spec() -> serde_json::Value {
                     "required": ["direct", "aliased", "encoded", "gitpod_any"],
                     "properties": {
                         "direct": { "type": "string", "format": "binary" },
-                        "optional": { "type": "string", "format": "binary" },
+                        "optional": { "type": ["string", "null"], "format": "binary" },
                         "aliased": { "$ref": "#/components/schemas/BinaryAlias" },
                         "encoded": { "type": "string", "format": "byte" },
+                        "optional_encoded": { "type": ["string", "null"], "format": "byte" },
                         "gitpod_any": { "$ref": "#/components/schemas/google.protobuf.Any" }
                     }
                 }
@@ -217,6 +218,7 @@ fn main() {
         "optional": "optional bytes",
         "aliased": "referenced bytes",
         "encoded": "aGk=",
+        "optional_encoded": "aGk=",
         "gitpod_any": {
             "debug": {},
             "type": "type.googleapis.com/example.Message",
@@ -237,6 +239,21 @@ fn main() {
     });
     let value: generated::Sample = serde_json::from_value(missing_optional.clone()).unwrap();
     assert_eq!(serde_json::to_value(value).unwrap(), missing_optional);
+
+    let explicit_nulls = serde_json::json!({
+        "direct": "direct bytes",
+        "optional": null,
+        "aliased": "referenced bytes",
+        "encoded": "aGk=",
+        "optional_encoded": null,
+        "gitpod_any": {
+            "type": "type.googleapis.com/example.Empty"
+        }
+    });
+    let value: generated::Sample = serde_json::from_value(explicit_nulls.clone()).unwrap();
+    assert_eq!(value.optional, Some(None));
+    assert_eq!(value.optional_encoded, Some(None));
+    assert_eq!(serde_json::to_value(value).unwrap(), explicit_nulls);
 }
 "##,
     )
@@ -600,6 +617,24 @@ fn spec_with_optional_format(format: &str) -> serde_json::Value {
     })
 }
 
+fn spec_with_optional_nullable_format(format: &str) -> serde_json::Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "fmt", "version": "1.0.0" },
+        "paths": {},
+        "components": {
+            "schemas": {
+                "Sample": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": ["string", "null"], "format": format }
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[test]
 fn date_with_time_strategy_emits_generated_codec() {
     let code = generate(spec_with_format("date"), time_strategy_mapper());
@@ -649,6 +684,32 @@ fn time_with_time_strategy_emits_generated_codec() {
         code.contains("time_time_format"),
         "the time codec module declaration must be emitted. Code:\n{code}"
     );
+}
+
+#[test]
+fn nullable_time_scalars_compose_their_codecs_with_field_presence() {
+    for (format, rust_type, codec) in [
+        ("date", "time::Date", "time_date_double_option"),
+        ("time", "time::Time", "time_time_double_option"),
+        (
+            "date-time",
+            "time::OffsetDateTime",
+            "time_rfc3339_double_option",
+        ),
+    ] {
+        let code = generate(
+            spec_with_optional_nullable_format(format),
+            time_strategy_mapper(),
+        );
+        assert!(
+            code.contains(&format!("pub value: Option<Option<{rust_type}>>")),
+            "optional nullable {format} must retain both presence and nullability. Code:\n{code}"
+        );
+        assert!(
+            code.contains(&format!(r#"with = "{codec}""#)),
+            "optional nullable {format} must use its double-option codec. Code:\n{code}"
+        );
+    }
 }
 
 #[test]

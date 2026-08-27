@@ -599,10 +599,63 @@ impl CodeGenerator {
             }
         }
 
+        let mut uses_plain_tri_state = false;
+        let mut tri_state_codecs = std::collections::HashSet::new();
+        for (schema_name, schema) in &analysis.schemas {
+            let crate::analysis::SchemaType::Object {
+                properties,
+                required,
+                ..
+            } = &schema.schema_type
+            else {
+                continue;
+            };
+            for (field_name, property) in properties {
+                if !self.property_is_tri_state(
+                    schema_name,
+                    field_name,
+                    property,
+                    required.contains(field_name),
+                ) {
+                    continue;
+                }
+                if let Some(codec) = self.schema_type_serde_codec(&property.schema_type, analysis) {
+                    tri_state_codecs.insert(codec);
+                } else {
+                    uses_plain_tri_state = true;
+                }
+            }
+        }
+
         // Helper modules emitted only when the analyzer actually
         // referenced their codecs. Avoids polluting every generated
         // file (and every snapshot) with dead code for specs that
         // don't use `format: byte`.
+        let base64_double_option = if tri_state_codecs.contains("base64_serde") {
+            quote! {
+                pub mod double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<Vec<u8>>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => super::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<Vec<u8>>>, D::Error> {
+                        super::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let base64_helper = if analysis
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::Base64)
@@ -669,6 +722,8 @@ impl CodeGenerator {
                             .transpose()
                         }
                     }
+
+                    #base64_double_option
                 }
             }
         } else {
@@ -679,6 +734,31 @@ impl CodeGenerator {
             .schemas
             .values()
             .any(|schema| schema_type_uses_serde_codec(&schema.schema_type, "binary_bytes_serde"));
+        let binary_bytes_double_option = if tri_state_codecs.contains("binary_bytes_serde") {
+            quote! {
+                pub mod double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<bytes::Bytes>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => super::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<bytes::Bytes>>, D::Error> {
+                        super::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let binary_bytes_helper = if uses_binary_bytes_codec {
             quote! {
                 /// UTF-8 JSON string codec for `bytes::Bytes` model fields
@@ -722,6 +802,8 @@ impl CodeGenerator {
                                 .map(|value| value.map(bytes::Bytes::from))
                         }
                     }
+
+                    #binary_bytes_double_option
                 }
             }
         } else {
@@ -732,6 +814,33 @@ impl CodeGenerator {
             .schemas
             .values()
             .any(|schema| schema_type_uses_serde_codec(&schema.schema_type, "binary_vec_serde"));
+        let binary_vec_double_option = if tri_state_codecs.contains("binary_vec_serde") {
+            quote! {
+                /// Preserve the distinction between an omitted field and an
+                /// explicit JSON null while retaining the binary codec.
+                pub mod double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<Vec<u8>>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => super::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<Vec<u8>>>, D::Error> {
+                        super::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let binary_vec_helper = if uses_binary_vec_codec {
             quote! {
                 /// UTF-8 JSON string codec for `Vec<u8>` model fields produced
@@ -774,6 +883,29 @@ impl CodeGenerator {
                                 .map(|value| value.map(String::into_bytes))
                         }
                     }
+
+                    #binary_vec_double_option
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let tri_state_helper = if uses_plain_tri_state {
+            quote! {
+                /// Serde normally maps both a missing `Option<T>` field and an
+                /// explicit JSON null to `None`. Wrapping the decoded value in
+                /// `Some` retains the field-presence bit for `Option<Option<T>>`.
+                mod tri_state_serde {
+                    use serde::{Deserialize, Deserializer};
+
+                    pub fn deserialize<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+                    where
+                        D: Deserializer<'de>,
+                        T: Deserialize<'de>,
+                    {
+                        T::deserialize(de).map(Some)
+                    }
                 }
             }
         } else {
@@ -786,6 +918,31 @@ impl CodeGenerator {
         // the `format_description!` macro. It expands to a module
         // (with an `::option` submodule) referenced from fields as
         // `#[serde(with = "time_date_format")]` etc.
+        let time_date_double_option = if tri_state_codecs.contains("time_date_format") {
+            quote! {
+                mod time_date_double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<time::Date>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => time_date_format::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<time::Date>>, D::Error> {
+                        time_date_format::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let time_date_helper = if analysis
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::TimeDate)
@@ -796,6 +953,8 @@ impl CodeGenerator {
                     Date,
                     "[year]-[month]-[day]"
                 );
+
+                #time_date_double_option
             }
         } else {
             TokenStream::new()
@@ -805,6 +964,31 @@ impl CodeGenerator {
         // format their contents, so whole seconds serialize with a
         // trailing ".0" — in exchange, parsing accepts inputs both
         // with and without fractional seconds.
+        let time_time_double_option = if tri_state_codecs.contains("time_time_format") {
+            quote! {
+                mod time_time_double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<time::Time>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => time_time_format::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<time::Time>>, D::Error> {
+                        time_time_format::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let time_time_helper = if analysis
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::TimeTime)
@@ -816,6 +1000,35 @@ impl CodeGenerator {
                     Time,
                     "[hour]:[minute]:[second][optional [.[subsecond]]]"
                 );
+
+                #time_time_double_option
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let time_rfc3339_double_option_helper = if tri_state_codecs.contains("time::serde::rfc3339")
+        {
+            quote! {
+                mod time_rfc3339_double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<time::OffsetDateTime>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => time::serde::rfc3339::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<time::OffsetDateTime>>, D::Error> {
+                        time::serde::rfc3339::option::deserialize(de).map(Some)
+                    }
+                }
             }
         } else {
             TokenStream::new()
@@ -843,9 +1056,13 @@ impl CodeGenerator {
 
             #binary_vec_helper
 
+            #tri_state_helper
+
             #time_date_helper
 
             #time_time_helper
+
+            #time_rfc3339_double_option_helper
 
             #type_definitions
         };
@@ -2343,12 +2560,60 @@ impl CodeGenerator {
                 }
                 let setter_ident = Self::to_field_ident(&setter_name);
                 let wire_name = property.wire_name;
-                quote! {
-                    #[doc = concat!("Set the optional `", #wire_name, "` request field.")]
-                    #[must_use]
-                    pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
-                        self.value.#field_ident = Some(#field_ident);
-                        self
+                if self.property_is_tri_state(
+                    &schema.name,
+                    property.wire_name,
+                    property.property,
+                    property.is_required,
+                ) {
+                    let mut null_name = format!("{plain_field_name}_null");
+                    let null_base = null_name.clone();
+                    let mut suffix = 2;
+                    while !used_builder_methods.insert(null_name.clone()) {
+                        null_name = format!("{null_base}_{suffix}");
+                        suffix += 1;
+                    }
+                    let null_ident = Self::to_field_ident(&null_name);
+
+                    let mut absent_name = format!("{plain_field_name}_absent");
+                    let absent_base = absent_name.clone();
+                    let mut suffix = 2;
+                    while !used_builder_methods.insert(absent_name.clone()) {
+                        absent_name = format!("{absent_base}_{suffix}");
+                        suffix += 1;
+                    }
+                    let absent_ident = Self::to_field_ident(&absent_name);
+
+                    quote! {
+                        #[doc = concat!("Set the optional nullable `", #wire_name, "` request field to a value.")]
+                        #[must_use]
+                        pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
+                            self.value.#field_ident = Some(Some(#field_ident));
+                            self
+                        }
+
+                        #[doc = concat!("Set the optional nullable `", #wire_name, "` request field to JSON null.")]
+                        #[must_use]
+                        pub fn #null_ident(mut self) -> Self {
+                            self.value.#field_ident = Some(None);
+                            self
+                        }
+
+                        #[doc = concat!("Omit the optional nullable `", #wire_name, "` request field.")]
+                        #[must_use]
+                        pub fn #absent_ident(mut self) -> Self {
+                            self.value.#field_ident = None;
+                            self
+                        }
+                    }
+                } else {
+                    quote! {
+                        #[doc = concat!("Set the optional `", #wire_name, "` request field.")]
+                        #[must_use]
+                        pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
+                            self.value.#field_ident = Some(#field_ident);
+                            self
+                        }
                     }
                 }
             })
@@ -2863,11 +3128,45 @@ impl CodeGenerator {
     ) -> TokenStream {
         let base_type = self.generate_property_base_type(schema_name, field_name, prop, analysis);
 
-        if self.property_is_option_wrapped(schema_name, field_name, prop, is_required, analysis) {
+        if !is_required && self.property_is_nullable(schema_name, field_name, prop) {
+            quote! { Option<Option<#base_type>> }
+        } else if self.property_is_option_wrapped(
+            schema_name,
+            field_name,
+            prop,
+            is_required,
+            analysis,
+        ) {
             quote! { Option<#base_type> }
         } else {
             base_type
         }
+    }
+
+    pub(crate) fn property_is_nullable(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        prop: &crate::analysis::PropertyInfo,
+    ) -> bool {
+        let override_key = format!("{schema_name}.{field_name}");
+        prop.nullable
+            || self
+                .config
+                .nullable_field_overrides
+                .get(&override_key)
+                .copied()
+                .unwrap_or(false)
+    }
+
+    pub(crate) fn property_is_tri_state(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        prop: &crate::analysis::PropertyInfo,
+        is_required: bool,
+    ) -> bool {
+        !is_required && self.property_is_nullable(schema_name, field_name, prop)
     }
 
     fn property_is_option_wrapped(
@@ -2878,17 +3177,8 @@ impl CodeGenerator {
         is_required: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> bool {
-        let override_key = format!("{schema_name}.{field_name}");
-        let is_nullable_override = self
-            .config
-            .nullable_field_overrides
-            .get(&override_key)
-            .copied()
-            .unwrap_or(false);
-
         !is_required
-            || prop.nullable
-            || is_nullable_override
+            || self.property_is_nullable(schema_name, field_name, prop)
             || (prop.default.is_some() && self.type_lacks_default(&prop.schema_type, analysis))
     }
 
@@ -3006,9 +3296,12 @@ impl CodeGenerator {
             attrs.push(quote! { rename = #field_name });
         }
 
-        // Optional fields may be omitted when their Option is None. Required
-        // nullable fields must serialize None as an explicit JSON null;
-        // skipping them would violate the schema's `required` list.
+        let is_tri_state = self.property_is_tri_state(schema_name, field_name, prop, is_required);
+
+        // Optional fields may be omitted when their outer Option is None.
+        // Optional nullable fields use Option<Option<T>> so Some(None) remains
+        // an explicit JSON null. Required nullable fields stay Option<T> and
+        // must serialize None rather than skipping the required wire name.
         if !is_required {
             attrs.push(quote! { skip_serializing_if = "Option::is_none" });
         }
@@ -3038,7 +3331,9 @@ impl CodeGenerator {
                 is_required,
                 analysis,
             );
-            let codec_path = if is_option_wrapped {
+            let codec_path = if is_tri_state {
+                Self::double_option_codec_path(&codec)
+            } else if is_option_wrapped {
                 format!("{codec}::option")
             } else {
                 codec
@@ -3051,12 +3346,24 @@ impl CodeGenerator {
             if is_option_wrapped {
                 attrs.push(quote! { default });
             }
+        } else if is_tri_state {
+            attrs.push(quote! { default });
+            attrs.push(quote! { deserialize_with = "tri_state_serde::deserialize" });
         }
 
         if attrs.is_empty() {
             TokenStream::new()
         } else {
             quote! { #[serde(#(#attrs),*)] }
+        }
+    }
+
+    fn double_option_codec_path(codec: &str) -> String {
+        match codec {
+            "time::serde::rfc3339" => "time_rfc3339_double_option".to_string(),
+            "time_date_format" => "time_date_double_option".to_string(),
+            "time_time_format" => "time_time_double_option".to_string(),
+            _ => format!("{codec}::double_option"),
         }
     }
 

@@ -75,6 +75,9 @@ fn ergonomics_spec() -> serde_json::Value {
                     "email_address": { "type": "string" },
                     "external_id": { "type": "string", "nullable": true },
                     "first_name": { "type": "string" },
+                    "nullable_note": { "type": ["string", "null"] },
+                    "nullable_note_null": { "type": "string" },
+                    "nullable_note_absent": { "type": "string" },
                     "notify": { "type": "boolean" },
                     "new": { "type": "string" },
                     "with_new": { "type": "string" },
@@ -202,6 +205,13 @@ fn mixed_request_root_has_required_constructor_and_every_optional_setter() {
         "pubfnbuilder(email_address:String,external_id:Option<String>,)->CreateInvitationRequestBuilder"
     ));
     assert!(compact.contains("pubfnfirst_name(mutself,first_name:String)->Self"));
+    assert!(compact.contains("pubfnnullable_note(mutself,nullable_note:String)->Self"));
+    assert!(compact.contains("pubfnnullable_note_null(mutself)->Self"));
+    assert!(compact.contains("pubfnnullable_note_absent(mutself)->Self"));
+    assert!(compact.contains("pubfnnullable_note_null_2(mutself,nullable_note_null:String)->Self"));
+    assert!(
+        compact.contains("pubfnnullable_note_absent_2(mutself,nullable_note_absent:String)->Self")
+    );
     assert!(compact.contains("pubfnnotify(mutself,notify:bool)->Self"));
     assert!(compact.contains("pubfnwith_new(mutself,new:String)->Self"));
     assert!(compact.contains("pubfnwith_new_2(mutself,with_new:String)->Self"));
@@ -337,7 +347,7 @@ use super::generated;
 #[test]
 fn exercise_generated_api() {
     let update = generated::UpdateUserRequest {
-        first_name: Some("Ada".to_string()),
+        first_name: Some(Some("Ada".to_string())),
         ..Default::default()
     };
     let empty_patch = generated::UpdateUserRequest::default();
@@ -352,6 +362,10 @@ fn exercise_generated_api() {
         None,
     )
     .first_name("Ada".to_string())
+    .nullable_note("transient".to_string())
+    .nullable_note_null()
+    .nullable_note_null_2("literal null suffix".to_string())
+    .nullable_note_absent_2("literal absent suffix".to_string())
     .notify(true)
     .with_new("new value".to_string())
     .with_new_2("also new".to_string())
@@ -363,9 +377,13 @@ fn exercise_generated_api() {
     .build();
     assert_eq!(request.email_address, "ada@example.com");
     assert_eq!(request.first_name.as_deref(), Some("Ada"));
+    assert_eq!(request.nullable_note, Some(None));
     assert_eq!(request.additional_properties["source"], "docs");
     let request_json = serde_json::to_value(&request).unwrap();
     assert_eq!(request_json["connectionString"], "camel");
+    assert_eq!(request_json["nullable_note"], serde_json::Value::Null);
+    assert_eq!(request_json["nullable_note_null"], "literal null suffix");
+    assert_eq!(request_json["nullable_note_absent"], "literal absent suffix");
     assert_eq!(request_json["connection_string"], "snake");
     assert_eq!(request_json["additional_properties"], "declared");
     assert_eq!(request_json["source"], "docs");
@@ -375,11 +393,24 @@ fn exercise_generated_api() {
         Some("external-1".to_string()),
     );
     assert!(direct.first_name.is_none());
+    assert!(direct.nullable_note.is_none());
     assert!(direct.additional_properties.is_empty());
     let aliased = generated::AliasRequest::builder("alias-id".to_string())
         .note("available through the alias".to_string())
         .build();
     assert_eq!(aliased.note.as_deref(), Some("available through the alias"));
+    let absent_again = generated::CreateInvitationRequest::builder(
+        "missing@example.com".to_string(),
+        None,
+    )
+    .nullable_note_null()
+    .nullable_note_absent()
+    .build();
+    assert!(absent_again.nullable_note.is_none());
+    assert!(serde_json::to_value(absent_again)
+        .unwrap()
+        .get("nullable_note")
+        .is_none());
     let _json = serde_json::to_value((update, request)).unwrap();
 }
 }
