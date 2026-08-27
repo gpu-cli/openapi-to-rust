@@ -2684,7 +2684,7 @@ impl SchemaAnalyzer {
             }
             Schema::AllOf { all_of, .. } => {
                 // Handle allOf composition (schema inheritance)
-                self.analyze_allof_composition(all_of, &mut dependencies)?
+                self.analyze_allof_composition(schema, all_of, &mut dependencies)?
             }
             Schema::Untyped { .. } => {
                 // Try to infer type from structure
@@ -3555,7 +3555,7 @@ impl SchemaAnalyzer {
 
         // Handle allOf composition patterns
         if let Schema::AllOf { all_of, .. } = schema {
-            return self.analyze_allof_composition(all_of, dependencies);
+            return self.analyze_allof_composition(schema, all_of, dependencies);
         }
 
         // Handle union patterns (anyOf/oneOf) that weren't caught earlier
@@ -3724,6 +3724,7 @@ impl SchemaAnalyzer {
 
     fn analyze_allof_composition(
         &mut self,
+        owner_schema: &Schema,
         all_of_schemas: &[Schema],
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
@@ -3771,25 +3772,39 @@ impl SchemaAnalyzer {
         // AllOf represents schema composition - merge all schemas into one
         let mut merged_properties = BTreeMap::new();
         let mut merged_required = HashSet::new();
+        let mut merged_variant = None;
         let mut descriptions = Vec::new();
 
         // Save the current schema context to restore it when analyzing properties
         let current_context = self.current_schema_name.clone();
+        let owner_name = current_context.as_deref().unwrap_or("InlineComposition");
 
-        for schema in all_of_schemas {
+        // `properties` and `required` can be siblings of `allOf` on the owner
+        // itself. Seed them before walking members so a real declaration from
+        // either side wins over any synthesized required placeholder.
+        self.merge_schema_into_properties(
+            owner_schema,
+            &mut merged_properties,
+            &mut merged_required,
+            dependencies,
+        )?;
+
+        for (member_index, schema) in all_of_schemas.iter().enumerate() {
             match schema {
                 Schema::Reference { reference, .. } => {
-                    let (analyzed_type, raw_target) =
+                    let (analyzed_type, analyzed_name, raw_target) =
                         if let Some(target) = self.extract_schema_name(reference) {
                             dependencies.insert(target.to_string());
                             let analyzed_ref = self.analyze_schema(target)?;
                             (
                                 Some(analyzed_ref.schema_type),
+                                Some(target.to_string()),
                                 self.schemas.get(target).cloned(),
                             )
                         } else {
                             (
                                 self.resolve_pointer_schema(reference, dependencies)?,
+                                None,
                                 self.reference_target_schema(reference),
                             )
                         };
@@ -3797,8 +3812,11 @@ impl SchemaAnalyzer {
                     let merged = if let Some(analyzed_type) = analyzed_type {
                         self.merge_analyzed_object_properties(
                             &analyzed_type,
+                            analyzed_name.as_deref(),
                             &mut merged_properties,
                             &mut merged_required,
+                            &mut merged_variant,
+                            owner_name,
                         )?
                     } else {
                         false
@@ -3810,6 +3828,38 @@ impl SchemaAnalyzer {
                             &mut merged_required,
                             dependencies,
                         )?;
+                    }
+                }
+                Schema::AnyOf { any_of, .. }
+                    if Self::union_only_constrains_requiredness(any_of) => {}
+                Schema::OneOf { one_of, .. }
+                    if Self::union_only_constrains_requiredness(one_of) => {}
+                Schema::AnyOf { .. } | Schema::OneOf { .. } => {
+                    let preferred_name = format!("{owner_name}AllOfVariant{}", member_index + 1);
+                    let variant_name =
+                        self.add_inline_schema(&preferred_name, schema, dependencies)?;
+                    dependencies.insert(variant_name.clone());
+                    let analyzed_type = self
+                        .resolved_cache
+                        .get(&variant_name)
+                        .map(|analyzed| analyzed.schema_type.clone())
+                        .ok_or_else(|| {
+                            GeneratorError::InvalidSchema(format!(
+                                "allOf union member `{variant_name}` was not analyzed"
+                            ))
+                        })?;
+                    if !self.merge_analyzed_object_properties(
+                        &analyzed_type,
+                        Some(&variant_name),
+                        &mut merged_properties,
+                        &mut merged_required,
+                        &mut merged_variant,
+                        owner_name,
+                    )? {
+                        return Ok(self.untyped_value(
+                            self.untyped_context(""),
+                            UntypedReason::UnrepresentableComposition,
+                        ));
                     }
                 }
                 Schema::Typed {
@@ -3854,7 +3904,8 @@ impl SchemaAnalyzer {
         // after every allOf sibling has contributed its declarations. Doing it
         // per branch would turn a sibling-declared typed field into an opaque
         // placeholder depending on branch order.
-        if !merged_properties.is_empty() || !merged_required.is_empty() {
+        if !merged_properties.is_empty() || !merged_required.is_empty() || merged_variant.is_some()
+        {
             let mut additional_properties = if merged_properties
                 .values()
                 .any(|property| property.synthesized_required)
@@ -3885,7 +3936,7 @@ impl SchemaAnalyzer {
                 properties: merged_properties,
                 required: merged_required,
                 additional_properties,
-                variant: None,
+                variant: merged_variant,
             })
         } else {
             let schemas = all_of_schemas
@@ -3970,16 +4021,21 @@ impl SchemaAnalyzer {
     fn merge_analyzed_object_properties(
         &mut self,
         schema_type: &SchemaType,
+        named_target: Option<&str>,
         merged_properties: &mut BTreeMap<String, PropertyInfo>,
         merged_required: &mut HashSet<String>,
+        merged_variant: &mut Option<SchemaRef>,
+        owner_name: &str,
     ) -> Result<bool> {
         let mut current = schema_type.clone();
         let mut visited = HashSet::new();
+        let mut variant_target = named_target.map(str::to_string);
         loop {
             match current {
                 SchemaType::Object {
                     properties,
                     required,
+                    variant,
                     ..
                 } => {
                     for (name, property) in properties {
@@ -3992,11 +4048,17 @@ impl SchemaAnalyzer {
                         }
                     }
                     merged_required.extend(required);
+                    if let Some(variant) = variant {
+                        Self::merge_allof_variant(merged_variant, variant, owner_name)?;
+                    }
                     return Ok(true);
                 }
                 SchemaType::Reference { target } => {
                     if !visited.insert(target.clone()) {
                         return Ok(false);
+                    }
+                    if variant_target.is_none() {
+                        variant_target = Some(target.clone());
                     }
                     current = if let Some(analyzed) = self.resolved_cache.get(&target) {
                         analyzed.schema_type.clone()
@@ -4006,7 +4068,39 @@ impl SchemaAnalyzer {
                         return Ok(false);
                     };
                 }
+                SchemaType::Union { .. } | SchemaType::DiscriminatedUnion { .. } => {
+                    let Some(target) = variant_target else {
+                        return Ok(false);
+                    };
+                    Self::merge_allof_variant(
+                        merged_variant,
+                        SchemaRef {
+                            target,
+                            nullable: false,
+                        },
+                        owner_name,
+                    )?;
+                    return Ok(true);
+                }
                 _ => return Ok(false),
+            }
+        }
+    }
+
+    fn merge_allof_variant(
+        merged_variant: &mut Option<SchemaRef>,
+        candidate: SchemaRef,
+        owner_name: &str,
+    ) -> Result<()> {
+        match merged_variant {
+            Some(existing) if existing.target == candidate.target => Ok(()),
+            Some(existing) => Err(GeneratorError::InvalidSchema(format!(
+                "allOf object `{owner_name}` intersects multiple union members (`{}` and `{}`), which cannot be represented by one flattened variant",
+                existing.target, candidate.target
+            ))),
+            None => {
+                *merged_variant = Some(candidate);
+                Ok(())
             }
         }
     }
@@ -5569,18 +5663,63 @@ impl SchemaAnalyzer {
     /// with both fields optional — rather than an unrepresentable union.
     fn union_only_constrains_requiredness(branches: &[Schema]) -> bool {
         !branches.is_empty()
-            && branches.iter().all(|branch| {
-                let details = branch.details();
-                branch.schema_type().is_none()
-                    && branch.reference().is_none()
-                    && branch.union_variants().is_none()
-                    && details.properties.is_none()
-                    && details.enum_values.is_none()
-                    && details.const_value.is_none()
-                    && details.items.is_none()
-                    && details.additional_properties.is_none()
-                    && details.required.is_some()
-            })
+            && branches
+                .iter()
+                .all(Self::schema_only_constrains_requiredness)
+    }
+
+    /// Requiredness formulas can nest through `anyOf`/`oneOf` and `not`, as
+    /// in protobuf-generated "at most one field" schemas. They constrain
+    /// presence but add no payload shape for a Rust field to carry.
+    fn schema_only_constrains_requiredness(schema: &Schema) -> bool {
+        let keys_are_requiredness_or_annotations = serde_json::to_value(schema)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|object| {
+                object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "required"
+                            | "not"
+                            | "anyOf"
+                            | "oneOf"
+                            | "title"
+                            | "description"
+                            | "deprecated"
+                            | "readOnly"
+                            | "writeOnly"
+                            | "examples"
+                            | "example"
+                            | "default"
+                            | "externalDocs"
+                            | "xml"
+                            | "$comment"
+                    ) || key.starts_with("x-")
+                })
+            });
+        if !keys_are_requiredness_or_annotations {
+            return false;
+        }
+
+        match schema {
+            Schema::AnyOf { any_of, .. } => {
+                !any_of.is_empty() && any_of.iter().all(Self::schema_only_constrains_requiredness)
+            }
+            Schema::OneOf { one_of, .. } => {
+                !one_of.is_empty() && one_of.iter().all(Self::schema_only_constrains_requiredness)
+            }
+            other => {
+                let details = other.details();
+                details
+                    .required
+                    .as_ref()
+                    .is_some_and(|required| !required.is_empty())
+                    || details
+                        .not
+                        .as_deref()
+                        .is_some_and(Self::schema_only_constrains_requiredness)
+            }
+        }
     }
 
     /// Analyze a union whose branch list is empty.
