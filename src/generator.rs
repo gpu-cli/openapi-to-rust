@@ -2757,7 +2757,8 @@ impl CodeGenerator {
             quote! { #variant_name(#payload), }
         });
         let serialize_arms = variant_shapes.iter().map(|(variant, variant_name, _)| {
-            let variant_value = &variant.discriminator_value;
+            let canonical_value = &variant.discriminator_value;
+            let variant_values = &variant.discriminator_values;
             quote! {
                 Self::#variant_name(payload) => {
                     let mut value = serde_json::to_value(payload)
@@ -2769,24 +2770,68 @@ impl CodeGenerator {
                             "` did not serialize as an object",
                         ))
                     })?;
-                    object.insert(
-                        #discriminator_field.to_string(),
-                        serde_json::Value::String(#variant_value.to_string()),
-                    );
+                    match object.get(#discriminator_field) {
+                        Some(serde_json::Value::String(tag))
+                            if matches!(tag.as_str(), #(#variant_values)|*) => {}
+                        Some(serde_json::Value::String(tag)) => {
+                            return Err(serde::ser::Error::custom(format!(
+                                "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                #discriminator_field,
+                                stringify!(#variant_name),
+                            )));
+                        }
+                        Some(_) => {
+                            return Err(serde::ser::Error::custom(concat!(
+                                "discriminator `",
+                                #discriminator_field,
+                                "` did not serialize as a string",
+                            )));
+                        }
+                        None => {
+                            object.insert(
+                                #discriminator_field.to_string(),
+                                serde_json::Value::String(#canonical_value.to_string()),
+                            );
+                        }
+                    }
                     value.serialize(serializer)
                 }
             }
         });
-        let deserialize_arms = variant_shapes
-            .iter()
-            .map(|(variant, variant_name, payload)| {
-                let variant_value = &variant.discriminator_value;
-                quote! {
-                    #variant_value => serde_json::from_value::<#payload>(value)
-                        .map(Self::#variant_name)
-                        .map_err(serde::de::Error::custom),
-                }
-            });
+        let mut deserialize_arms = Vec::new();
+        for (primary_index, (variant, variant_name, payload)) in variant_shapes.iter().enumerate() {
+            for tag in &variant.preferred_discriminator_values {
+                let fallback_attempts = variant_shapes.iter().enumerate().filter_map(
+                    |(fallback_index, (fallback, fallback_name, fallback_payload))| {
+                        if fallback_index == primary_index
+                            || !fallback
+                                .discriminator_values
+                                .iter()
+                                .any(|candidate| candidate == tag)
+                        {
+                            return None;
+                        }
+                        Some(quote! {
+                            if let Ok(payload) =
+                                serde_json::from_value::<#fallback_payload>(value.clone())
+                            {
+                                return Ok(Self::#fallback_name(payload));
+                            }
+                        })
+                    },
+                );
+                deserialize_arms.push(quote! {
+                    #tag => {
+                        let primary_error = match serde_json::from_value::<#payload>(value.clone()) {
+                            Ok(payload) => return Ok(Self::#variant_name(payload)),
+                            Err(error) => error,
+                        };
+                        #(#fallback_attempts)*
+                        Err(serde::de::Error::custom(primary_error))
+                    }
+                });
+            }
+        }
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }

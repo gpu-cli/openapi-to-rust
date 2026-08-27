@@ -36,11 +36,38 @@ impl serde::Serialize for ContentBlock {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("text".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "text") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(TextBlock),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("text".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::ImageBlock(payload) => {
@@ -56,11 +83,38 @@ impl serde::Serialize for ContentBlock {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("image".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "image") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(ImageBlock),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("image".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::DocumentBlock(payload) => {
@@ -76,11 +130,38 @@ impl serde::Serialize for ContentBlock {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("document".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "document") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(DocumentBlock),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("document".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -101,19 +182,31 @@ impl<'de> serde::Deserialize<'de> for ContentBlock {
             .to_string();
         match discriminator.as_str() {
             "text" => {
-                serde_json::from_value::<TextBlock>(value)
-                    .map(Self::TextBlock)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    TextBlock,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::TextBlock(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             "image" => {
-                serde_json::from_value::<ImageBlock>(value)
-                    .map(Self::ImageBlock)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    ImageBlock,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::ImageBlock(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             "document" => {
-                serde_json::from_value::<DocumentBlock>(value)
-                    .map(Self::DocumentBlock)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    DocumentBlock,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::DocumentBlock(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             other => {
                 Err(

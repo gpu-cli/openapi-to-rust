@@ -35,11 +35,38 @@ impl serde::Serialize for Content {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("text".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "text") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(SimpleText),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("text".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::RichText(payload) => {
@@ -55,11 +82,38 @@ impl serde::Serialize for Content {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("rich_text".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "rich_text" | "text") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(RichText),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("rich_text".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -80,14 +134,25 @@ impl<'de> serde::Deserialize<'de> for Content {
             .to_string();
         match discriminator.as_str() {
             "text" => {
-                serde_json::from_value::<SimpleText>(value)
-                    .map(Self::SimpleText)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    SimpleText,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::SimpleText(payload)),
+                    Err(error) => error,
+                };
+                if let Ok(payload) = serde_json::from_value::<RichText>(value.clone()) {
+                    return Ok(Self::RichText(payload));
+                }
+                Err(serde::de::Error::custom(primary_error))
             }
             "rich_text" => {
-                serde_json::from_value::<RichText>(value)
-                    .map(Self::RichText)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    RichText,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::RichText(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             other => {
                 Err(

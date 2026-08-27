@@ -35,11 +35,38 @@ impl serde::Serialize for ResponseStreamEvent {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("created".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "created") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(Created),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("created".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::Completed(payload) => {
@@ -55,11 +82,38 @@ impl serde::Serialize for ResponseStreamEvent {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("completed".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "completed") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(Completed),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("completed".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -80,14 +134,22 @@ impl<'de> serde::Deserialize<'de> for ResponseStreamEvent {
             .to_string();
         match discriminator.as_str() {
             "created" => {
-                serde_json::from_value::<ResponseCreatedEvent>(value)
-                    .map(Self::Created)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    ResponseCreatedEvent,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::Created(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             "completed" => {
-                serde_json::from_value::<ResponseCompletedEvent>(value)
-                    .map(Self::Completed)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    ResponseCompletedEvent,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::Completed(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             other => {
                 Err(

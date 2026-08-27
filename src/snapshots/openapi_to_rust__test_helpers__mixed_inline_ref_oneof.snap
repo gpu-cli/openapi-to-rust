@@ -41,11 +41,38 @@ impl serde::Serialize for Response {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("success".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "success") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(Success),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("success".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::NamedError(payload) => {
@@ -61,11 +88,38 @@ impl serde::Serialize for Response {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("error".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "error") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(NamedError),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("error".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::Redirect(payload) => {
@@ -81,11 +135,38 @@ impl serde::Serialize for Response {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("redirect".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "redirect") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(Redirect),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("redirect".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -106,19 +187,31 @@ impl<'de> serde::Deserialize<'de> for Response {
             .to_string();
         match discriminator.as_str() {
             "success" => {
-                serde_json::from_value::<DataBlock>(value)
-                    .map(Self::Success)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    DataBlock,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::Success(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             "error" => {
-                serde_json::from_value::<NamedError>(value)
-                    .map(Self::NamedError)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    NamedError,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::NamedError(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             "redirect" => {
-                serde_json::from_value::<UrlBlock>(value)
-                    .map(Self::Redirect)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<
+                    UrlBlock,
+                >(value.clone()) {
+                    Ok(payload) => return Ok(Self::Redirect(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             other => {
                 Err(

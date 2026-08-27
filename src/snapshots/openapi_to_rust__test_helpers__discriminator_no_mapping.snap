@@ -35,11 +35,38 @@ impl serde::Serialize for Animal {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "species".to_string(),
-                        serde_json::Value::String("cat".to_string()),
-                    );
+                match object.get("species") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "cat") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "species", stringify!(Cat),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "species",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "species".to_string(),
+                                serde_json::Value::String("cat".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::Dog(payload) => {
@@ -55,11 +82,38 @@ impl serde::Serialize for Animal {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "species".to_string(),
-                        serde_json::Value::String("dog".to_string()),
-                    );
+                match object.get("species") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "dog") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "species", stringify!(Dog),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "species",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "species".to_string(),
+                                serde_json::Value::String("dog".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -80,14 +134,18 @@ impl<'de> serde::Deserialize<'de> for Animal {
             .to_string();
         match discriminator.as_str() {
             "cat" => {
-                serde_json::from_value::<Cat>(value)
-                    .map(Self::Cat)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<Cat>(value.clone()) {
+                    Ok(payload) => return Ok(Self::Cat(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             "dog" => {
-                serde_json::from_value::<Dog>(value)
-                    .map(Self::Dog)
-                    .map_err(serde::de::Error::custom)
+                let primary_error = match serde_json::from_value::<Dog>(value.clone()) {
+                    Ok(payload) => return Ok(Self::Dog(payload)),
+                    Err(error) => error,
+                };
+                Err(serde::de::Error::custom(primary_error))
             }
             other => {
                 Err(

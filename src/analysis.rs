@@ -775,7 +775,19 @@ impl PropertyConstraints {
 pub struct UnionVariant {
     pub rust_name: String,
     pub type_name: String,
+    /// Canonical discriminator value used when the payload does not already
+    /// carry one. This is always the first member of
+    /// `discriminator_values`.
     pub discriminator_value: String,
+    /// Every wire discriminator value accepted by this branch. JSON Schema
+    /// permits a discriminator property to use a multi-value enum, so a
+    /// branch is not necessarily identified by exactly one string.
+    pub discriminator_values: Vec<String>,
+    /// Values for which this branch is the preferred first dispatch target.
+    /// Overlapping branch constraints remain in `discriminator_values` so
+    /// deserialization can fall back structurally when the preferred branch
+    /// does not fit the rest of the payload.
+    pub preferred_discriminator_values: Vec<String>,
     pub schema_ref: String,
 }
 
@@ -2367,42 +2379,167 @@ impl SchemaAnalyzer {
         self.extract_discriminator_value_for_field(schema, "type")
     }
 
+    fn extract_discriminator_values_for_field(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+    ) -> Vec<String> {
+        let mut values = Vec::new();
+        let mut visited_refs = HashSet::new();
+        self.collect_discriminator_values_for_field(
+            schema,
+            field_name,
+            &mut visited_refs,
+            &mut values,
+        );
+        values
+    }
+
+    fn collect_discriminator_values_for_field(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+        visited_refs: &mut HashSet<String>,
+        values: &mut Vec<String>,
+    ) {
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return;
+            }
+            if let Some(target) = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+            {
+                self.collect_discriminator_values_for_field(
+                    target,
+                    field_name,
+                    visited_refs,
+                    values,
+                );
+            }
+            return;
+        }
+
+        if let Some(property) = schema
+            .details()
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get(field_name))
+        {
+            self.collect_string_constraint_values(property, visited_refs, values);
+        }
+
+        match schema {
+            Schema::AllOf { all_of, .. } => {
+                for member in all_of {
+                    self.collect_discriminator_values_for_field(
+                        member,
+                        field_name,
+                        visited_refs,
+                        values,
+                    );
+                }
+            }
+            Schema::AnyOf { any_of, .. } => {
+                for member in any_of {
+                    self.collect_discriminator_values_for_field(
+                        member,
+                        field_name,
+                        visited_refs,
+                        values,
+                    );
+                }
+            }
+            Schema::OneOf { one_of, .. } => {
+                for member in one_of {
+                    self.collect_discriminator_values_for_field(
+                        member,
+                        field_name,
+                        visited_refs,
+                        values,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_string_constraint_values(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+        values: &mut Vec<String>,
+    ) {
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return;
+            }
+            if let Some(target) = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+            {
+                self.collect_string_constraint_values(target, visited_refs, values);
+            }
+            return;
+        }
+
+        let details = schema.details();
+        if let Some(value) = details.const_value.as_ref().and_then(Value::as_str) {
+            Self::push_unique_string(values, value);
+        }
+        if let Some(enum_values) = &details.enum_values {
+            for value in enum_values.iter().filter_map(Value::as_str) {
+                Self::push_unique_string(values, value);
+            }
+        }
+        if let Some(value) = details.extra.get("const").and_then(Value::as_str) {
+            Self::push_unique_string(values, value);
+        }
+        if details
+            .extra
+            .get("x-stainless-const")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            if let Some(value) = details.default.as_ref().and_then(Value::as_str) {
+                Self::push_unique_string(values, value);
+            }
+        }
+
+        match schema {
+            Schema::AllOf { all_of, .. } => {
+                for member in all_of {
+                    self.collect_string_constraint_values(member, visited_refs, values);
+                }
+            }
+            Schema::AnyOf { any_of, .. } => {
+                for member in any_of {
+                    self.collect_string_constraint_values(member, visited_refs, values);
+                }
+            }
+            Schema::OneOf { one_of, .. } => {
+                for member in one_of {
+                    self.collect_string_constraint_values(member, visited_refs, values);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn push_unique_string(values: &mut Vec<String>, value: &str) {
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+
     fn extract_discriminator_value_for_field(
         &self,
         schema: &Schema,
         field_name: &str,
     ) -> Option<String> {
-        if let Some(properties) = &schema.details().properties {
-            if let Some(type_field) = properties.get(field_name) {
-                // Check for const value first (highest priority)
-                if let Some(const_value) = &type_field.details().const_value {
-                    if let Some(value) = const_value.as_str() {
-                        return Some(value.to_string());
-                    }
-                }
-                // Check for enum with single value
-                if let Some(enum_values) = &type_field.details().enum_values {
-                    if enum_values.len() == 1 {
-                        return enum_values[0].as_str().map(|s| s.to_string());
-                    }
-                }
-                // Check for const value in extra fields
-                if let Some(const_value) = type_field.details().extra.get("const") {
-                    return const_value.as_str().map(|s| s.to_string());
-                }
-                // Check for x-stainless-const with default value
-                if let Some(stainless_const) = type_field.details().extra.get("x-stainless-const") {
-                    if stainless_const.as_bool() == Some(true) {
-                        if let Some(default_value) = &type_field.details().default {
-                            if let Some(value) = default_value.as_str() {
-                                return Some(value.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
+        self.extract_discriminator_values_for_field(schema, field_name)
+            .into_iter()
+            .next()
     }
 
     fn get_any_reference<'a>(&self, schema: &'a Schema) -> Option<&'a str> {
@@ -4337,43 +4474,34 @@ impl SchemaAnalyzer {
                 if !schema_name.is_empty() {
                     dependencies.insert(schema_name.clone());
 
-                    // Determine discriminator value with priority order:
-                    // 1. Explicit mapping in discriminator
-                    // 2. Extract from referenced schema
-                    // 3. Generate from schema name
-                    let discriminator_value = if let Some(disc) = discriminator {
-                        if let Some(mappings) = &disc.mapping {
-                            // Find the mapping key that points to this schema reference
-                            // Mapping format is: "discriminator_value" -> "#/components/schemas/SchemaName"
-                            mappings
-                                .iter()
-                                .find(|(_, target_ref)| {
-                                    // Check if this mapping target matches our reference
-                                    target_ref.as_str() == ref_str
-                                        || self
-                                            .extract_schema_name(target_ref)
-                                            .map(|s| s.to_string())
-                                            == Some(schema_name.clone())
-                                })
-                                .map(|(key, _)| key.clone())
-                                .unwrap_or_else(|| {
-                                    self.fallback_discriminator_value_for_field(
-                                        &schema_name,
-                                        &discriminator_field,
-                                    )
-                                })
-                        } else {
-                            self.fallback_discriminator_value_for_field(
-                                &schema_name,
-                                &discriminator_field,
-                            )
+                    // Explicit mapping keys and every const/enum value declared
+                    // by the branch are all legal wire tags for that branch.
+                    // Only an entirely unconstrained branch falls back to a
+                    // schema-name-derived value.
+                    let mut discriminator_values = Vec::new();
+                    if let Some(mappings) = discriminator.and_then(|disc| disc.mapping.as_ref()) {
+                        for (key, target_ref) in mappings {
+                            if target_ref == ref_str
+                                || self.extract_schema_name(target_ref)
+                                    == Some(schema_name.as_str())
+                            {
+                                Self::push_unique_string(&mut discriminator_values, key);
+                            }
                         }
-                    } else {
-                        self.fallback_discriminator_value_for_field(
-                            &schema_name,
+                    }
+                    if let Some(ref_schema) = self.schemas.get(&schema_name) {
+                        for value in self.extract_discriminator_values_for_field(
+                            ref_schema,
                             &discriminator_field,
-                        )
-                    };
+                        ) {
+                            Self::push_unique_string(&mut discriminator_values, &value);
+                        }
+                    }
+                    if discriminator_values.is_empty() {
+                        discriminator_values
+                            .push(self.generate_discriminator_value_from_name(&schema_name));
+                    }
+                    let discriminator_value = discriminator_values[0].clone();
 
                     // Generate Rust-friendly variant name and ensure uniqueness
                     let base_name = self.to_rust_variant_name(&schema_name);
@@ -4387,6 +4515,8 @@ impl SchemaAnalyzer {
                         rust_name,
                         type_name: schema_name,
                         discriminator_value: final_discriminator_value,
+                        preferred_discriminator_values: discriminator_values.clone(),
+                        discriminator_values,
                         schema_ref: ref_str.to_string(),
                     });
                 }
@@ -4396,37 +4526,25 @@ impl SchemaAnalyzer {
                 let inline_type_name =
                     self.generate_inline_type_name(variant_schema, variant_index);
 
-                // Try to extract discriminator value from inline schema
-                let discriminator_value = if let Some(disc) = discriminator {
-                    if let Some(mappings) = &disc.mapping {
-                        // Look for mapping that points to this inline variant by index
-                        mappings
-                            .iter()
-                            .find(|(_, target_ref)| {
-                                target_ref.contains(&format!("variant_{variant_index}"))
-                            })
-                            .map(|(key, _)| key.clone())
-                            .unwrap_or_else(|| {
-                                self.extract_inline_discriminator_value(
-                                    variant_schema,
-                                    &discriminator_field,
-                                    variant_index,
-                                )
-                            })
-                    } else {
-                        self.extract_inline_discriminator_value(
-                            variant_schema,
-                            &discriminator_field,
-                            variant_index,
-                        )
+                // Inline branches follow the same multi-value rules as
+                // referenced branches.
+                let mut discriminator_values = Vec::new();
+                if let Some(mappings) = discriminator.and_then(|disc| disc.mapping.as_ref()) {
+                    for (key, target_ref) in mappings {
+                        if target_ref.contains(&format!("variant_{variant_index}")) {
+                            Self::push_unique_string(&mut discriminator_values, key);
+                        }
                     }
-                } else {
-                    self.extract_inline_discriminator_value(
-                        variant_schema,
-                        &discriminator_field,
-                        variant_index,
-                    )
-                };
+                }
+                for value in self
+                    .extract_discriminator_values_for_field(variant_schema, &discriminator_field)
+                {
+                    Self::push_unique_string(&mut discriminator_values, &value);
+                }
+                if discriminator_values.is_empty() {
+                    discriminator_values.push(format!("variant_{variant_index}"));
+                }
+                let discriminator_value = discriminator_values[0].clone();
 
                 // Generate Rust-friendly variant name based on discriminator or fallback to generic
                 let base_name = if discriminator_value.starts_with("variant_") {
@@ -4457,10 +4575,14 @@ impl SchemaAnalyzer {
                     rust_name,
                     type_name: inline_type_name.clone(),
                     discriminator_value: final_discriminator_value,
+                    preferred_discriminator_values: discriminator_values.clone(),
+                    discriminator_values,
                     schema_ref: format!("inline_{variant_index}"),
                 });
             }
         }
+
+        self.disambiguate_shared_discriminator_values(&mut variants, discriminator);
 
         if variants.is_empty() {
             // If we couldn't create a discriminated union, fall back to an untagged union
@@ -5270,6 +5392,112 @@ impl SchemaAnalyzer {
 
         // Fall back to generating from name
         self.generate_discriminator_value_from_name(schema_name)
+    }
+
+    fn disambiguate_shared_discriminator_values(
+        &self,
+        variants: &mut [UnionVariant],
+        discriminator: Option<&Discriminator>,
+    ) {
+        let mut owners_by_value: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, variant) in variants.iter().enumerate() {
+            for value in &variant.discriminator_values {
+                owners_by_value
+                    .entry(value.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+
+        let mut removals: Vec<(usize, String)> = Vec::new();
+        for (value, candidate_owners) in owners_by_value {
+            if candidate_owners.len() < 2 {
+                continue;
+            }
+
+            let explicitly_mapped_owners: Vec<usize> = discriminator
+                .and_then(|disc| disc.mapping.as_ref())
+                .and_then(|mappings| mappings.get(&value))
+                .map(|target_ref| {
+                    candidate_owners
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            let variant = &variants[*index];
+                            target_ref == &variant.schema_ref
+                                || self.extract_schema_name(target_ref)
+                                    == Some(variant.type_name.as_str())
+                                || (variant.schema_ref.starts_with("inline_")
+                                    && target_ref.contains(&variant.schema_ref))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let winner = if explicitly_mapped_owners.len() == 1 {
+                explicitly_mapped_owners.first().copied()
+            } else {
+                let mut scored: Vec<(usize, usize)> = candidate_owners
+                    .iter()
+                    .map(|index| {
+                        (
+                            *index,
+                            Self::discriminator_name_affinity(&variants[*index].type_name, &value),
+                        )
+                    })
+                    .collect();
+                scored.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+                match scored.as_slice() {
+                    [(index, score), rest @ ..]
+                        if *score > 0 && rest.first().is_none_or(|(_, next)| score > next) =>
+                    {
+                        Some(*index)
+                    }
+                    _ => None,
+                }
+            };
+
+            if let Some(winner) = winner {
+                for index in candidate_owners {
+                    if index != winner && variants[index].preferred_discriminator_values.len() > 1 {
+                        removals.push((index, value.clone()));
+                    }
+                }
+            }
+        }
+
+        for (index, value) in removals {
+            variants[index]
+                .preferred_discriminator_values
+                .retain(|candidate| candidate != &value);
+        }
+        for variant in variants {
+            if let Some(canonical) = variant.preferred_discriminator_values.first() {
+                variant.discriminator_value.clone_from(canonical);
+            }
+        }
+    }
+
+    fn discriminator_name_affinity(schema_name: &str, value: &str) -> usize {
+        let schema_compact: String = schema_name
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let value_compact: String = value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let exact_bonus = usize::from(
+            !value_compact.is_empty() && schema_compact.contains(value_compact.as_str()),
+        ) * 10;
+        let token_matches = value
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .filter(|token| schema_compact.contains(&token.to_ascii_lowercase()))
+            .count();
+        exact_bonus + token_matches
     }
 
     fn generate_discriminator_value_from_name(&self, schema_name: &str) -> String {
