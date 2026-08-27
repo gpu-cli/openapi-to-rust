@@ -1245,36 +1245,43 @@ fn unwrap_annotation_allof(schema: &crate::openapi::Schema) -> &crate::openapi::
     let (Some(first), None) = (references.next(), references.next()) else {
         return schema;
     };
-    let others_annotation_only = all_of.iter().all(|member| {
-        if member.reference().is_some() {
-            return true;
-        }
-        serde_json::to_value(member)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .is_some_and(|object| {
-                object.keys().all(|key| {
-                    matches!(
-                        key.as_str(),
-                        "title"
-                            | "description"
-                            | "deprecated"
-                            | "readOnly"
-                            | "writeOnly"
-                            | "examples"
-                            | "example"
-                            | "externalDocs"
-                            | "xml"
-                            | "$comment"
-                    ) || key.starts_with("x-")
-                })
-            })
-    });
+    let others_annotation_only = all_of
+        .iter()
+        .all(|member| member.reference().is_some() || schema_is_annotation_only(member));
     if others_annotation_only {
         first
     } else {
         schema
     }
+}
+
+/// Whether a schema contributes annotations but no assertion to an
+/// intersection. OpenAPI's `nullable` only modifies an adjacent `type`, so a
+/// type-less nullable flag is neutral here. `default` and examples are JSON
+/// Schema annotations as well.
+fn schema_is_annotation_only(schema: &crate::openapi::Schema) -> bool {
+    serde_json::to_value(schema)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|object| {
+            object.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "title"
+                        | "description"
+                        | "deprecated"
+                        | "readOnly"
+                        | "writeOnly"
+                        | "examples"
+                        | "example"
+                        | "default"
+                        | "externalDocs"
+                        | "xml"
+                        | "$comment"
+                        | "nullable"
+                ) || key.starts_with("x-")
+            })
+        })
 }
 
 /// Load an extension file and parse it into the JSON representation used by
@@ -2170,12 +2177,20 @@ impl SchemaAnalyzer {
                 None => false,
             };
         }
-        // allOf compositions are object-shaped; same for anyOf/oneOf
-        // wrappers (those will reduce to objects or to further unions).
-        if matches!(
-            schema,
-            Schema::AllOf { .. } | Schema::AnyOf { .. } | Schema::OneOf { .. }
-        ) {
+        // An allOf wrapper around one scalar/array carrier and neutral
+        // annotation siblings remains that non-object carrier. Other allOf
+        // shapes are object-like only when at least one meaningful member is.
+        if let Schema::AllOf { all_of, .. } = schema {
+            if Self::single_non_object_allof_carrier(all_of).is_some() {
+                return false;
+            }
+            return all_of
+                .iter()
+                .filter(|member| !schema_is_annotation_only(member))
+                .any(|member| self.branch_resolves_to_object(member));
+        }
+        // anyOf/oneOf wrappers reduce to objects or to further unions.
+        if matches!(schema, Schema::AnyOf { .. } | Schema::OneOf { .. }) {
             return true;
         }
         if matches!(schema.schema_type(), Some(OpenApiSchemaType::Object)) {
@@ -2269,6 +2284,12 @@ impl SchemaAnalyzer {
         loop {
             if current.is_nullable_any() {
                 return true;
+            }
+            if let Schema::AllOf { all_of, .. } = &current
+                && let Some(carrier) = Self::single_non_object_allof_carrier(all_of)
+            {
+                current = carrier.clone();
+                continue;
             }
             let Some(reference) = current.reference() else {
                 return false;
@@ -3706,6 +3727,14 @@ impl SchemaAnalyzer {
         all_of_schemas: &[Schema],
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // A scalar/array carrier intersected only with annotation-only
+        // siblings keeps its wire type. This is deliberately narrower than
+        // "pick the first non-object": multiple carriers or assertion-bearing
+        // siblings are true intersections and must not be guessed at.
+        if let Some(carrier) = Self::single_non_object_allof_carrier(all_of_schemas) {
+            return self.analyze_property_schema_with_context(carrier, None, dependencies);
+        }
+
         // A reference plus annotation-only siblings is still a direct type
         // alias. AWS-style specs frequently encode property descriptions as
         // `allOf: [$ref, { description: ... }]`; recursively expanding a
@@ -3715,31 +3744,9 @@ impl SchemaAnalyzer {
             .filter_map(|schema| schema.reference())
             .filter_map(|reference| self.extract_schema_name(reference))
             .collect::<Vec<_>>();
-        let only_reference_and_annotations = all_of_schemas.iter().all(|schema| {
-            if schema.reference().is_some() {
-                return true;
-            }
-            serde_json::to_value(schema)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .is_some_and(|object| {
-                    object.keys().all(|key| {
-                        matches!(
-                            key.as_str(),
-                            "title"
-                                | "description"
-                                | "deprecated"
-                                | "readOnly"
-                                | "writeOnly"
-                                | "examples"
-                                | "example"
-                                | "externalDocs"
-                                | "xml"
-                                | "$comment"
-                        ) || key.starts_with("x-")
-                    })
-                })
-        });
+        let only_reference_and_annotations = all_of_schemas
+            .iter()
+            .all(|schema| schema.reference().is_some() || schema_is_annotation_only(schema));
         if referenced_targets.len() == 1 && only_reference_and_annotations {
             let target = referenced_targets[0];
             dependencies.insert(target.to_string());
@@ -3881,27 +3888,78 @@ impl SchemaAnalyzer {
                 variant: None,
             })
         } else {
-            // Fall back to composition if we couldn't merge
-            Ok(SchemaType::Composition {
-                schemas: all_of_schemas
-                    .iter()
-                    .filter_map(|s| {
-                        if let Some(ref_str) = s.reference() {
-                            if let Some(target) = self.extract_schema_name(ref_str) {
-                                dependencies.insert(target.to_string());
-                                Some(SchemaRef {
-                                    target: target.to_string(),
-                                    nullable: false,
-                                })
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
+            let schemas = all_of_schemas
+                .iter()
+                .filter_map(|schema| {
+                    let reference = schema.reference()?;
+                    let target = self.extract_schema_name(reference)?;
+                    dependencies.insert(target.to_string());
+                    Some(SchemaRef {
+                        target: target.to_string(),
+                        nullable: false,
                     })
-                    .collect(),
-            })
+                })
+                .collect::<Vec<_>>();
+            // An empty composition generated an empty struct, silently
+            // narrowing scalar/array intersections to `{}`. References to
+            // non-object carriers have the same problem. Keep representable
+            // object inheritance as Composition; otherwise retain the wire
+            // value opaquely instead of inventing an object shape.
+            let references_are_objects = all_of_schemas
+                .iter()
+                .filter(|schema| schema.reference().is_some())
+                .all(|schema| self.branch_resolves_to_object(schema));
+            if schemas.is_empty() || !references_are_objects {
+                Ok(self.untyped_value(
+                    self.untyped_context(""),
+                    UntypedReason::UnrepresentableComposition,
+                ))
+            } else {
+                Ok(SchemaType::Composition { schemas })
+            }
+        }
+    }
+
+    /// Return the one direct scalar/array carrier in an allOf whose remaining
+    /// members are annotation-only. References, objects, unions, boolean
+    /// schemas, and multiple assertion-bearing members are intentionally not
+    /// collapsed by this narrow recovery path.
+    fn single_non_object_allof_carrier(all_of_schemas: &[Schema]) -> Option<&Schema> {
+        let mut meaningful = all_of_schemas
+            .iter()
+            .filter(|schema| !schema_is_annotation_only(schema));
+        let carrier = meaningful.next()?;
+        if meaningful.next().is_some() {
+            return None;
+        }
+
+        match carrier {
+            Schema::Typed {
+                schema_type:
+                    OpenApiSchemaType::String
+                    | OpenApiSchemaType::Integer
+                    | OpenApiSchemaType::Number
+                    | OpenApiSchemaType::Boolean
+                    | OpenApiSchemaType::Array,
+                ..
+            } => Some(carrier),
+            Schema::TypedMulti { schema_types, .. } => {
+                let mut non_null = schema_types
+                    .iter()
+                    .filter(|schema_type| **schema_type != OpenApiSchemaType::Null);
+                let only = non_null.next()?;
+                (non_null.next().is_none()
+                    && matches!(
+                        only,
+                        OpenApiSchemaType::String
+                            | OpenApiSchemaType::Integer
+                            | OpenApiSchemaType::Number
+                            | OpenApiSchemaType::Boolean
+                            | OpenApiSchemaType::Array
+                    ))
+                .then_some(carrier)
+            }
+            _ => None,
         }
     }
 
