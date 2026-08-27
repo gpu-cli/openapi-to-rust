@@ -2060,9 +2060,12 @@ impl CodeGenerator {
         // additional-properties map (when present) is empty by default. We do
         // not invent values for required data, even when the Rust type itself
         // happens to implement Default.
-        let can_derive_default = emitted_properties
-            .iter()
-            .all(|property| !property.is_required);
+        // A flattened variant is one of several shapes, and picking one would
+        // invent data the same way a required field would.
+        let can_derive_default = variant.is_none()
+            && emitted_properties
+                .iter()
+                .all(|property| !property.is_required);
 
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
@@ -2085,6 +2088,7 @@ impl CodeGenerator {
         };
 
         let builder = if type_context.index.request_body_roots.contains(&schema.name)
+            && variant.is_none()
             && emitted_properties
                 .iter()
                 .any(|property| property.is_required)

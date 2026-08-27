@@ -593,6 +593,39 @@ fn an_object_that_also_declares_variants_keeps_both_halves() {
 }
 
 #[test]
+fn a_struct_with_a_flattened_variant_derives_no_default() {
+    // `Default` on the struct would have to invent a variant, which is the same
+    // problem as inventing a required field. Deriving it anyway does not
+    // compile, since the untagged enum has no default either.
+    let generated = generate(spec_with_schemas(json!({
+        "A": { "type": "object", "additionalProperties": false,
+               "properties": { "a": { "type": "string" } } },
+        "B": { "type": "object", "additionalProperties": false,
+               "properties": { "b": { "type": "string" } } },
+        "Holder": {
+            "properties": { "note": { "type": "string" } },
+            "anyOf": [
+                { "$ref": "#/components/schemas/A" },
+                { "$ref": "#/components/schemas/B" }
+            ]
+        }
+    })));
+
+    let struct_start = generated
+        .find("pub struct Holder")
+        .expect("the struct is generated");
+    let derive_line = generated[..struct_start]
+        .lines()
+        .rev()
+        .find(|line| line.contains("#[derive("))
+        .expect("a derive line precedes the struct");
+    assert!(
+        !derive_line.contains("Default"),
+        "a struct holding a flattened variant must not derive Default: {derive_line}"
+    );
+}
+
+#[test]
 fn a_requiredness_only_union_inside_a_property_is_the_object_it_describes() {
     // The same shape one level down, which the named-schema check did not see:
     // OpenAI's `tool_resources.file_search` is an inline object whose `anyOf`
