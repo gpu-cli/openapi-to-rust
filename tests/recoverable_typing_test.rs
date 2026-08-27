@@ -65,11 +65,12 @@ fn assert_types(spec: Value, expected: &[&str]) {
 }
 
 #[test]
-fn odata_nullable_reference_union_becomes_option() {
-    // `anyOf: [$ref, {type: object, nullable: true}]` is how OData spells "that
-    // type, or null" — Microsoft Graph emits it for every navigation property,
-    // 2,127 times across the corpus. Read literally it is "that type or any
-    // object", which has no single Rust type.
+fn odata_nullable_reference_union_keeps_its_literal_object_branch() {
+    // Microsoft Graph uses this spelling for navigation properties. Whatever
+    // the producer intended, `nullable: true` widens the object branch to
+    // object-or-null; it does not turn it into a null-only marker. Keeping the
+    // dynamic branch lets generated models hydrate every value the schema
+    // actually admits.
     assert_types(
         spec_with_schemas(json!({
             "User": { "type": "object", "additionalProperties": false,
@@ -81,7 +82,11 @@ fn odata_nullable_reference_union_becomes_option() {
                 ]}
             }}
         })),
-        &["pub user: Option<User>"],
+        &[
+            "pub user: Option<MemberUser>",
+            "pub enum MemberUser",
+            "pub type MemberVariant2 = serde_json::Value",
+        ],
     );
 }
 

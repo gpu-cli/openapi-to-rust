@@ -954,8 +954,8 @@ impl Schema {
             return None;
         };
         match (
-            Self::is_null_marker_beside(first, second),
-            Self::is_null_marker_beside(second, first),
+            first.is_explicit_null_only(),
+            second.is_explicit_null_only(),
         ) {
             (true, false) => Some(second),
             (false, true) => Some(first),
@@ -964,54 +964,29 @@ impl Schema {
         }
     }
 
-    /// Whether `candidate` exists only to admit `null` alongside `sibling`.
+    /// Whether this branch explicitly admits no JSON value other than `null`.
     ///
-    /// 3.1 spells that `type: "null"`, which says so on its own. Tooling that
-    /// predates it spells it as an empty object carrying `nullable: true`, and
-    /// that spelling is ambiguous: read literally,
-    /// `anyOf: [X, {type: object, nullable: true}]` is "X, any object, or
-    /// null".
-    ///
-    /// The empty-object spelling is read as a null marker only beside a
-    /// `$ref`, which is the shape
-    /// OData emits for every navigation property and where the intent is not
-    /// in doubt. Beside a scalar the literal reading wins — the corpus has 33
-    /// `anyOf: [{type: string, nullable: true}, {type: object, nullable: true}]`
-    /// fields, and typing those as `Option<String>` would fail to deserialize
-    /// the objects the schema plainly allows.
-    fn is_null_marker_beside(candidate: &Schema, sibling: &Schema) -> bool {
-        matches!(candidate.schema_type(), Some(SchemaType::Null))
-            || (candidate.is_empty_nullable_object() && sibling.reference().is_some())
-    }
-
-    /// An object schema carrying `nullable: true` and constraining nothing.
-    fn is_empty_nullable_object(&self) -> bool {
-        let details = self.details();
-        if !details.is_nullable() {
-            return false;
-        }
-        if !matches!(
-            self.schema_type(),
-            Some(SchemaType::Object) | Some(SchemaType::Null) | None
-        ) {
-            return false;
-        }
-        self.reference().is_none()
-            && details.properties.as_ref().is_none_or(BTreeMap::is_empty)
-            && details.additional_properties.is_none()
-            && details.enum_values.is_none()
-            && details.const_value.is_none()
-            && details.pattern_properties.is_none()
-            && details.items.is_none()
-            && details.prefix_items.is_none()
-            && self.all_of_len() == 0
-    }
-
-    /// Number of `allOf` members, for shapes that only matter when empty.
-    fn all_of_len(&self) -> usize {
+    /// This is intentionally branch-local. OpenAPI 3.0's `nullable: true`
+    /// widens the schema it annotates; it does not erase that schema's other
+    /// accepted values. In particular, `{nullable: true}` and
+    /// `{type: object, nullable: true}` remain real alternatives even beside
+    /// a `$ref`.
+    fn is_explicit_null_only(&self) -> bool {
         match self {
-            Schema::AllOf { all_of, .. } => all_of.len(),
-            _ => 0,
+            Schema::Typed { schema_type, .. } => *schema_type == SchemaType::Null,
+            Schema::TypedMulti { schema_types, .. } => {
+                !schema_types.is_empty()
+                    && schema_types
+                        .iter()
+                        .all(|schema_type| *schema_type == SchemaType::Null)
+            }
+            Schema::Untyped { details } => {
+                details.const_value.as_ref().is_some_and(Value::is_null)
+                    || details.enum_values.as_ref().is_some_and(
+                        |values| matches!(values.as_slice(), [value] if value.is_null()),
+                    )
+            }
+            _ => false,
         }
     }
 
@@ -1753,6 +1728,94 @@ mod tests {
         assert!(schema.is_nullable_pattern());
         let non_null = schema.non_null_variant().unwrap();
         assert!(non_null.is_reference());
+    }
+
+    #[test]
+    fn explicit_null_only_branches_are_order_independent_nullable_patterns() {
+        for union_keyword in ["anyOf", "oneOf"] {
+            for null_schema in [
+                json!({"type": "null"}),
+                json!({"type": ["null"]}),
+                json!({"const": null}),
+                json!({"enum": [null]}),
+            ] {
+                for variants in [
+                    vec![
+                        json!({"$ref": "#/components/schemas/User"}),
+                        null_schema.clone(),
+                    ],
+                    vec![
+                        null_schema.clone(),
+                        json!({"$ref": "#/components/schemas/User"}),
+                    ],
+                ] {
+                    let schema: Schema = serde_json::from_value(json!({
+                        (union_keyword): variants,
+                    }))
+                    .unwrap();
+                    let non_null = schema.non_null_variant().unwrap_or_else(|| {
+                        panic!("{union_keyword} must recognize {null_schema} as null-only")
+                    });
+                    assert_eq!(
+                        non_null.reference(),
+                        Some("#/components/schemas/User"),
+                        "{union_keyword} with {null_schema}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_schemas_are_real_union_branches_even_beside_references() {
+        for union_keyword in ["anyOf", "oneOf"] {
+            for nullable_branch in [
+                json!({"nullable": true}),
+                json!({"type": "object", "nullable": true}),
+                json!({
+                    "$ref": "#/components/schemas/Other",
+                    "nullable": true
+                }),
+            ] {
+                for variants in [
+                    vec![
+                        json!({"$ref": "#/components/schemas/User"}),
+                        nullable_branch.clone(),
+                    ],
+                    vec![
+                        nullable_branch.clone(),
+                        json!({"$ref": "#/components/schemas/User"}),
+                    ],
+                ] {
+                    let schema: Schema = serde_json::from_value(json!({
+                        (union_keyword): variants,
+                    }))
+                    .unwrap();
+                    assert!(
+                        schema.non_null_variant().is_none(),
+                        "{union_keyword} must preserve nullable branch {nullable_branch}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn three_branch_unions_do_not_collapse_even_with_an_explicit_null() {
+        for union_keyword in ["anyOf", "oneOf"] {
+            let schema: Schema = serde_json::from_value(json!({
+                (union_keyword): [
+                    {"$ref": "#/components/schemas/User"},
+                    {"type": "null"},
+                    {"type": "array", "items": {"type": "string"}}
+                ],
+            }))
+            .unwrap();
+            assert!(
+                schema.non_null_variant().is_none(),
+                "{union_keyword} with three branches is not an Option wrapper"
+            );
+        }
     }
 
     #[test]
