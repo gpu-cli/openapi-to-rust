@@ -803,6 +803,15 @@ fn normalize_schema(value: &Value, dialect: Dialect) -> Value {
     if let Some(Value::String(format)) = schema.get_mut("format") {
         *format = normalize_builtin_format(format).to_string();
     }
+    // OpenAPI tooling commonly omits `type: object` when `properties` is
+    // present, and the analyzer has always emitted a Rust struct for that
+    // shape. Pure JSON Schema would still admit every non-object value because
+    // `properties` is conditionally applied. Make the OpenAPI object-inference
+    // normalization explicit in the schema oracle so generated typing and
+    // validation enforce the same domain.
+    if !schema.contains_key("type") && schema.contains_key("properties") {
+        schema.insert("type".to_string(), Value::String("object".to_string()));
+    }
     if dialect == Dialect::Draft4
         && schema.remove("nullable").and_then(|value| value.as_bool()) == Some(true)
     {
@@ -1392,6 +1401,34 @@ mod tests {
             let error = Dialect::from_spec(&spec).expect_err("unsupported version");
             assert!(error.to_string().contains(version), "{error}");
         }
+    }
+
+    #[test]
+    fn properties_without_type_are_normalized_to_the_analyzers_object_domain() {
+        let raw = json!({
+            "properties": {
+                "status": {"type": "string"},
+                "nested": {"properties": {"id": {"type": "integer"}}}
+            },
+            "example": [{"status": "legacy-array-example"}]
+        });
+        let normalized = normalize_schema(&raw, Dialect::Draft202012);
+        assert_eq!(normalized["type"], "object");
+        assert_eq!(normalized["properties"]["nested"]["type"], "object");
+
+        let validator = validator_options(Dialect::Draft202012)
+            .build(&normalized)
+            .expect("normalized properties-only schema");
+        assert!(validator.is_valid(&json!({"status": "delivered"})));
+        assert!(!validator.is_valid(&json!([{"status": "delivered"}])));
+
+        let explicit_non_object = normalize_schema(
+            &json!({"type": "string", "properties": {"ignored": {"type": "string"}}}),
+            Dialect::Draft202012,
+        );
+        assert_eq!(explicit_non_object["type"], "string");
+        let unconstrained = normalize_schema(&json!({"description": "any"}), Dialect::Draft202012);
+        assert!(unconstrained.get("type").is_none());
     }
 
     #[test]

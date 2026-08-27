@@ -315,6 +315,13 @@ fn normalize_schema(value: &Value, draft: ValidationDraft) -> Value {
             }
         }
     }
+    // Match the analyzer's long-standing OpenAPI object inference. Under pure
+    // JSON Schema, `properties` alone also admits arrays and scalars; a Rust
+    // struct cannot represent those values. Promoting the implicit object type
+    // here keeps generated request validation and model hydration aligned.
+    if !schema.contains_key("type") && schema.contains_key("properties") {
+        schema.insert("type".to_string(), Value::String("object".to_string()));
+    }
     // AWS-authored specs widely carry the constraint as `x-pattern` (an
     // OpenAPI extension) rather than the JSON Schema `pattern` keyword. The
     // embedded validator compiles a pure JSON Schema document, where unknown
@@ -1327,6 +1334,27 @@ mod tests {
         );
         assert_eq!(normalized["anyOf"][1], json!({"type": "null"}));
         assert!(normalized["anyOf"][0].get("nullable").is_none());
+    }
+
+    #[test]
+    fn properties_without_type_use_the_same_object_normalization_as_models() {
+        let normalized = normalize_schema(
+            &json!({
+                "properties": {
+                    "status": {"type": "string"},
+                    "nested": {"properties": {"id": {"type": "integer"}}}
+                }
+            }),
+            ValidationDraft::Draft202012,
+        );
+        assert_eq!(normalized["type"], "object");
+        assert_eq!(normalized["properties"]["nested"]["type"], "object");
+
+        let explicit = normalize_schema(
+            &json!({"type": "array", "properties": {"ignored": {"type": "string"}}}),
+            ValidationDraft::Draft202012,
+        );
+        assert_eq!(explicit["type"], "array");
     }
 
     #[test]
