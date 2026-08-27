@@ -16303,7 +16303,7 @@ components:
                     title: status
             required:
                 - id
-                - environment_id
+                - environmentId
             title: Service
             type: object
         gitpod.v1.ServiceAccount:
@@ -17379,7 +17379,7 @@ components:
                     title: spec
             required:
                 - id
-                - environment_id
+                - environmentId
             title: Task
             type: object
         gitpod.v1.TaskExecution:
