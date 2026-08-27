@@ -173,47 +173,184 @@ impl<'de> serde::Deserialize<'de> for ContentBlock {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let discriminator = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom(
-                concat!("missing string discriminator `", "type", "`",),
-            ))?
-            .to_string();
-        match discriminator.as_str() {
-            "text" => {
-                let primary_error = match serde_json::from_value::<
-                    TextBlock,
-                >(value.clone()) {
-                    Ok(payload) => return Ok(Self::TextBlock(payload)),
-                    Err(error) => error,
-                };
-                Err(serde::de::Error::custom(primary_error))
+        let discriminator = match value.get("type") {
+            Some(serde_json::Value::String(discriminator)) => {
+                Some(discriminator.as_str())
             }
-            "image" => {
-                let primary_error = match serde_json::from_value::<
-                    ImageBlock,
-                >(value.clone()) {
-                    Ok(payload) => return Ok(Self::ImageBlock(payload)),
-                    Err(error) => error,
-                };
-                Err(serde::de::Error::custom(primary_error))
+            Some(_) => {
+                return Err(
+                    serde::de::Error::custom(
+                        concat!("non-string discriminator `", "type", "`",),
+                    ),
+                );
             }
-            "document" => {
-                let primary_error = match serde_json::from_value::<
-                    DocumentBlock,
-                >(value.clone()) {
-                    Ok(payload) => return Ok(Self::DocumentBlock(payload)),
-                    Err(error) => error,
-                };
-                Err(serde::de::Error::custom(primary_error))
+            None => None,
+        };
+        match discriminator {
+            Some(discriminator) => {
+                match discriminator {
+                    "text" => {
+                        let primary_error = match serde_json::from_value::<
+                            TextBlock,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::TextBlock(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            ImageBlock,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "text", first_name, stringify!(ImageBlock),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::ImageBlock(payload),
+                                stringify!(ImageBlock),
+                            ));
+                        }
+                        if let Ok(payload) = serde_json::from_value::<
+                            DocumentBlock,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "text", first_name, stringify!(DocumentBlock),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::DocumentBlock(payload),
+                                stringify!(DocumentBlock),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "image" => {
+                        let primary_error = match serde_json::from_value::<
+                            ImageBlock,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::ImageBlock(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            TextBlock,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "image", first_name, stringify!(TextBlock),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::TextBlock(payload),
+                                stringify!(TextBlock),
+                            ));
+                        }
+                        if let Ok(payload) = serde_json::from_value::<
+                            DocumentBlock,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "image", first_name, stringify!(DocumentBlock),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::DocumentBlock(payload),
+                                stringify!(DocumentBlock),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "document" => {
+                        let primary_error = match serde_json::from_value::<
+                            DocumentBlock,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::DocumentBlock(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            TextBlock,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "document", first_name, stringify!(TextBlock),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::TextBlock(payload),
+                                stringify!(TextBlock),
+                            ));
+                        }
+                        if let Ok(payload) = serde_json::from_value::<
+                            ImageBlock,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "document", first_name, stringify!(ImageBlock),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::ImageBlock(payload),
+                                stringify!(ImageBlock),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    other => {
+                        Err(
+                            serde::de::Error::custom(
+                                format!(
+                                    "unknown discriminator value `{other}` for `{}`", "type",
+                                ),
+                            ),
+                        )
+                    }
+                }
             }
-            other => {
+            None => {
                 Err(
                     serde::de::Error::custom(
-                        format!(
-                            "unknown discriminator value `{other}` for `{}`", "type",
-                        ),
+                        concat!("missing string discriminator `", "type", "`",),
                     ),
                 )
             }

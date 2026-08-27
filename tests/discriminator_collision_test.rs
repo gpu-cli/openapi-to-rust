@@ -100,6 +100,8 @@ fn unique_implicit_discriminator_values_still_generate_discriminated_union() {
     }));
 
     assert!(generated.contains("pub enum Event"));
-    assert!(generated.contains("match discriminator.as_str()"));
+    assert!(generated.contains("match discriminator"));
+    assert!(generated.contains("Some(discriminator)"));
+    assert!(generated.contains("unknown discriminator value"));
     assert!(!generated.contains("#[serde(untagged)]\npub enum Event"));
 }

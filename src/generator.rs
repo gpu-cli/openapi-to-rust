@@ -2759,17 +2759,8 @@ impl CodeGenerator {
         let serialize_arms = variant_shapes.iter().map(|(variant, variant_name, _)| {
             let canonical_value = &variant.discriminator_value;
             let variant_values = &variant.discriminator_values;
-            quote! {
-                Self::#variant_name(payload) => {
-                    let mut value = serde_json::to_value(payload)
-                        .map_err(serde::ser::Error::custom)?;
-                    let object = value.as_object_mut().ok_or_else(|| {
-                        serde::ser::Error::custom(concat!(
-                            "discriminated union variant `",
-                            stringify!(#variant_name),
-                            "` did not serialize as an object",
-                        ))
-                    })?;
+            let serialize_discriminator = if variant.discriminator_field_declared {
+                quote! {
                     match object.get(#discriminator_field) {
                         Some(serde_json::Value::String(tag))
                             if matches!(tag.as_str(), #(#variant_values)|*) => {}
@@ -2794,6 +2785,22 @@ impl CodeGenerator {
                             );
                         }
                     }
+                }
+            } else {
+                TokenStream::new()
+            };
+            quote! {
+                Self::#variant_name(payload) => {
+                    let mut value = serde_json::to_value(payload)
+                        .map_err(serde::ser::Error::custom)?;
+                    let object = value.as_object_mut().ok_or_else(|| {
+                        serde::ser::Error::custom(concat!(
+                            "discriminated union variant `",
+                            stringify!(#variant_name),
+                            "` did not serialize as an object",
+                        ))
+                    })?;
+                    #serialize_discriminator
                     value.serialize(serializer)
                 }
             }
@@ -2802,20 +2809,27 @@ impl CodeGenerator {
         for (primary_index, (variant, variant_name, payload)) in variant_shapes.iter().enumerate() {
             for tag in &variant.preferred_discriminator_values {
                 let fallback_attempts = variant_shapes.iter().enumerate().filter_map(
-                    |(fallback_index, (fallback, fallback_name, fallback_payload))| {
-                        if fallback_index == primary_index
-                            || !fallback
-                                .discriminator_values
-                                .iter()
-                                .any(|candidate| candidate == tag)
-                        {
+                    |(fallback_index, (_, fallback_name, fallback_payload))| {
+                        if fallback_index == primary_index {
                             return None;
                         }
                         Some(quote! {
                             if let Ok(payload) =
                                 serde_json::from_value::<#fallback_payload>(value.clone())
                             {
-                                return Ok(Self::#fallback_name(payload));
+                                if let Some((_, first_name)) = &structural_match {
+                                    return Err(serde::de::Error::custom(format!(
+                                        "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                        #discriminator_field,
+                                        #tag,
+                                        first_name,
+                                        stringify!(#fallback_name),
+                                    )));
+                                }
+                                structural_match = Some((
+                                    Self::#fallback_name(payload),
+                                    stringify!(#fallback_name),
+                                ));
                             }
                         })
                     },
@@ -2826,12 +2840,63 @@ impl CodeGenerator {
                             Ok(payload) => return Ok(Self::#variant_name(payload)),
                             Err(error) => error,
                         };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
                         #(#fallback_attempts)*
-                        Err(serde::de::Error::custom(primary_error))
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
                     }
                 });
             }
         }
+        let missing_discriminator_attempts = variant_shapes.iter().filter_map(
+            |(variant, variant_name, payload)| {
+                if variant.discriminator_field_required {
+                    return None;
+                }
+                Some(quote! {
+                    if let Ok(payload) = serde_json::from_value::<#payload>(value.clone()) {
+                        if let Some((_, first_name)) = &structural_match {
+                            return Err(serde::de::Error::custom(format!(
+                                "missing discriminator `{}` structurally matched both `{}` and `{}`",
+                                #discriminator_field,
+                                first_name,
+                                stringify!(#variant_name),
+                            )));
+                        }
+                        structural_match = Some((
+                            Self::#variant_name(payload),
+                            stringify!(#variant_name),
+                        ));
+                    }
+                })
+            },
+        );
+        let has_missing_discriminator_candidates = variants
+            .iter()
+            .any(|variant| !variant.discriminator_field_required);
+        let missing_discriminator_fallback = if has_missing_discriminator_candidates {
+            quote! {
+                let mut structural_match: Option<(Self, &'static str)> = None;
+                #(#missing_discriminator_attempts)*
+                structural_match
+                    .map(|(payload, _)| payload)
+                    .ok_or_else(|| serde::de::Error::custom(concat!(
+                        "missing string discriminator `",
+                        #discriminator_field,
+                        "` and no tagless branch matched",
+                    )))
+            }
+        } else {
+            quote! {
+                Err(serde::de::Error::custom(concat!(
+                    "missing string discriminator `",
+                    #discriminator_field,
+                    "`",
+                )))
+            }
+        };
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -2880,21 +2945,28 @@ impl CodeGenerator {
                     D: serde::Deserializer<'de>,
                 {
                     let value = serde_json::Value::deserialize(deserializer)?;
-                    let discriminator = value
-                        .get(#discriminator_field)
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| serde::de::Error::custom(concat!(
-                            "missing string discriminator `",
-                            #discriminator_field,
-                            "`",
-                        )))?
-                        .to_string();
-                    match discriminator.as_str() {
-                        #(#deserialize_arms)*
-                        other => Err(serde::de::Error::custom(format!(
-                            "unknown discriminator value `{other}` for `{}`",
-                            #discriminator_field,
-                        ))),
+                    let discriminator = match value.get(#discriminator_field) {
+                        Some(serde_json::Value::String(discriminator)) => {
+                            Some(discriminator.as_str())
+                        }
+                        Some(_) => {
+                            return Err(serde::de::Error::custom(concat!(
+                                "non-string discriminator `",
+                                #discriminator_field,
+                                "`",
+                            )));
+                        }
+                        None => None,
+                    };
+                    match discriminator {
+                        Some(discriminator) => match discriminator {
+                            #(#deserialize_arms)*
+                            other => Err(serde::de::Error::custom(format!(
+                                "unknown discriminator value `{other}` for `{}`",
+                                #discriminator_field,
+                            ))),
+                        },
+                        None => { #missing_discriminator_fallback }
                     }
                 }
             }

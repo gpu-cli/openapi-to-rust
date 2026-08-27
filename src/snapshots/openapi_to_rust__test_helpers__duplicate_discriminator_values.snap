@@ -125,41 +125,99 @@ impl<'de> serde::Deserialize<'de> for Content {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let discriminator = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom(
-                concat!("missing string discriminator `", "type", "`",),
-            ))?
-            .to_string();
-        match discriminator.as_str() {
-            "text" => {
-                let primary_error = match serde_json::from_value::<
-                    SimpleText,
-                >(value.clone()) {
-                    Ok(payload) => return Ok(Self::SimpleText(payload)),
-                    Err(error) => error,
-                };
-                if let Ok(payload) = serde_json::from_value::<RichText>(value.clone()) {
-                    return Ok(Self::RichText(payload));
+        let discriminator = match value.get("type") {
+            Some(serde_json::Value::String(discriminator)) => {
+                Some(discriminator.as_str())
+            }
+            Some(_) => {
+                return Err(
+                    serde::de::Error::custom(
+                        concat!("non-string discriminator `", "type", "`",),
+                    ),
+                );
+            }
+            None => None,
+        };
+        match discriminator {
+            Some(discriminator) => {
+                match discriminator {
+                    "text" => {
+                        let primary_error = match serde_json::from_value::<
+                            SimpleText,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::SimpleText(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            RichText,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "text", first_name, stringify!(RichText),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::RichText(payload),
+                                stringify!(RichText),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "rich_text" => {
+                        let primary_error = match serde_json::from_value::<
+                            RichText,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::RichText(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            SimpleText,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "rich_text", first_name, stringify!(SimpleText),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::SimpleText(payload),
+                                stringify!(SimpleText),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    other => {
+                        Err(
+                            serde::de::Error::custom(
+                                format!(
+                                    "unknown discriminator value `{other}` for `{}`", "type",
+                                ),
+                            ),
+                        )
+                    }
                 }
-                Err(serde::de::Error::custom(primary_error))
             }
-            "rich_text" => {
-                let primary_error = match serde_json::from_value::<
-                    RichText,
-                >(value.clone()) {
-                    Ok(payload) => return Ok(Self::RichText(payload)),
-                    Err(error) => error,
-                };
-                Err(serde::de::Error::custom(primary_error))
-            }
-            other => {
+            None => {
                 Err(
                     serde::de::Error::custom(
-                        format!(
-                            "unknown discriminator value `{other}` for `{}`", "type",
-                        ),
+                        concat!("missing string discriminator `", "type", "`",),
                     ),
                 )
             }

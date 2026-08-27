@@ -788,6 +788,14 @@ pub struct UnionVariant {
     /// deserialization can fall back structurally when the preferred branch
     /// does not fit the rest of the payload.
     pub preferred_discriminator_values: Vec<String>,
+    /// Whether the branch schema declares the discriminator property at all.
+    /// A mapped/tagless branch may legitimately omit it, in which case the
+    /// serializer must not invent a schema-name-derived wire field.
+    pub discriminator_field_declared: bool,
+    /// Whether the branch schema requires the discriminator property.
+    /// Missing-tag structural fallback is limited to branches where this is
+    /// false.
+    pub discriminator_field_required: bool,
     pub schema_ref: String,
 }
 
@@ -2530,6 +2538,72 @@ impl SchemaAnalyzer {
         if !values.iter().any(|existing| existing == value) {
             values.push(value.to_string());
         }
+    }
+
+    fn discriminator_property_presence(&self, schema: &Schema, field_name: &str) -> (bool, bool) {
+        self.discriminator_property_presence_inner(schema, field_name, &mut HashSet::new(), 0)
+    }
+
+    fn discriminator_property_presence_inner(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+        visited_refs: &mut HashSet<String>,
+        depth: usize,
+    ) -> (bool, bool) {
+        if depth > 64 {
+            return (false, false);
+        }
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return (false, false);
+            }
+            let result = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+                .map(|target| {
+                    self.discriminator_property_presence_inner(
+                        target,
+                        field_name,
+                        visited_refs,
+                        depth + 1,
+                    )
+                })
+                .unwrap_or((false, false));
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let details = schema.details();
+        let mut declared = details
+            .properties
+            .as_ref()
+            .is_some_and(|properties| properties.contains_key(field_name));
+        let mut required = details
+            .required
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|name| name == field_name));
+
+        let members = match schema {
+            Schema::AllOf { all_of, .. } => Some(all_of.as_slice()),
+            Schema::AnyOf { any_of, .. } => Some(any_of.as_slice()),
+            Schema::OneOf { one_of, .. } => Some(one_of.as_slice()),
+            _ => None,
+        };
+        if let Some(members) = members {
+            for member in members {
+                let (member_declared, member_required) = self
+                    .discriminator_property_presence_inner(
+                        member,
+                        field_name,
+                        visited_refs,
+                        depth + 1,
+                    );
+                declared |= member_declared;
+                required |= member_required;
+            }
+        }
+        (declared, required)
     }
 
     fn extract_discriminator_value_for_field(
@@ -4502,6 +4576,13 @@ impl SchemaAnalyzer {
                             .push(self.generate_discriminator_value_from_name(&schema_name));
                     }
                     let discriminator_value = discriminator_values[0].clone();
+                    let (discriminator_field_declared, discriminator_field_required) = self
+                        .schemas
+                        .get(&schema_name)
+                        .map(|schema| {
+                            self.discriminator_property_presence(schema, &discriminator_field)
+                        })
+                        .unwrap_or((false, false));
 
                     // Generate Rust-friendly variant name and ensure uniqueness
                     let base_name = self.to_rust_variant_name(&schema_name);
@@ -4517,6 +4598,8 @@ impl SchemaAnalyzer {
                         discriminator_value: final_discriminator_value,
                         preferred_discriminator_values: discriminator_values.clone(),
                         discriminator_values,
+                        discriminator_field_declared,
+                        discriminator_field_required,
                         schema_ref: ref_str.to_string(),
                     });
                 }
@@ -4545,6 +4628,8 @@ impl SchemaAnalyzer {
                     discriminator_values.push(format!("variant_{variant_index}"));
                 }
                 let discriminator_value = discriminator_values[0].clone();
+                let (discriminator_field_declared, discriminator_field_required) =
+                    self.discriminator_property_presence(variant_schema, &discriminator_field);
 
                 // Generate Rust-friendly variant name based on discriminator or fallback to generic
                 let base_name = if discriminator_value.starts_with("variant_") {
@@ -4577,6 +4662,8 @@ impl SchemaAnalyzer {
                     discriminator_value: final_discriminator_value,
                     preferred_discriminator_values: discriminator_values.clone(),
                     discriminator_values,
+                    discriminator_field_declared,
+                    discriminator_field_required,
                     schema_ref: format!("inline_{variant_index}"),
                 });
             }
