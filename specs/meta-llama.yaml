@@ -670,7 +670,7 @@ components:
       discriminator:
         propertyName: type
         mapping:
-          image: '#/components/schemas/MessageImageContentItem'
+          image_url: '#/components/schemas/MessageImageContentItem'
           text: '#/components/schemas/MessageTextContentItem'
     AssistantMessageContentItem:
       oneOf:

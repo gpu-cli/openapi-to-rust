@@ -59,6 +59,49 @@ fn assert_draft202012_instances(
     }
 }
 
+fn assert_discriminator_mapping_matches_tag(fixture: &Value, union_name: &str) {
+    let union = component_schema(fixture, union_name);
+    let property_name = union["discriminator"]["propertyName"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{union_name} has no string discriminator propertyName"));
+    let mapping = union["discriminator"]["mapping"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{union_name} has no discriminator mapping"));
+    let branches = union["oneOf"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{union_name} has no oneOf branches"));
+
+    for (wire_value, target) in mapping {
+        let target = target
+            .as_str()
+            .unwrap_or_else(|| panic!("{union_name} mapping {wire_value:?} is not a string"));
+        assert!(
+            branches
+                .iter()
+                .any(|branch| branch.get("$ref").and_then(Value::as_str) == Some(target)),
+            "{union_name} mapping {wire_value:?} targets {target}, which is not a oneOf branch"
+        );
+        let target_name = target
+            .strip_prefix("#/components/schemas/")
+            .unwrap_or_else(|| {
+                panic!("{union_name} mapping target is not a component ref: {target}")
+            });
+        let allowed = component_schema(fixture, target_name)["properties"][property_name]["enum"]
+            .as_array()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{union_name} mapping target {target_name} has no enum-constrained {property_name}"
+                )
+            });
+        assert!(
+            allowed
+                .iter()
+                .any(|value| value.as_str() == Some(wire_value)),
+            "{union_name} maps {wire_value:?} to {target_name}, whose {property_name} enum is {allowed:?}"
+        );
+    }
+}
+
 #[test]
 fn cloudflare_empty_required_repair_is_draft4_valid() {
     let fixture = load_fixture("specs/cloudflare.yaml");
@@ -140,6 +183,16 @@ fn coda_required_members_are_declared_and_draft4_valid() {
         }
         assert_draft4_meta_valid(&pointer, schema);
     }
+}
+
+#[test]
+fn corpus_discriminator_mappings_match_target_tag_constraints() {
+    let coda = load_fixture("specs/coda.yaml");
+    assert_discriminator_mapping_matches_tag(&coda, "PackPrincipal");
+    assert_discriminator_mapping_matches_tag(&coda, "PackLog");
+
+    let meta_llama = load_fixture("specs/meta-llama.yaml");
+    assert_discriminator_mapping_matches_tag(&meta_llama, "UserMessageContentItem");
 }
 
 #[test]

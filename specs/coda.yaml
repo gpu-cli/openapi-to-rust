@@ -11906,7 +11906,7 @@ components:
         mapping:
           user: '#/components/schemas/PackUserPrincipal'
           workspace: '#/components/schemas/PackWorkspacePrincipal'
-          global: '#/components/schemas/PackGlobalPrincipal'
+          worldwide: '#/components/schemas/PackGlobalPrincipal'
           nomosOrganization: '#/components/schemas/PackNomosOrganizationPrincipal'
           group: '#/components/schemas/PackGroupPrincipal'
           grammarlyInstitution: '#/components/schemas/PackGrammarlyInstitutionPrincipal'
@@ -14108,8 +14108,8 @@ components:
         propertyName: type
         mapping:
           custom: '#/components/schemas/PackCustomLog'
-          fetcher: '#/components/schemas/PackInvocationLog'
-          invocation: '#/components/schemas/PackFetcherLog'
+          fetcher: '#/components/schemas/PackFetcherLog'
+          invocation: '#/components/schemas/PackInvocationLog'
           internal: '#/components/schemas/PackInternalLog'
           auth: '#/components/schemas/PackAuthLog'
           ingestionLifecycle: '#/components/schemas/PackIngestionLifecycleLog'
