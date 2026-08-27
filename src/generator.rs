@@ -3275,10 +3275,15 @@ impl CodeGenerator {
             result = format!("{leading_marker}{result}");
         }
 
-        // `self`, `super`, `crate`, `Self` are NOT permitted as raw identifiers
-        // (they trigger an `r#self cannot be a raw identifier` panic in
-        // proc_macro2). Suffix them instead.
+        // `self`, `super`, `crate`, and `Self` are not permitted as raw
+        // identifiers. Suffix them before constructing a proc-macro ident.
         if matches!(result.as_str(), "self" | "super" | "crate" | "Self") {
+            return format!("{result}_field");
+        }
+        // Keep boolean literal property names as stable ordinary identifiers
+        // and let the field allocator disambiguate an actual `true_field` or
+        // `false_field` property. Serde preserves the original wire name.
+        if matches!(result.as_str(), "true" | "false") {
             return format!("{result}_field");
         }
         // Handle reserved keywords using raw identifiers (r#keyword)
