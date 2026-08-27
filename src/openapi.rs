@@ -1012,7 +1012,9 @@ impl Schema {
             Schema::TypedMulti { .. } => self.schema_type().cloned(),
             Schema::Untyped { details } => {
                 // Infer from structure
-                if details.properties.is_some() {
+                if self.is_explicit_null_only() {
+                    Some(SchemaType::Null)
+                } else if details.properties.is_some() {
                     Some(SchemaType::Object)
                 } else if details.items.is_some() || details.prefix_items.is_some() {
                     Some(SchemaType::Array)
@@ -1838,6 +1840,23 @@ mod tests {
                 !non_nullable.is_nullable_any(),
                 "{reference_keyword} nullable:false must stay non-nullable"
             );
+        }
+    }
+
+    #[test]
+    fn null_only_enum_and_const_infer_null_instead_of_string() {
+        for source in [json!({"enum": [null]}), json!({"const": null})] {
+            let schema: Schema = serde_json::from_value(source.clone()).unwrap();
+            assert_eq!(schema.inferred_type(), Some(SchemaType::Null), "{source}");
+        }
+
+        for source in [
+            json!({"enum": ["null"]}),
+            json!({"enum": ["ready", null]}),
+            json!({"type": "string", "enum": ["ready"]}),
+        ] {
+            let schema: Schema = serde_json::from_value(source.clone()).unwrap();
+            assert_ne!(schema.inferred_type(), Some(SchemaType::Null), "{source}");
         }
     }
 
