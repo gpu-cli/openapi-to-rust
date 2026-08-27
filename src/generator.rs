@@ -2638,6 +2638,11 @@ impl CodeGenerator {
             } else {
                 variant_type_tokens
             };
+            let variant_type_tokens = if variant.nullable {
+                quote! { Option<#variant_type_tokens> }
+            } else {
+                variant_type_tokens
+            };
 
             quote! {
                 #variant_name_ident(#variant_type_tokens),

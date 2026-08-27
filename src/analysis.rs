@@ -4064,8 +4064,14 @@ impl SchemaAnalyzer {
             }
         }
 
-        // If there's no discriminator, we should create an untagged union
-        if discriminator.is_none() {
+        // If there's no discriminator, create an untagged union. A nullable
+        // referenced branch must also be structural: JSON null has no object
+        // discriminator field for an internally tagged enum to inspect.
+        if discriminator.is_none()
+            || one_of_schemas
+                .iter()
+                .any(|schema| self.schema_or_reference_is_nullable(schema))
+        {
             // Handle untagged unions (oneOf without discriminator)
             return self.analyze_untagged_oneof_union(
                 one_of_schemas,
@@ -4462,7 +4468,7 @@ impl SchemaAnalyzer {
                     dependencies.insert(schema_name.to_string());
                     union_variants.push(SchemaRef {
                         target: schema_name.to_string(),
-                        nullable: false,
+                        nullable: self.schema_or_reference_is_nullable(variant_schema),
                     });
                 }
             } else if let Some(recursive_ref) = variant_schema.recursive_reference() {
@@ -6131,7 +6137,7 @@ impl SchemaAnalyzer {
                         dependencies.insert(target.to_string());
                         variants.push(SchemaRef {
                             target: target.to_string(),
-                            nullable: false,
+                            nullable: self.schema_or_reference_is_nullable(schema),
                         });
                     }
                 } else if matches!(schema.schema_type(), Some(OpenApiSchemaType::Object))
