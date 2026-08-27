@@ -485,10 +485,13 @@ impl UsedFeatures {
 pub enum DateStrategy {
     /// Plain `String`. Pre-Q2 behavior; pick this to opt out.
     String,
-    /// `chrono::DateTime<Utc>` / `NaiveDate` / `NaiveTime` (default).
+    /// `chrono::DateTime<Utc>` / `NaiveDate` (default). JSON Schema
+    /// `format: time` remains a String because RFC 3339 full-time carries an
+    /// offset that `NaiveTime` cannot represent.
     #[default]
     Chrono,
-    /// `time::OffsetDateTime` / `Date` / `Time`.
+    /// `time::OffsetDateTime` / `Date`. JSON Schema `format: time` remains a
+    /// String because `time::Time` cannot represent its required offset.
     Time,
 }
 
@@ -956,20 +959,14 @@ impl TypeMapper {
         }
     }
 
-    fn map_time(&self, strat: DateStrategy) -> MappedType {
-        match strat {
-            DateStrategy::String => MappedType::plain("String"),
-            DateStrategy::Chrono => {
-                self.record(TypeFeature::Chrono);
-                MappedType::with_feature("chrono::NaiveTime", TypeFeature::Chrono)
-            }
-            DateStrategy::Time => {
-                self.record(TypeFeature::TimeTime);
-                // Same story as `time::Date`: no built-in codec, so
-                // the generator emits `time_time_format`.
-                MappedType::with_codec("time::Time", "time_time_format", TypeFeature::TimeTime)
-            }
-        }
+    fn map_time(&self, _strat: DateStrategy) -> MappedType {
+        // JSON Schema's `time` format is RFC 3339 `full-time`, not a local
+        // wall-clock time: `03:04:05Z` and `03:04:05.123-07:00` are canonical
+        // values. Neither chrono::NaiveTime nor time::Time has a UTC-offset
+        // component, so mapping to either type rejects or loses valid wire
+        // data. Preserve the exact string for every strategy; `date` and
+        // `date-time` continue to honor their configured typed mappings.
+        MappedType::plain("String")
     }
 
     fn map_duration(&self, strat: DurationStrategy) -> MappedType {
@@ -1156,6 +1153,7 @@ mod tests {
             "chrono::DateTime<chrono::Utc>"
         );
         assert_eq!(m.string_format(Some("date")).rust_type, "chrono::NaiveDate");
+        assert_eq!(m.string_format(Some("time")).rust_type, "String");
         assert_eq!(m.string_format(Some("uuid")).rust_type, "uuid::Uuid");
         assert_eq!(m.string_format(Some("uri")).rust_type, "url::Url");
         assert_eq!(

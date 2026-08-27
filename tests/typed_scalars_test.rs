@@ -11,7 +11,7 @@
 //! only on `TypeMapper` would miss the codec threading through
 //! `SchemaType::Primitive.serde_with`.
 
-use openapi_to_rust::type_mapping::BinaryStrategy;
+use openapi_to_rust::type_mapping::{BinaryStrategy, DateStrategy};
 use openapi_to_rust::{
     ByteStrategy, CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
 };
@@ -582,14 +582,13 @@ fn no_format_property_remains_string() {
 }
 
 // =====================================================================
-// GH #25: DateStrategy::Time for `format: date` / `format: time`.
-// `time::serde::iso8601` only supports OffsetDateTime, so the
-// generator must emit its own codec modules via
-// `time::serde::format_description!` instead.
+// GH #25: DateStrategy::Time for `format: date`. `time::serde::iso8601`
+// only supports OffsetDateTime, so the generator must emit its own date codec.
+// JSON Schema `format: time` is RFC 3339 full-time and stays a string because
+// both chrono::NaiveTime and time::Time lack its required UTC offset.
 // =====================================================================
 
 fn time_strategy_mapper() -> TypeMapper {
-    use openapi_to_rust::type_mapping::DateStrategy;
     TypeMapper::new(TypeMappingConfig {
         date_time: DateStrategy::Time,
         date: DateStrategy::Time,
@@ -670,19 +669,15 @@ fn optional_date_with_time_strategy_uses_option_codec() {
 }
 
 #[test]
-fn time_with_time_strategy_emits_generated_codec() {
+fn time_with_time_strategy_preserves_rfc3339_offset_as_string() {
     let code = generate(spec_with_optional_format("time"), time_strategy_mapper());
     assert!(
-        code.contains("pub value: Option<time::Time>"),
-        "optional time should be Option<time::Time>. Code:\n{code}"
+        code.contains("pub value: Option<String>"),
+        "RFC 3339 full-time must retain its offset-bearing string. Code:\n{code}"
     );
     assert!(
-        code.contains(r#"with = "time_time_format::option""#),
-        "optional time field should use the ::option submodule. Code:\n{code}"
-    );
-    assert!(
-        code.contains("time_time_format"),
-        "the time codec module declaration must be emitted. Code:\n{code}"
+        !code.contains("time_time_format") && !code.contains("NaiveTime"),
+        "an offset-less time codec must not be emitted. Code:\n{code}"
     );
 }
 
@@ -690,7 +685,6 @@ fn time_with_time_strategy_emits_generated_codec() {
 fn nullable_time_scalars_compose_their_codecs_with_field_presence() {
     for (format, rust_type, codec) in [
         ("date", "time::Date", "time_date_double_option"),
-        ("time", "time::Time", "time_time_double_option"),
         (
             "date-time",
             "time::OffsetDateTime",
@@ -709,6 +703,135 @@ fn nullable_time_scalars_compose_their_codecs_with_field_presence() {
             code.contains(&format!(r#"with = "{codec}""#)),
             "optional nullable {format} must use its double-option codec. Code:\n{code}"
         );
+    }
+
+    let time = generate(
+        spec_with_optional_nullable_format("time"),
+        time_strategy_mapper(),
+    );
+    assert!(time.contains("pub value: Option<Option<String>>"));
+    assert!(time.contains(r#"deserialize_with = "tri_state_serde::deserialize""#));
+    assert!(!time.contains("time_time_format"));
+}
+
+fn rfc3339_full_time_spec() -> serde_json::Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "RFC 3339 full-time", "version": "1.0.0" },
+        "paths": {},
+        "components": { "schemas": {
+            "Clock": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["required", "series", "by_name"],
+                "properties": {
+                    "required": { "type": "string", "format": "time" },
+                    "optional": { "type": ["string", "null"], "format": "time" },
+                    "series": {
+                        "type": "array",
+                        "items": { "type": "string", "format": "time" }
+                    },
+                    "by_name": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string", "format": "time" }
+                    }
+                }
+            }
+        } }
+    })
+}
+
+fn assert_generated_rfc3339_time_round_trip(strategy: DateStrategy, name: &str) {
+    let code = generate_with_types(
+        rfc3339_full_time_spec(),
+        TypeMappingConfig {
+            time: strategy,
+            ..TypeMappingConfig::default()
+        },
+    );
+    let compact = code.split_whitespace().collect::<String>();
+    assert!(compact.contains("pubrequired:String"));
+    assert!(compact.contains("puboptional:Option<Option<String>>"));
+    assert!(compact.contains("pubseries:Vec<String>"));
+    assert!(compact.contains("BTreeMap<String,String>"));
+    assert!(!code.contains("NaiveTime") && !code.contains("time::Time"));
+
+    let temp = tempfile::TempDir::new().expect("RFC 3339 time scratch crate");
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/generated.rs"), code).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "rfc3339-time-{name}"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/main.rs"),
+        r#"mod generated;
+
+fn round_trip(input: serde_json::Value) {
+    let hydrated: generated::Clock = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(hydrated).unwrap(), input);
+}
+
+fn main() {
+    round_trip(serde_json::json!({
+        "required": "03:04:05Z",
+        "optional": "03:04:05.123+05:30",
+        "series": ["23:59:59-07:00", "00:00:00.000001+14:00"],
+        "by_name": {"negative": "12:34:56.789-03:30"}
+    }));
+    round_trip(serde_json::json!({
+        "required": "03:04:05+00:00",
+        "series": [],
+        "by_name": {}
+    }));
+    round_trip(serde_json::json!({
+        "required": "03:04:05Z",
+        "optional": null,
+        "series": ["03:04:05Z"],
+        "by_name": {}
+    }));
+}
+"#,
+    )
+    .unwrap();
+
+    let output = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "--offline"])
+        .current_dir(temp.path())
+        .env(
+            "CARGO_TARGET_DIR",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/generated-rfc3339-time-{name}")),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "generated RFC 3339 time model failed for {name}:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn every_time_strategy_round_trips_rfc3339_offsets_exactly() {
+    for (strategy, name) in [
+        (DateStrategy::String, "string"),
+        (DateStrategy::Chrono, "chrono"),
+        (DateStrategy::Time, "time"),
+    ] {
+        assert_generated_rfc3339_time_round_trip(strategy, name);
     }
 }
 
