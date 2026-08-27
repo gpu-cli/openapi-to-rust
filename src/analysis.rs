@@ -2741,7 +2741,7 @@ impl SchemaAnalyzer {
                 }
             }
             OpenApiSchemaType::Integer => SchemaType::Primitive {
-                rust_type: self.type_mapper.integer_format(format).rust_type,
+                rust_type: self.integer_rust_type(details),
                 serde_with: None,
             },
             OpenApiSchemaType::Number => SchemaType::Primitive {
@@ -3231,10 +3231,7 @@ impl SchemaAnalyzer {
                 })
             }
             _ => Ok(SchemaRef {
-                target: self
-                    .type_mapper
-                    .map(member_type, schema.details())
-                    .rust_type,
+                target: self.openapi_type_to_rust_type(member_type, schema.details()),
                 nullable: false,
             }),
         }
@@ -5060,7 +5057,11 @@ impl SchemaAnalyzer {
         // config this produces bit-identical output to the pre-refactor
         // match; later Q2.* issues add format-aware branches inside
         // TypeMapper without touching this function.
-        self.type_mapper.map(openapi_type, details).rust_type
+        if openapi_type == OpenApiSchemaType::Integer {
+            self.integer_rust_type(details)
+        } else {
+            self.type_mapper.map(openapi_type, details).rust_type
+        }
     }
 
     #[allow(dead_code)]
@@ -5978,9 +5979,90 @@ impl SchemaAnalyzer {
         // (callers in 2025-era code path `Integer | Number` here).
         let format = details.format.as_deref();
         match schema_type {
-            OpenApiSchemaType::Integer => self.type_mapper.integer_format(format).rust_type,
+            OpenApiSchemaType::Integer => self.integer_rust_type(details),
             OpenApiSchemaType::Number => self.type_mapper.number_format(format).rust_type,
             _ => self.type_mapper.dynamic_json().rust_type,
+        }
+    }
+
+    /// Select the narrow configured integer carrier unless the schema itself
+    /// proves that a wider, still exactly serializable value is valid. JSON
+    /// Schema's `format` is an annotation, so a contradictory `format: int64`
+    /// plus a maximum above i64 must follow the numeric bounds rather than
+    /// rejecting source-valid wire values at hydration time.
+    fn integer_rust_type(&self, details: &crate::openapi::SchemaDetails) -> String {
+        fn include_value(value: &Value, minimum: &mut Option<f64>, maximum: &mut Option<f64>) {
+            let Some(value) = value
+                .as_i64()
+                .map(|value| value as f64)
+                .or_else(|| value.as_u64().map(|value| value as f64))
+                .or_else(|| value.as_f64().filter(|value| value.fract() == 0.0))
+            else {
+                return;
+            };
+            *minimum = Some(minimum.map_or(value, |current| current.min(value)));
+            *maximum = Some(maximum.map_or(value, |current| current.max(value)));
+        }
+
+        let explicitly_nonnegative = details.minimum.is_some_and(|value| value >= 0.0)
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value >= 0.0
+            );
+        let mut minimum = details.minimum;
+        let mut maximum = details.maximum;
+        if let Some(crate::openapi::ExclusiveBound::Number(value)) = &details.exclusive_minimum {
+            minimum = Some(minimum.map_or(*value, |current| current.min(*value)));
+        }
+        if let Some(crate::openapi::ExclusiveBound::Number(value)) = &details.exclusive_maximum {
+            maximum = Some(maximum.map_or(*value, |current| current.max(*value)));
+        }
+        for value in details
+            .const_value
+            .iter()
+            .chain(details.default.iter())
+            .chain(details.example.iter())
+            .chain(details.enum_values.iter().flatten())
+            .chain(details.examples.iter().flatten())
+        {
+            include_value(value, &mut minimum, &mut maximum);
+        }
+
+        let below_i32 = minimum.is_some_and(|value| value < i32::MIN as f64);
+        let above_i32 = maximum.is_some_and(|value| value > i32::MAX as f64);
+        let below_i64 = minimum.is_some_and(|value| value < i64::MIN as f64);
+        // i64::MAX rounds up when converted to f64. Treat the exact 2^63
+        // boundary as outside i64; this is the spelling used by the affected
+        // Gcore and Datadog constraints.
+        let above_i64 = maximum.is_some_and(|value| value >= 9_223_372_036_854_775_808.0);
+        let below_zero = minimum.is_some_and(|value| value < 0.0);
+        let above_u32 = maximum.is_some_and(|value| value > u32::MAX as f64);
+
+        let configured = self
+            .type_mapper
+            .integer_format(details.format.as_deref())
+            .rust_type;
+        match configured.as_str() {
+            "i32" if below_i32 || above_i32 => {
+                if below_i64 || above_i64 {
+                    "i128".to_string()
+                } else {
+                    "i64".to_string()
+                }
+            }
+            "i64" if below_i64 => "i128".to_string(),
+            "i64" if above_i64 && explicitly_nonnegative => "u64".to_string(),
+            "i64" if above_i64 => "i128".to_string(),
+            "u32" if below_zero => {
+                if below_i64 || above_i64 {
+                    "i128".to_string()
+                } else {
+                    "i64".to_string()
+                }
+            }
+            "u32" if above_u32 => "u64".to_string(),
+            "u64" if below_zero => "i128".to_string(),
+            configured => configured.to_string(),
         }
     }
 
@@ -6242,9 +6324,9 @@ impl SchemaAnalyzer {
                         .unwrap_or(true);
 
                     if primitive_unions {
-                        let mapped = self.type_mapper.map(schema_type.clone(), schema.details());
                         variants.push(SchemaRef {
-                            target: mapped.rust_type,
+                            target: self
+                                .openapi_type_to_rust_type(schema_type.clone(), schema.details()),
                             nullable: false,
                         });
                     } else {
@@ -7519,9 +7601,7 @@ impl SchemaAnalyzer {
                 let format = schema.details().format.clone();
                 rust_type = match schema_type {
                     crate::openapi::SchemaType::Boolean => "bool".to_string(),
-                    crate::openapi::SchemaType::Integer => {
-                        self.type_mapper.integer_format(format.as_deref()).rust_type
-                    }
+                    crate::openapi::SchemaType::Integer => self.integer_rust_type(schema.details()),
                     crate::openapi::SchemaType::Number => {
                         self.type_mapper.number_format(format.as_deref()).rust_type
                     }
@@ -7647,9 +7727,7 @@ impl SchemaAnalyzer {
         let format = unwrapped.details().format.clone();
         let scalar = match unwrapped.schema_type()? {
             crate::openapi::SchemaType::String => "String".to_string(),
-            crate::openapi::SchemaType::Integer => {
-                self.type_mapper.integer_format(format.as_deref()).rust_type
-            }
+            crate::openapi::SchemaType::Integer => self.integer_rust_type(unwrapped.details()),
             crate::openapi::SchemaType::Number => {
                 self.type_mapper.number_format(format.as_deref()).rust_type
             }
