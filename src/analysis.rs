@@ -4438,15 +4438,15 @@ impl SchemaAnalyzer {
         source_indices: &[usize],
         discriminator: Option<&Discriminator>,
     ) -> Result<SchemaType> {
-        // Drop {"type": "null"} variants. They mean "may be null" and are surfaced
-        // as Option<T> at the property level — including them here produces a junk
-        // `SerdeJsonValue(serde_json::Value)` variant.
+        // Drop null-only variants. They mean "may be null" and are surfaced as
+        // Option<T> at the property level — including them here produces a junk
+        // `SerdeJsonValue(serde_json::Value)` variant. Recognize the equivalent
+        // `type`, `const`, and `enum` spellings.
         let filtered: Vec<(usize, &Schema)> = one_of_schemas
             .iter()
             .zip(source_indices.iter().copied())
             .filter_map(|(schema, original_index)| {
-                (!matches!(schema.schema_type(), Some(OpenApiSchemaType::Null)))
-                    .then_some((original_index, schema))
+                (!schema.is_explicit_null_only()).then_some((original_index, schema))
             })
             .collect();
 
@@ -6110,28 +6110,26 @@ impl SchemaAnalyzer {
             return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
         }
 
-        // Drop {"type": "null"} variants. Nullability is surfaced as Option<T>
-        // at the property level via is_nullable_pattern(); leaving the null
-        // variant in here would produce a phantom `()` or `serde_json::Value`
-        // type alias that the generator can't render.
+        // Drop null-only variants. Nullability is surfaced as Option<T> at the
+        // property level via is_nullable_any(); leaving the null variant in
+        // here would produce a phantom `()` or `serde_json::Value` type alias
+        // that the generator can't render. Recognize the equivalent `type`,
+        // `const`, and `enum` spellings.
         let filtered_owned: Vec<Schema>;
         let filtered_indices: Vec<usize>;
         let (any_of_schemas, source_indices): (&[Schema], &[usize]) = if any_of_schemas
             .iter()
-            .any(|s| matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+            .any(Schema::is_explicit_null_only)
         {
             filtered_owned = any_of_schemas
                 .iter()
-                .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+                .filter(|s| !s.is_explicit_null_only())
                 .cloned()
                 .collect();
             filtered_indices = any_of_schemas
                 .iter()
                 .zip(source_indices.iter().copied())
-                .filter_map(|(schema, index)| {
-                    (!matches!(schema.schema_type(), Some(OpenApiSchemaType::Null)))
-                        .then_some(index)
-                })
+                .filter_map(|(schema, index)| (!schema.is_explicit_null_only()).then_some(index))
                 .collect();
             if filtered_owned.is_empty() {
                 return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));

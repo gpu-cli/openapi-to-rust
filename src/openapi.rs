@@ -844,7 +844,7 @@ impl Schema {
         self.reference_siblings_are_nullable()
             || self.details().is_nullable()
             || self.type_array_contains_null()
-            || self.is_nullable_pattern()
+            || self.has_explicit_null_variant()
     }
 
     /// Reference nodes retain siblings in `extra` because OpenAPI 3.0-era
@@ -957,6 +957,15 @@ impl Schema {
         self.non_null_variant().is_some()
     }
 
+    /// Whether an `anyOf` or `oneOf` contains a branch that admits only JSON
+    /// `null`. Unlike [`Self::is_nullable_pattern`], this does not require the
+    /// union to collapse to one non-null branch, so it also preserves
+    /// nullability for unions such as `[string, integer, null]`.
+    pub fn has_explicit_null_variant(&self) -> bool {
+        self.union_variants()
+            .is_some_and(|variants| variants.iter().any(Self::is_explicit_null_only))
+    }
+
     /// The one meaningful branch of a two-branch union whose other branch
     /// exists only to admit `null`.
     pub fn non_null_variant(&self) -> Option<&Schema> {
@@ -986,7 +995,7 @@ impl Schema {
     /// accepted values. In particular, `{nullable: true}` and
     /// `{type: object, nullable: true}` remain real alternatives even beside
     /// a `$ref`.
-    fn is_explicit_null_only(&self) -> bool {
+    pub(crate) fn is_explicit_null_only(&self) -> bool {
         match self {
             Schema::Typed { schema_type, .. } => *schema_type == SchemaType::Null,
             Schema::TypedMulti { schema_types, .. } => {
@@ -1873,7 +1882,11 @@ mod tests {
             .unwrap();
             assert!(
                 schema.non_null_variant().is_none(),
-                "{union_keyword} with three branches is not an Option wrapper"
+                "{union_keyword} with three branches must retain its non-null union"
+            );
+            assert!(
+                schema.is_nullable_any(),
+                "{union_keyword} with an explicit null branch must remain nullable"
             );
         }
     }
