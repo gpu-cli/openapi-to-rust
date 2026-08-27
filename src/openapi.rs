@@ -841,9 +841,24 @@ impl Schema {
     /// (openapi-generator-dsu) — which silently generated non-`Option` fields
     /// for values the API really does send as `null`.
     pub fn is_nullable_any(&self) -> bool {
-        self.details().is_nullable()
+        self.reference_siblings_are_nullable()
+            || self.details().is_nullable()
             || self.type_array_contains_null()
             || self.is_nullable_pattern()
+    }
+
+    /// Reference nodes retain siblings in `extra` because OpenAPI 3.0-era
+    /// documents commonly attach `nullable: true` directly beside `$ref`.
+    /// `details()` intentionally returns an empty value for references, so
+    /// nullability must read that retained annotation explicitly.
+    fn reference_siblings_are_nullable(&self) -> bool {
+        let extra = match self {
+            Schema::Reference { extra, .. }
+            | Schema::RecursiveRef { extra, .. }
+            | Schema::DynamicRef { extra, .. } => extra,
+            _ => return false,
+        };
+        extra.get("nullable").and_then(Value::as_bool) == Some(true)
     }
 
     /// Get schema details
@@ -1797,6 +1812,32 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn reference_sibling_nullable_annotation_is_not_lost() {
+        for reference_keyword in ["$ref", "$recursiveRef", "$dynamicRef"] {
+            let nullable: Schema = serde_json::from_value(json!({
+                (reference_keyword): "#/components/schemas/Value",
+                "nullable": true,
+                "description": "retained sibling"
+            }))
+            .unwrap();
+            assert!(
+                nullable.is_nullable_any(),
+                "{reference_keyword} should retain nullable:true"
+            );
+
+            let non_nullable: Schema = serde_json::from_value(json!({
+                (reference_keyword): "#/components/schemas/Value",
+                "nullable": false
+            }))
+            .unwrap();
+            assert!(
+                !non_nullable.is_nullable_any(),
+                "{reference_keyword} nullable:false must stay non-nullable"
+            );
         }
     }
 
