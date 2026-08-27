@@ -75,7 +75,16 @@ Also run the relevant distribution or corpus gate when touching these areas:
 scripts/install-smoke.sh                 # packaging, CLI, or dependencies
 scripts/spec-compile.sh anthropic openai # generator/client output
 scripts/spec-compile.sh                  # broad generator/type changes
+scripts/untyped-census.sh                # anything that changes which fields get typed
 ```
+
+`scripts/untyped-census.sh` rewrites `tests/conformance/untyped-report.md`,
+which counts every generated field that carries `serde_json::Value` and says
+why. Regenerate it when a change types fields that used to be opaque (or stops
+typing ones that were), so the corpus delta is visible in review;
+`scripts/untyped-census.sh --check` fails when it is stale. A **recoverable**
+row means the schema carried type information the generator dropped — those are
+defects with a fix, not shapes the spec left open.
 
 The full corpus generates and compile-checks 55 OpenAPI documents and can take
 several minutes. CI runs a fast generation tier on pull requests and the full
