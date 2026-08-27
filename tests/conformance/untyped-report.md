@@ -11,10 +11,9 @@ information that did not survive; those are defects with a fix.
 
 | Reason | Count | Verdict |
 |---|---:|---|
-| `opaque-object` | 4405 | faithful |
-| `any-schema` | 3041 | faithful |
+| `opaque-object` | 4413 | faithful |
+| `any-schema` | 3040 | faithful |
 | `untyped-additional-properties` | 1376 | faithful |
-| `unrepresentable-union` | 6 | **recoverable** |
 
 ## Per spec
 
@@ -29,7 +28,7 @@ information that did not survive; those are defects with a fix.
 | `cartesia` | 3 | 0 |
 | `cerebras` | 47 | 0 |
 | `circleci` | 26 | 0 |
-| `cloudflare` | 1111 | 3 |
+| `cloudflare` | 1115 | 0 |
 | `coda` | 27 | 0 |
 | `coingecko` | 0 | 0 |
 | `datadog-v2` | 156 | 0 |
@@ -51,20 +50,20 @@ information that did not survive; those are defects with a fix.
 | `langsmith` | 380 | 0 |
 | `launchdarkly` | 83 | 0 |
 | `letta` | 168 | 0 |
-| `lithic` | 13 | 0 |
+| `lithic` | 10 | 0 |
 | `luma` | 0 | 0 |
 | `meta-llama` | 2 | 0 |
 | `microsoft-graph` | 2315 | 0 |
 | `modern-treasury` | 26 | 0 |
-| `openai` | 160 | 2 |
+| `openai` | 158 | 0 |
 | `opencode` | 184 | 0 |
-| `pagerduty` | 40 | 0 |
+| `pagerduty` | 42 | 0 |
 | `perplexity` | 7 | 0 |
 | `resend` | 13 | 0 |
 | `retell` | 32 | 0 |
 | `runway` | 2 | 0 |
 | `sentry` | 595 | 0 |
-| `snyk` | 332 | 1 |
+| `snyk` | 331 | 0 |
 | `spotify` | 19 | 0 |
 | `storyden` | 75 | 0 |
 | `stripe` | 689 | 0 |
@@ -74,5 +73,5 @@ information that did not survive; those are defects with a fix.
 | `together` | 85 | 0 |
 | `twilio` | 34 | 0 |
 | `val-town` | 18 | 0 |
-| `vercel` | 237 | 0 |
+| `vercel` | 238 | 0 |
 | `writer` | 5 | 0 |

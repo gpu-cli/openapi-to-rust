@@ -366,6 +366,16 @@ pub struct CodeGenerator {
     source_provenance: Option<String>,
 }
 
+/// The parts of an analyzed object a struct is generated from, bundled so the
+/// generator's entry point keeps a readable signature.
+struct ObjectShape<'a> {
+    properties: &'a BTreeMap<String, crate::analysis::PropertyInfo>,
+    required: &'a std::collections::HashSet<String>,
+    additional_properties: &'a crate::analysis::ObjectAdditionalProperties,
+    /// A union declared alongside the properties, flattened into the struct.
+    variant: Option<&'a crate::analysis::SchemaRef>,
+}
+
 /// The Rust type an untyped schema renders to.
 fn untyped_rust_type(shape: crate::analysis::UntypedShape) -> &'static str {
     use crate::analysis::UntypedShape;
@@ -1465,11 +1475,15 @@ impl CodeGenerator {
                 properties,
                 required,
                 additional_properties,
+                variant,
             } => self.generate_struct(
                 schema,
-                properties,
-                required,
-                additional_properties,
+                ObjectShape {
+                    properties,
+                    required,
+                    additional_properties,
+                    variant: variant.as_ref(),
+                },
                 analysis,
                 type_context,
             ),
@@ -1912,15 +1926,43 @@ impl CodeGenerator {
         })
     }
 
+    /// Field name for a flattened variant union, avoiding any property the
+    /// schema already declares.
+    fn variant_field_name(
+        &self,
+        properties: &BTreeMap<String, crate::analysis::PropertyInfo>,
+    ) -> String {
+        let taken = |candidate: &str| {
+            properties
+                .keys()
+                .any(|name| self.to_rust_field_name(name) == candidate)
+        };
+        if !taken("variant") {
+            return "variant".to_string();
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("variant{suffix}");
+            if !taken(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     fn generate_struct(
         &self,
         schema: &crate::analysis::AnalyzedSchema,
-        properties: &BTreeMap<String, crate::analysis::PropertyInfo>,
-        required: &std::collections::HashSet<String>,
-        additional_properties: &crate::analysis::ObjectAdditionalProperties,
+        object: ObjectShape<'_>,
         analysis: &crate::analysis::SchemaAnalysis,
         type_context: &TypeGenerationContext<'_>,
     ) -> Result<TokenStream> {
+        let ObjectShape {
+            properties,
+            required,
+            additional_properties,
+            variant,
+        } = object;
         let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
         let emitted_properties = self.emitted_object_properties(
             &schema.name,
@@ -1991,6 +2033,20 @@ impl CodeGenerator {
                         std::collections::BTreeMap<String, #value_tokens>,
                 });
             }
+        }
+
+        // A schema that declares `properties` *and* a union means "these
+        // fields, and one of these shapes". The union rides in a flattened
+        // field so both halves round-trip: serde reads the declared properties
+        // and hands the remaining keys to the variant enum.
+        if let Some(variant) = variant {
+            let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
+            let variant_field = format_ident!("{}", self.variant_field_name(properties));
+            fields.push(quote! {
+                /// The variant this value takes, alongside the fields above.
+                #[serde(flatten)]
+                pub #variant_field: #variant_type,
+            });
         }
 
         let doc_comment = if let Some(desc) = &schema.description {

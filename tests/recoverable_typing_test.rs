@@ -557,6 +557,70 @@ fn an_extensible_enum_renders_as_a_string_everywhere_a_string_is_expected() {
 }
 
 #[test]
+fn an_object_that_also_declares_variants_keeps_both_halves() {
+    // `{properties: {...}, anyOf: [A, B]}` means "these fields, and one of
+    // these shapes" — Cloudflare's DLP entries. Neither half can be dropped, so
+    // the object generates a struct and the union its own enum, held in a
+    // flattened field (#65).
+    assert_types(
+        spec_with_schemas(json!({
+            "Profile": { "type": "object", "additionalProperties": false,
+                         "properties": { "id": { "type": "string" } } },
+            "CustomEntry": { "type": "object", "additionalProperties": false,
+                             "properties": { "pattern": { "type": "string" } } },
+            "PredefinedEntry": { "type": "object", "additionalProperties": false,
+                                 "properties": { "preset": { "type": "string" } } },
+            "Entry": {
+                "properties": {
+                    "profiles": { "type": "array", "items": { "$ref": "#/components/schemas/Profile" } },
+                    "upload_status": { "type": "string" }
+                },
+                "required": ["profiles"],
+                "anyOf": [
+                    { "$ref": "#/components/schemas/CustomEntry" },
+                    { "$ref": "#/components/schemas/PredefinedEntry" }
+                ]
+            }
+        })),
+        &[
+            "pub struct Entry",
+            "pub profiles: Vec<Profile>",
+            "#[serde(flatten)]",
+            "pub variant: EntryVariant",
+            "pub enum EntryVariant",
+        ],
+    );
+}
+
+#[test]
+fn a_requiredness_only_union_inside_a_property_is_the_object_it_describes() {
+    // The same shape one level down, which the named-schema check did not see:
+    // OpenAI's `tool_resources.file_search` is an inline object whose `anyOf`
+    // only alternates which of its own fields are required.
+    assert_types(
+        spec_with_schemas(json!({
+            "Request": { "type": "object", "additionalProperties": false, "properties": {
+                "file_search": {
+                    "type": "object",
+                    "properties": {
+                        "vector_store_ids": { "type": "array", "items": { "type": "string" } },
+                        "vector_stores": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "anyOf": [
+                        { "required": ["vector_store_ids"] },
+                        { "required": ["vector_stores"] }
+                    ]
+                }
+            }}
+        })),
+        &[
+            "pub vector_store_ids: Option<Vec<String>>",
+            "pub vector_stores: Option<Vec<String>>",
+        ],
+    );
+}
+
+#[test]
 fn a_genuinely_unconstrained_value_stays_untyped() {
     // The counterweight to every narrowing above: when the schema says "any
     // JSON", `serde_json::Value` is the right answer and the census must call

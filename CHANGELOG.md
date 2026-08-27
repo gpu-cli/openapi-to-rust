@@ -42,7 +42,10 @@ when correcting output that was wrong or incomplete on the wire.
     union of one branch is that branch; branches differing only in constraints
     share one type; branches that only alternate `required` describe the
     object their properties declare; and branches that are local pointers are
-    expanded before the union is built.
+    expanded before the union is built;
+  - a schema declaring `properties` *and* a union — "these fields, and one of
+    these shapes" — generates the struct with the union in a
+    `#[serde(flatten)]` field, instead of discarding both halves (#65).
 - `items: false` and `items: true` — 2020-12 boolean schemas, and the canonical
   way to close a tuple — now parse instead of failing the document with "data
   did not match any variant of untagged enum Schema" (#62).

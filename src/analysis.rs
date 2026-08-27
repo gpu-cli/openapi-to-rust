@@ -601,6 +601,11 @@ pub enum SchemaType {
         properties: BTreeMap<String, PropertyInfo>,
         required: HashSet<String>,
         additional_properties: ObjectAdditionalProperties,
+        /// A union the schema declares *alongside* its own properties —
+        /// `{properties: {...}, anyOf: [...]}` — meaning "these fields, and
+        /// one of these shapes". Held in a `#[serde(flatten)]` field so both
+        /// halves survive; `None` for a plain object.
+        variant: Option<SchemaRef>,
     },
     /// Discriminated union (oneOf + discriminator)
     DiscriminatedUnion {
@@ -2267,6 +2272,22 @@ impl SchemaAnalyzer {
                         default: details.default.clone(),
                     });
                 }
+                if let Some(schema_type) = self.analyze_object_with_variants(
+                    schema,
+                    any_of,
+                    schema_name,
+                    &mut dependencies,
+                )? {
+                    return Ok(AnalyzedSchema {
+                        name: schema_name.to_string(),
+                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                        schema_type,
+                        dependencies,
+                        nullable,
+                        description,
+                        default: details.default.clone(),
+                    });
+                }
                 // Handle anyOf patterns (nullable vs flexible union vs discriminated)
                 self.analyze_anyof_union(
                     any_of,
@@ -2282,6 +2303,13 @@ impl SchemaAnalyzer {
             } => {
                 if one_of.is_empty() {
                     self.analyze_empty_union(schema, &mut dependencies)?
+                } else if let Some(schema_type) = self.analyze_object_with_variants(
+                    schema,
+                    one_of,
+                    schema_name,
+                    &mut dependencies,
+                )? {
+                    schema_type
                 } else {
                     // Handle oneOf discriminated unions
                     self.analyze_oneof_union(
@@ -2427,8 +2455,20 @@ impl SchemaAnalyzer {
             for (prop_name, prop_schema) in props {
                 // Check if this property is a union that needs a named type
                 let prop_type = if let Schema::AnyOf { any_of, .. } = prop_schema {
-                    // First check if this should be a dynamic JSON pattern
-                    if self.should_use_dynamic_json(prop_schema) {
+                    // The union may sit alongside the property's own
+                    // properties, or constrain only which of them are
+                    // required — OpenAI's `tool_resources.file_search` is
+                    // `{properties: {...}, anyOf: [{required: [a]}, {required: [b]}]}`.
+                    if Self::union_only_constrains_requiredness(any_of) {
+                        self.analyze_empty_union(prop_schema, dependencies)?
+                    } else if let Some(with_variants) = self.analyze_object_with_variants(
+                        prop_schema,
+                        any_of,
+                        &format!("{owner_name}{}", self.to_pascal_case(prop_name)),
+                        dependencies,
+                    )? {
+                        with_variants
+                    } else if self.should_use_dynamic_json(prop_schema) {
                         // This is a dynamic JSON pattern, use serde_json::Value directly
                         self.untyped_value(
                             self.untyped_context(prop_name),
@@ -2686,6 +2726,7 @@ impl SchemaAnalyzer {
 
         Ok(SchemaType::Object {
             properties: property_info,
+            variant: None,
             required,
             additional_properties,
         })
@@ -3329,6 +3370,7 @@ impl SchemaAnalyzer {
                 properties: merged_properties,
                 required: merged_required,
                 additional_properties: ObjectAdditionalProperties::Forbidden,
+                variant: None,
             })
         } else {
             // Fall back to composition if we couldn't merge
@@ -4660,6 +4702,89 @@ impl SchemaAnalyzer {
             }
         }
         changed.then_some(expanded)
+    }
+
+    /// Analyze a schema that declares its own `properties` *and* a union.
+    ///
+    /// `{properties: {...}, anyOf: [A, B]}` means "these fields, and one of
+    /// these shapes" — Cloudflare's DLP entries and OpenAI's `file_search`
+    /// resources are written this way. Neither half can be dropped: reading
+    /// only the union loses the declared fields, and reading only the object
+    /// loses the alternatives, which is why this used to generate
+    /// `serde_json::Value`.
+    ///
+    /// The object is generated as a struct and the union as its own enum, held
+    /// in a `#[serde(flatten)]` field. Returns `None` when the schema has no
+    /// properties of its own, leaving plain unions to the union analyzers.
+    fn analyze_object_with_variants(
+        &mut self,
+        schema: &Schema,
+        branches: &[Schema],
+        schema_name: &str,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<Option<SchemaType>> {
+        let details = schema.details();
+        if details.properties.as_ref().is_none_or(BTreeMap::is_empty) || branches.is_empty() {
+            return Ok(None);
+        }
+        // A nullable wrapper is not a variant set, and requiredness-only
+        // branches are handled before this.
+        if schema.is_nullable_pattern() || Self::union_only_constrains_requiredness(branches) {
+            return Ok(None);
+        }
+
+        let base = self.analyze_object_schema(schema, dependencies)?;
+        let SchemaType::Object {
+            properties,
+            required,
+            additional_properties,
+            ..
+        } = base
+        else {
+            return Ok(None);
+        };
+
+        let variant_name = self.unique_hoisted_name(schema_name, "Variant");
+        let variant_type = self.analyze_anyof_union(
+            branches,
+            schema.discriminator(),
+            dependencies,
+            &variant_name,
+        )?;
+        // If the union itself has no representation, keep the object rather
+        // than flattening something untyped into it.
+        if matches!(variant_type, SchemaType::Untyped { .. }) {
+            return Ok(Some(SchemaType::Object {
+                properties,
+                required,
+                additional_properties,
+                variant: None,
+            }));
+        }
+
+        self.resolved_cache.insert(
+            variant_name.clone(),
+            AnalyzedSchema {
+                name: variant_name.clone(),
+                original: Value::Null,
+                dependencies: schema_type_dependencies(&variant_type),
+                schema_type: variant_type,
+                nullable: false,
+                description: None,
+                default: None,
+            },
+        );
+        dependencies.insert(variant_name.clone());
+
+        Ok(Some(SchemaType::Object {
+            properties,
+            required,
+            additional_properties,
+            variant: Some(SchemaRef {
+                target: variant_name,
+                nullable: false,
+            }),
+        }))
     }
 
     /// Whether a union's branches constrain only which properties are
@@ -6768,6 +6893,7 @@ impl SchemaAnalyzer {
             properties,
             required,
             additional_properties,
+            ..
         } = &resolved.schema_type
         else {
             return None;
@@ -6865,6 +6991,7 @@ impl SchemaAnalyzer {
             properties,
             required,
             additional_properties,
+            ..
         } = schema_type
         else {
             return None;
