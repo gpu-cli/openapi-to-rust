@@ -196,6 +196,7 @@ fn collect_schema_type_refs(
             }
         }
         SchemaType::Reference { target } => seed(target, queue, keep),
+        SchemaType::Untyped { .. } => {}
     }
 }
 

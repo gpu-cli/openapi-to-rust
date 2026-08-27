@@ -44,12 +44,26 @@ impl serde::Serialize for Model {
     where
         S: serde::Serializer,
     {
-        let value = match self {
+        serializer.serialize_str(self.as_str())
+    }
+}
+impl Model {
+    pub fn as_str(&self) -> &str {
+        match self {
             Model::Claude3Opus => "claude-3-opus",
             Model::Claude3Sonnet => "claude-3-sonnet",
             Model::Claude3Haiku => "claude-3-haiku",
             Model::Custom(s) => s.as_str(),
-        };
-        serializer.serialize_str(value)
+        }
+    }
+}
+impl ::std::fmt::Display for Model {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for Model {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }

@@ -366,6 +366,35 @@ pub struct CodeGenerator {
     source_provenance: Option<String>,
 }
 
+/// The parts of an analyzed object a struct is generated from, bundled so the
+/// generator's entry point keeps a readable signature.
+struct ObjectShape<'a> {
+    properties: &'a BTreeMap<String, crate::analysis::PropertyInfo>,
+    required: &'a std::collections::HashSet<String>,
+    additional_properties: &'a crate::analysis::ObjectAdditionalProperties,
+    /// A union declared alongside the properties, flattened into the struct.
+    variant: Option<&'a crate::analysis::SchemaRef>,
+}
+
+/// The Rust type an untyped schema renders to.
+fn untyped_rust_type(shape: crate::analysis::UntypedShape) -> &'static str {
+    use crate::analysis::UntypedShape;
+    match shape {
+        UntypedShape::Value => "serde_json::Value",
+        UntypedShape::ValueArray => "Vec<serde_json::Value>",
+        UntypedShape::ValueMap => "std::collections::BTreeMap<String, serde_json::Value>",
+    }
+}
+
+fn untyped_tokens(shape: crate::analysis::UntypedShape) -> TokenStream {
+    use crate::analysis::UntypedShape;
+    match shape {
+        UntypedShape::Value => quote! { serde_json::Value },
+        UntypedShape::ValueArray => quote! { Vec<serde_json::Value> },
+        UntypedShape::ValueMap => quote! { std::collections::BTreeMap<String, serde_json::Value> },
+    }
+}
+
 impl CodeGenerator {
     pub fn new(config: GeneratorConfig) -> Self {
         Self {
@@ -1446,11 +1475,15 @@ impl CodeGenerator {
                 properties,
                 required,
                 additional_properties,
+                variant,
             } => self.generate_struct(
                 schema,
-                properties,
-                required,
-                additional_properties,
+                ObjectShape {
+                    properties,
+                    required,
+                    additional_properties,
+                    variant: variant.as_ref(),
+                },
                 analysis,
                 type_context,
             ),
@@ -1501,6 +1534,9 @@ impl CodeGenerator {
                     // Same name as target, no need for alias
                     Ok(TokenStream::new())
                 }
+            }
+            SchemaType::Untyped { shape, .. } => {
+                self.generate_type_alias(schema, untyped_rust_type(*shape))
             }
             SchemaType::Tuple { element_types } => {
                 let tuple_type = self.generate_tuple_type(element_types, analysis);
@@ -1707,11 +1743,28 @@ impl CodeGenerator {
                 where
                     S: serde::Serializer,
                 {
-                    let value = match self {
+                    serializer.serialize_str(self.as_str())
+                }
+            }
+
+            impl #enum_name {
+                pub fn as_str(&self) -> &str {
+                    match self {
                         #(#match_arms_ser)*
                         #enum_name::Custom(s) => s.as_str(),
-                    };
-                    serializer.serialize_str(value)
+                    }
+                }
+            }
+
+            impl ::std::fmt::Display for #enum_name {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                    f.write_str(self.as_str())
+                }
+            }
+
+            impl AsRef<str> for #enum_name {
+                fn as_ref(&self) -> &str {
+                    self.as_str()
                 }
             }
         })
@@ -1873,15 +1926,43 @@ impl CodeGenerator {
         })
     }
 
+    /// Field name for a flattened variant union, avoiding any property the
+    /// schema already declares.
+    fn variant_field_name(
+        &self,
+        properties: &BTreeMap<String, crate::analysis::PropertyInfo>,
+    ) -> String {
+        let taken = |candidate: &str| {
+            properties
+                .keys()
+                .any(|name| self.to_rust_field_name(name) == candidate)
+        };
+        if !taken("variant") {
+            return "variant".to_string();
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("variant{suffix}");
+            if !taken(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     fn generate_struct(
         &self,
         schema: &crate::analysis::AnalyzedSchema,
-        properties: &BTreeMap<String, crate::analysis::PropertyInfo>,
-        required: &std::collections::HashSet<String>,
-        additional_properties: &crate::analysis::ObjectAdditionalProperties,
+        object: ObjectShape<'_>,
         analysis: &crate::analysis::SchemaAnalysis,
         type_context: &TypeGenerationContext<'_>,
     ) -> Result<TokenStream> {
+        let ObjectShape {
+            properties,
+            required,
+            additional_properties,
+            variant,
+        } = object;
         let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
         let emitted_properties = self.emitted_object_properties(
             &schema.name,
@@ -1954,6 +2035,20 @@ impl CodeGenerator {
             }
         }
 
+        // A schema that declares `properties` *and* a union means "these
+        // fields, and one of these shapes". The union rides in a flattened
+        // field so both halves round-trip: serde reads the declared properties
+        // and hands the remaining keys to the variant enum.
+        if let Some(variant) = variant {
+            let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
+            let variant_field = format_ident!("{}", self.variant_field_name(properties));
+            fields.push(quote! {
+                /// The variant this value takes, alongside the fields above.
+                #[serde(flatten)]
+                pub #variant_field: #variant_type,
+            });
+        }
+
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
         } else {
@@ -1965,9 +2060,12 @@ impl CodeGenerator {
         // additional-properties map (when present) is empty by default. We do
         // not invent values for required data, even when the Rust type itself
         // happens to implement Default.
-        let can_derive_default = emitted_properties
-            .iter()
-            .all(|property| !property.is_required);
+        // A flattened variant is one of several shapes, and picking one would
+        // invent data the same way a required field would.
+        let can_derive_default = variant.is_none()
+            && emitted_properties
+                .iter()
+                .all(|property| !property.is_required);
 
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
@@ -1990,6 +2088,7 @@ impl CodeGenerator {
         };
 
         let builder = if type_context.index.request_body_roots.contains(&schema.name)
+            && variant.is_none()
             && emitted_properties
                 .iter()
                 .any(|property| property.is_required)
@@ -2733,6 +2832,7 @@ impl CodeGenerator {
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)
             }
+            SchemaType::Untyped { shape, .. } => untyped_tokens(*shape),
             _ => {
                 // Fallback for complex types
                 quote! { serde_json::Value }
@@ -3471,6 +3571,7 @@ impl CodeGenerator {
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)
             }
+            SchemaType::Untyped { shape, .. } => untyped_tokens(*shape),
             _ => {
                 // Fallback for complex types
                 quote! { serde_json::Value }

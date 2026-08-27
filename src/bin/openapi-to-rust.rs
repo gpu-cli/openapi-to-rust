@@ -53,6 +53,10 @@ enum Commands {
         /// Exit unsuccessfully when generated files are missing or stale.
         #[arg(long, conflicts_with = "dry_run")]
         check: bool,
+        /// Report every field that generated `serde_json::Value`, grouped by
+        /// why, so an untyped result can be traced back to the schema.
+        #[arg(long)]
+        report_untyped: bool,
         /// Suppress successful human-readable output.
         #[arg(long, conflicts_with = "json")]
         quiet: bool,
@@ -210,6 +214,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             types_conservative,
             dry_run,
             check,
+            report_untyped,
             quiet,
             json,
         } => run_generate(GenerateArgs {
@@ -221,6 +226,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             types_conservative,
             dry_run,
             check,
+            report_untyped,
             quiet,
             json,
         }),
@@ -280,6 +286,7 @@ struct GenerateArgs {
     types_conservative: bool,
     dry_run: bool,
     check: bool,
+    report_untyped: bool,
     quiet: bool,
     json: bool,
 }
@@ -294,6 +301,72 @@ struct InitArgs {
     dry_run: bool,
     quiet: bool,
     json: bool,
+}
+
+/// Print the untyped-output census for one spec.
+///
+/// `serde_json::Value` in generated code has two very different meanings: the
+/// schema said "any JSON", or the schema said something the generator failed to
+/// carry through. The report separates them, because only the second kind is a
+/// defect worth chasing.
+fn report_untyped(
+    analysis: &openapi_to_rust::SchemaAnalysis,
+    as_json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use openapi_to_rust::analysis::{UntypedReason, UntypedVerdict};
+    use std::collections::BTreeMap;
+
+    let untyped = analysis.untyped_fields();
+
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&untyped)?);
+        return Ok(());
+    }
+
+    if untyped.is_empty() {
+        println!("untyped: none — every generated field carries a type");
+        return Ok(());
+    }
+
+    let mut by_reason: BTreeMap<UntypedReason, Vec<&str>> = BTreeMap::new();
+    for finding in &untyped {
+        by_reason
+            .entry(finding.reason)
+            .or_default()
+            .push(finding.context.as_str());
+    }
+
+    let mut rows = by_reason.into_iter().collect::<Vec<_>>();
+    rows.sort_by_key(|(reason, contexts)| (std::cmp::Reverse(contexts.len()), *reason));
+
+    let recoverable = untyped
+        .iter()
+        .filter(|finding| finding.reason.verdict() == UntypedVerdict::Recoverable)
+        .count();
+    println!(
+        "untyped: {} field(s), {recoverable} of them recoverable",
+        untyped.len()
+    );
+    for (reason, contexts) in rows {
+        let verdict = match reason.verdict() {
+            UntypedVerdict::Faithful => "faithful",
+            UntypedVerdict::Recoverable => "recoverable",
+            UntypedVerdict::Unknown => "unclassified",
+        };
+        println!(
+            "  {:5}  {:<28} {:<12} e.g. {}",
+            contexts.len(),
+            format!("{reason:?}"),
+            verdict,
+            contexts
+                .iter()
+                .take(3)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -387,6 +460,10 @@ fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn std::error::Error>> {
             .collect(),
         warning,
     };
+
+    if args.report_untyped {
+        report_untyped(&analysis, args.json)?;
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&summary)?);

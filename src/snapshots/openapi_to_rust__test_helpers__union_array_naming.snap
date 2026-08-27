@@ -30,16 +30,16 @@ pub enum RequestToolResultBlockContentItemUnion {
 pub struct RequestTextBlock {
     pub text: String,
 }
-///Array variant in union
-pub type RequestToolResultBlockContentArray = Vec<
-    RequestToolResultBlockContentItemUnion,
->;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum RequestToolResultBlockContent {
     String(String),
     RequestToolResultBlockContentArray(RequestToolResultBlockContentArray),
 }
+///Array variant in union
+pub type RequestToolResultBlockContentArray = Vec<
+    RequestToolResultBlockContentItemUnion,
+>;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RequestImageBlock {
     pub source: RequestImageBlockSource,

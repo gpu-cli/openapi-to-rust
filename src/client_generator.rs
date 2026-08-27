@@ -989,6 +989,7 @@ impl CodeGenerator {
                 properties,
                 required,
                 additional_properties,
+                ..
             } if !self.is_discriminated_variant(resolved_name, analysis) => {
                 let emitted = self.emitted_object_properties(
                     resolved_name,
@@ -1071,6 +1072,7 @@ impl CodeGenerator {
                 properties,
                 required,
                 additional_properties,
+                ..
             } if !self.is_discriminated_variant(schema_name, analysis) => {
                 for field in self.emitted_object_properties(
                     schema_name,
@@ -2535,6 +2537,7 @@ impl CodeGenerator {
             properties,
             required,
             additional_properties,
+            ..
         } = &resolved_schema.schema_type
         else {
             let message =

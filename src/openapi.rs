@@ -136,6 +136,11 @@ pub enum Schema {
     },
     /// OneOf union
     OneOf {
+        /// Some specs declare the branch type alongside the union, the way
+        /// `anyOf` does — Discord ships `{type: integer, oneOf: []}`. Modeling
+        /// it keeps that type reachable instead of leaving it in `extra`.
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        schema_type: Option<SchemaType>,
         #[serde(rename = "oneOf")]
         one_of: Vec<Schema>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -700,6 +705,21 @@ impl Schema {
         }
     }
 
+    /// The `type` keyword as written, including on a union or composition.
+    ///
+    /// [`Self::schema_type`] deliberately reports only standalone typed
+    /// schemas, because most callers ask it in order to pick a Rust type for a
+    /// leaf. A union that also declares `type` needs the declared value —
+    /// notably when the branch list is empty and the union constrains nothing.
+    pub fn declared_type(&self) -> Option<&SchemaType> {
+        match self {
+            Schema::AnyOf { schema_type, .. }
+            | Schema::AllOf { schema_type, .. }
+            | Schema::OneOf { schema_type, .. } => schema_type.as_ref(),
+            other => other.schema_type(),
+        }
+    }
+
     /// Gets all non-null types from `type: [...]` (unlike
     /// [Schema::schema_type] that handles the null value). Returns `None` if
     /// the given [Schema::TypedMulti] has either only one non-null value, or if
@@ -834,30 +854,80 @@ impl Schema {
 
     /// Check if this appears to be a nullable pattern (anyOf or oneOf with null)
     pub fn is_nullable_pattern(&self) -> bool {
-        let variants = match self {
-            Schema::AnyOf { any_of, .. } => any_of,
-            Schema::OneOf { one_of, .. } => one_of,
-            _ => return false,
-        };
-        variants.len() == 2
-            && variants
-                .iter()
-                .any(|s| matches!(s.schema_type(), Some(SchemaType::Null)))
+        self.non_null_variant().is_some()
     }
 
-    /// Get the non-null variant from a nullable pattern
+    /// The one meaningful branch of a two-branch union whose other branch
+    /// exists only to admit `null`.
     pub fn non_null_variant(&self) -> Option<&Schema> {
-        if !self.is_nullable_pattern() {
-            return None;
-        }
         let variants = match self {
             Schema::AnyOf { any_of, .. } => any_of,
             Schema::OneOf { one_of, .. } => one_of,
             _ => return None,
         };
-        variants
-            .iter()
-            .find(|s| !matches!(s.schema_type(), Some(SchemaType::Null)))
+        let [first, second] = variants.as_slice() else {
+            return None;
+        };
+        match (
+            Self::is_null_marker_beside(first, second),
+            Self::is_null_marker_beside(second, first),
+        ) {
+            (true, false) => Some(second),
+            (false, true) => Some(first),
+            // Two markers describe nothing, and no marker is not this pattern.
+            _ => None,
+        }
+    }
+
+    /// Whether `candidate` exists only to admit `null` alongside `sibling`.
+    ///
+    /// 3.1 spells that `type: "null"`, which says so on its own. Tooling that
+    /// predates it spells it as an empty object carrying `nullable: true`, and
+    /// that spelling is ambiguous: read literally,
+    /// `anyOf: [X, {type: object, nullable: true}]` is "X, any object, or
+    /// null".
+    ///
+    /// The empty-object spelling is read as a null marker only beside a
+    /// `$ref`, which is the shape
+    /// OData emits for every navigation property and where the intent is not
+    /// in doubt. Beside a scalar the literal reading wins — the corpus has 33
+    /// `anyOf: [{type: string, nullable: true}, {type: object, nullable: true}]`
+    /// fields, and typing those as `Option<String>` would fail to deserialize
+    /// the objects the schema plainly allows.
+    fn is_null_marker_beside(candidate: &Schema, sibling: &Schema) -> bool {
+        matches!(candidate.schema_type(), Some(SchemaType::Null))
+            || (candidate.is_empty_nullable_object() && sibling.reference().is_some())
+    }
+
+    /// An object schema carrying `nullable: true` and constraining nothing.
+    fn is_empty_nullable_object(&self) -> bool {
+        let details = self.details();
+        if !details.is_nullable() {
+            return false;
+        }
+        if !matches!(
+            self.schema_type(),
+            Some(SchemaType::Object) | Some(SchemaType::Null) | None
+        ) {
+            return false;
+        }
+        self.reference().is_none()
+            && details.properties.as_ref().is_none_or(BTreeMap::is_empty)
+            && details.additional_properties.is_none()
+            && details.enum_values.is_none()
+            && details.const_value.is_none()
+            && details.pattern_properties.is_none()
+            && details.items.is_none()
+            && details.prefix_items.is_none()
+            && self.all_of_len() == 0
+    }
+
+    /// Number of `allOf` members, for shapes that only matter when empty.
+    fn all_of_len(&self) -> usize {
+        match self {
+            Schema::AllOf { all_of, .. } => all_of.len(),
+            _ => 0,
+        }
     }
 
     /// Infer schema type from structure if not explicitly set

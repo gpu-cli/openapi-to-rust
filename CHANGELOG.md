@@ -23,6 +23,29 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- Schemas that carried enough information to type no longer degrade to
+  `serde_json::Value`. Across the 57-spec corpus this types 3,341 fields that
+  were previously opaque (#62):
+  - `anyOf: [$ref, {type: object, nullable: true}]` — how OData spells "that
+    type, or null" — becomes `Option<T>` instead of an untyped union (2,127
+    fields in Microsoft Graph alone);
+  - an inline object, union, enum, or merged `allOf` in a field or element
+    position is hoisted to a named type instead of being dropped by the
+    generator, which could not render one inline;
+  - `allOf` with a single member takes that member's type, and `allOf` inside
+    array items is analyzed instead of ignored;
+  - a `$ref` to any local JSON Pointer resolves — a parameter's schema, one
+    member of another schema's composition — not only
+    `#/components/schemas/<name>`;
+  - `type: null` becomes `()`, which serde reads and writes as `null`;
+  - a union whose branch list is empty takes the schema's declared type; a
+    union of one branch is that branch; branches differing only in constraints
+    share one type; branches that only alternate `required` describe the
+    object their properties declare; and branches that are local pointers are
+    expanded before the union is built;
+  - a schema declaring `properties` *and* a union — "these fields, and one of
+    these shapes" — generates the struct with the union in a
+    `#[serde(flatten)]` field, instead of discarding both halves (#65).
 - `items: false` and `items: true` — 2020-12 boolean schemas, and the canonical
   way to close a tuple — now parse instead of failing the document with "data
   did not match any variant of untagged enum Schema" (#62).
