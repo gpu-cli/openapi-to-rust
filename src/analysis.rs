@@ -3084,6 +3084,11 @@ impl SchemaAnalyzer {
                 // additionalProperties keyword as accepting any extra value.
                 // We retain the historical closed-model shape unless an
                 // undeclared required name proves that an open carrier is needed.
+                None if Self::object_shape_needs_additional_property_carrier(details) => (
+                    ObjectAdditionalProperties::Untyped,
+                    Some(untyped_required_property()),
+                    false,
+                ),
                 None => (
                     ObjectAdditionalProperties::Forbidden,
                     Some(untyped_required_property()),
@@ -3105,6 +3110,33 @@ impl SchemaAnalyzer {
             required,
             additional_properties,
         })
+    }
+
+    /// Decide when an omitted `additionalProperties` keyword still needs an
+    /// emitted catch-all map. JSON Schema leaves such objects open, but the
+    /// generator historically projected them as closed structs. Preserve the
+    /// open portion when dropping it can invalidate object-count constraints
+    /// or discard keys that the schema itself demonstrates in examples.
+    fn object_shape_needs_additional_property_carrier(
+        details: &crate::openapi::SchemaDetails,
+    ) -> bool {
+        if details.min_properties.is_some() || details.max_properties.is_some() {
+            return true;
+        }
+
+        let declared = details.properties.as_ref();
+        let has_undeclared_key = |value: &Value| {
+            value.as_object().is_some_and(|object| {
+                object
+                    .keys()
+                    .any(|key| declared.is_none_or(|properties| !properties.contains_key(key)))
+            })
+        };
+        details.example.as_ref().is_some_and(has_undeclared_key)
+            || details
+                .examples
+                .as_ref()
+                .is_some_and(|examples| examples.iter().any(has_undeclared_key))
     }
 
     /// Materialize names asserted by `required` but omitted from `properties`.
