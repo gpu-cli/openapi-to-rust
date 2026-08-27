@@ -179,6 +179,14 @@ pub fn build_round_trip_plan(
             });
             continue;
         }
+        let pointer = format!(
+            "#/{}/{}",
+            dialect.definitions_key(),
+            escape_pointer_segment(name)
+        );
+        let target = document
+            .pointer(pointer.trim_start_matches('#'))
+            .ok_or_else(|| format!("missing normalized schema at {pointer}"))?;
         let analyzed_name = component_aliases.get(name).unwrap_or(name);
         let Some(model) = analysis.schemas.get(analyzed_name) else {
             skipped.push(SkippedSchema {
@@ -187,7 +195,7 @@ pub fn build_round_trip_plan(
             });
             continue;
         };
-        if contains_required_binary_format(raw_schema, &document, 0) {
+        if contains_required_binary_format(target, &document) {
             skipped.push(SkippedSchema {
                 schema: name.clone(),
                 reason: "required format: binary is a raw-body contract, not JSON".to_string(),
@@ -195,11 +203,6 @@ pub fn build_round_trip_plan(
             continue;
         }
 
-        let pointer = format!(
-            "#/{}/{}",
-            dialect.definitions_key(),
-            escape_pointer_segment(name)
-        );
         let Some(validator) = validators.get(&pointer) else {
             skipped.push(SkippedSchema {
                 schema: name.clone(),
@@ -207,9 +210,6 @@ pub fn build_round_trip_plan(
             });
             continue;
         };
-        let target = document
-            .pointer(pointer.trim_start_matches('#'))
-            .ok_or_else(|| format!("missing normalized schema at {pointer}"))?;
         let mut samples = Vec::new();
         let mut seen = BTreeSet::new();
         for seed in 0..MAX_ATTEMPTS_PER_SCHEMA {
@@ -836,7 +836,16 @@ fn escape_pointer_segment(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
-fn contains_required_binary_format(schema: &Value, root: &Value, depth: usize) -> bool {
+fn contains_required_binary_format(schema: &Value, root: &Value) -> bool {
+    contains_required_binary_format_inner(schema, root, 0, &mut BTreeSet::new())
+}
+
+fn contains_required_binary_format_inner(
+    schema: &Value,
+    root: &Value,
+    depth: usize,
+    visited_refs: &mut BTreeSet<String>,
+) -> bool {
     if depth > MAX_SYNTHESIS_DEPTH {
         return false;
     }
@@ -846,18 +855,54 @@ fn contains_required_binary_format(schema: &Value, root: &Value, depth: usize) -
     if object.get("format").and_then(Value::as_str) == Some("binary") {
         return true;
     }
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str)
-        && let Some(target) = resolve_local_ref(root, reference)
-    {
-        return contains_required_binary_format(target, root, depth + 1);
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if !visited_refs.insert(reference.to_string()) {
+            return false;
+        }
+        let result = resolve_local_ref(root, reference).is_some_and(|target| {
+            contains_required_binary_format_inner(target, root, depth + 1, visited_refs)
+        });
+        visited_refs.remove(reference);
+        if result {
+            return true;
+        }
     }
-    if let Some(Value::Array(branches)) = object.get("allOf")
-        && branches
-            .iter()
-            .any(|branch| contains_required_binary_format(branch, root, depth + 1))
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if object
+            .get(keyword)
+            .and_then(Value::as_array)
+            .is_some_and(|branches| {
+                branches.iter().any(|branch| {
+                    contains_required_binary_format_inner(branch, root, depth + 1, visited_refs)
+                })
+            })
+        {
+            return true;
+        }
+    }
+
+    // Every produced array member is part of the model's wire value. A raw
+    // binary item therefore makes the array itself a non-JSON contract even
+    // when `minItems` permits an empty sample.
+    for keyword in ["items", "contains"] {
+        if object.get(keyword).is_some_and(|child| {
+            schema_contains_binary_format_inner(child, root, depth + 1, visited_refs)
+        }) {
+            return true;
+        }
+    }
+    if object
+        .get("prefixItems")
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|child| {
+                schema_contains_binary_format_inner(child, root, depth + 1, visited_refs)
+            })
+        })
     {
         return true;
     }
+
     let required: BTreeSet<&str> = object
         .get("required")
         .and_then(Value::as_array)
@@ -871,9 +916,93 @@ fn contains_required_binary_format(schema: &Value, root: &Value, depth: usize) -
         .is_some_and(|properties| {
             properties.iter().any(|(name, child)| {
                 required.contains(name.as_str())
-                    && contains_required_binary_format(child, root, depth + 1)
+                    && contains_required_binary_format_inner(child, root, depth + 1, visited_refs)
             })
         })
+}
+
+fn schema_contains_binary_format(schema: &Value, root: &Value) -> bool {
+    schema_contains_binary_format_inner(schema, root, 0, &mut BTreeSet::new())
+}
+
+fn schema_contains_binary_format_inner(
+    schema: &Value,
+    root: &Value,
+    depth: usize,
+    visited_refs: &mut BTreeSet<String>,
+) -> bool {
+    if depth > MAX_SYNTHESIS_DEPTH {
+        return false;
+    }
+    let Value::Object(object) = schema else {
+        return false;
+    };
+    if object.get("format").and_then(Value::as_str) == Some("binary") {
+        return true;
+    }
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if !visited_refs.insert(reference.to_string()) {
+            return false;
+        }
+        let result = resolve_local_ref(root, reference).is_some_and(|target| {
+            schema_contains_binary_format_inner(target, root, depth + 1, visited_refs)
+        });
+        visited_refs.remove(reference);
+        if result {
+            return true;
+        }
+    }
+
+    for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if object
+            .get(keyword)
+            .and_then(Value::as_array)
+            .is_some_and(|schemas| {
+                schemas.iter().any(|child| {
+                    schema_contains_binary_format_inner(child, root, depth + 1, visited_refs)
+                })
+            })
+        {
+            return true;
+        }
+    }
+    for keyword in [
+        "items",
+        "contains",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+    ] {
+        if object.get(keyword).is_some_and(|child| {
+            schema_contains_binary_format_inner(child, root, depth + 1, visited_refs)
+        }) {
+            return true;
+        }
+    }
+    for keyword in [
+        "properties",
+        "patternProperties",
+        "dependentSchemas",
+        "$defs",
+        "definitions",
+    ] {
+        if object
+            .get(keyword)
+            .and_then(Value::as_object)
+            .is_some_and(|schemas| {
+                schemas.values().any(|child| {
+                    schema_contains_binary_format_inner(child, root, depth + 1, visited_refs)
+                })
+            })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 struct SyntheticGenerator<'a> {
@@ -908,13 +1037,16 @@ impl<'a> SyntheticGenerator<'a> {
             _ => return Some(any_value(seed, depth)),
         }
         let object = schema.as_object()?;
+        let contains_raw_binary = schema_contains_binary_format(schema, self.root);
 
-        if seed == 0
+        if !contains_raw_binary
+            && seed == 0
             && let Some(default) = object.get("default")
         {
             return Some(default.clone());
         }
-        if seed == 1
+        if !contains_raw_binary
+            && seed == 1
             && let Some(example) = object
                 .get("examples")
                 .and_then(Value::as_array)
@@ -999,6 +1131,9 @@ impl<'a> SyntheticGenerator<'a> {
         }
         for offset in 0..branches.len() {
             let index = (seed + offset) % branches.len();
+            if schema_contains_binary_format(&branches[index], self.root) {
+                continue;
+            }
             if let Some(value) = self.generate(&branches[index], seed + offset + 2, depth + 1, refs)
             {
                 return Some(value);
@@ -1039,7 +1174,9 @@ impl<'a> SyntheticGenerator<'a> {
 
         let optional: Vec<_> = properties
             .iter()
-            .filter(|(name, _)| !required.contains(*name))
+            .filter(|(name, child)| {
+                !required.contains(*name) && !schema_contains_binary_format(child, self.root)
+            })
             .collect();
         let optional_count = if optional.is_empty() {
             0
@@ -1055,6 +1192,7 @@ impl<'a> SyntheticGenerator<'a> {
         if seed % 4 == 3
             && let Some(additional) = object.get("additionalProperties")
             && additional != &Value::Bool(false)
+            && !schema_contains_binary_format(additional, self.root)
             && let Some(value) = self.generate(additional, seed + 13, depth + 1, refs)
         {
             output.insert(format!("synthetic_extra_{seed}"), value);
@@ -1178,6 +1316,9 @@ fn apply_dependent_required(
                 continue;
             }
             let child = properties.get(name).unwrap_or(&Value::Bool(true));
+            if schema_contains_binary_format(child, generator.root) {
+                return None;
+            }
             let value = generator.generate(child, seed + index + 41, depth + 1, refs)?;
             output.insert(name.to_string(), value);
         }
@@ -1429,6 +1570,127 @@ mod tests {
         assert_eq!(explicit_non_object["type"], "string");
         let unconstrained = normalize_schema(&json!({"description": "any"}), Dialect::Draft202012);
         assert!(unconstrained.get("type").is_none());
+    }
+
+    #[test]
+    fn raw_binary_detection_follows_refs_compositions_and_avoids_cycles() {
+        let document = json!({
+            "$defs": {
+                "Binary": { "type": "string", "format": "binary" },
+                "BinaryAlias": {
+                    "allOf": [{ "$ref": "#/$defs/Binary" }]
+                },
+                "RequiredUpload": {
+                    "type": "object",
+                    "required": ["file", "name"],
+                    "properties": {
+                        "file": {
+                            "oneOf": [
+                                { "$ref": "#/$defs/BinaryAlias" },
+                                { "type": "string", "format": "uri" }
+                            ]
+                        },
+                        "name": { "type": "string" }
+                    }
+                },
+                "OptionalUpload": {
+                    "type": "object",
+                    "required": ["name"],
+                    "default": { "name": "default", "file": "raw-default" },
+                    "examples": [{ "name": "example", "file": "raw-example" }],
+                    "properties": {
+                        "file": { "$ref": "#/$defs/BinaryAlias" },
+                        "name": { "type": "string" }
+                    }
+                },
+                "CycleA": { "$ref": "#/$defs/CycleB" },
+                "CycleB": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/CycleA" },
+                        { "type": "string" }
+                    ]
+                }
+            }
+        });
+
+        assert!(schema_contains_binary_format(
+            &document["$defs"]["BinaryAlias"],
+            &document
+        ));
+        assert!(contains_required_binary_format(
+            &document["$defs"]["RequiredUpload"],
+            &document
+        ));
+        assert!(!contains_required_binary_format(
+            &document["$defs"]["OptionalUpload"],
+            &document
+        ));
+        assert!(!schema_contains_binary_format(
+            &document["$defs"]["CycleA"],
+            &document
+        ));
+
+        let generator = SyntheticGenerator::new(&document);
+        for seed in 0..4 {
+            let generated = generator
+                .generate(
+                    &document["$defs"]["OptionalUpload"],
+                    seed,
+                    0,
+                    &mut Vec::new(),
+                )
+                .expect("optional binary fields must not block safe synthesis");
+            assert!(generated.get("name").is_some(), "{generated}");
+            assert!(generated.get("file").is_none(), "{generated}");
+        }
+    }
+
+    #[test]
+    fn round_trip_plan_skips_required_binary_but_keeps_optional_siblings() {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "raw binary planning", "version": "1" },
+            "paths": {},
+            "components": { "schemas": {
+                "Binary": { "type": "string", "format": "binary" },
+                "RequiredUpload": {
+                    "type": "object",
+                    "required": ["file", "name"],
+                    "properties": {
+                        "file": {
+                            "oneOf": [
+                                { "$ref": "#/components/schemas/Binary" },
+                                { "type": "string", "format": "uri" }
+                            ]
+                        },
+                        "name": { "type": "string" }
+                    }
+                },
+                "OptionalUpload": {
+                    "type": "object",
+                    "required": ["name"],
+                    "examples": [{ "name": "example", "file": "raw-example" }],
+                    "properties": {
+                        "file": { "$ref": "#/components/schemas/Binary" },
+                        "name": { "type": "string" }
+                    }
+                }
+            } }
+        });
+
+        let plan = build_round_trip_plan(&spec, 4).expect("binary-aware plan");
+        let skipped = plan
+            .skipped
+            .iter()
+            .map(|entry| entry.schema.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(skipped, BTreeSet::from(["Binary", "RequiredUpload"]));
+        assert_eq!(plan.stats.tested_schemas, 1);
+        assert_eq!(plan.stats.synthesis_skipped_schemas, 2);
+        assert!(
+            plan.source
+                .contains("crate::generated::types::OptionalUpload")
+        );
     }
 
     #[test]
