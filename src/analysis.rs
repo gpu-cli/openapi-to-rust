@@ -103,6 +103,52 @@ pub struct SchemaAnalysis {
     pub validation_context: ValidationContext,
 }
 
+impl SchemaType {
+    /// Whether the generator can render this type directly in a field or
+    /// element position.
+    ///
+    /// The other variants name something that must be generated as its own
+    /// item — a struct, an enum, a union — so a field can only hold them by
+    /// reference. Analysis hoists those and leaves a
+    /// [`SchemaType::Reference`]; anything that reaches the generator
+    /// un-hoisted is rendered as `serde_json::Value`, losing the type the
+    /// schema had. [`UntypedReason::inline_drop`] names those cases so the
+    /// census can count them.
+    pub fn renders_inline(&self) -> bool {
+        match self {
+            Self::Primitive { .. }
+            | Self::Reference { .. }
+            | Self::Array { .. }
+            | Self::Tuple { .. }
+            | Self::Untyped { .. } => true,
+            Self::Object { .. }
+            | Self::StringEnum { .. }
+            | Self::ExtensibleEnum { .. }
+            | Self::DiscriminatedUnion { .. }
+            | Self::Union { .. }
+            | Self::Composition { .. } => false,
+        }
+    }
+}
+
+impl UntypedReason {
+    /// The reason a non-inline-renderable type reaching a field position gets
+    /// dropped to `serde_json::Value`.
+    pub fn inline_drop(schema_type: &SchemaType) -> Option<Self> {
+        match schema_type {
+            SchemaType::Composition { .. } => Some(Self::InlineCompositionDropped),
+            SchemaType::Union { .. } | SchemaType::DiscriminatedUnion { .. } => {
+                Some(Self::InlineUnionDropped)
+            }
+            SchemaType::Object { .. } => Some(Self::InlineObjectDropped),
+            SchemaType::StringEnum { .. } | SchemaType::ExtensibleEnum { .. } => {
+                Some(Self::InlineEnumDropped)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Convert any `serde_json::Value` still carried as a stringly-typed
 /// `Primitive` into [`SchemaType::Untyped`].
 ///
@@ -201,9 +247,21 @@ fn collect_untyped(
             ..
         } => {
             for (property_name, property) in properties {
+                let property_context = format!("{context}.{property_name}");
+                // A type the generator cannot render inline is dropped whole:
+                // count it here rather than descending into a type that will
+                // never reach the output.
+                if let Some(reason) = UntypedReason::inline_drop(&property.schema_type) {
+                    findings.push(UntypedFinding {
+                        context: property_context,
+                        shape: UntypedShape::Value,
+                        reason,
+                    });
+                    continue;
+                }
                 collect_untyped(
                     &property.schema_type,
-                    &format!("{context}.{property_name}"),
+                    &property_context,
                     findings,
                     depth + 1,
                 );
@@ -224,7 +282,16 @@ fn collect_untyped(
             }
         }
         SchemaType::Array { item_type } => {
-            collect_untyped(item_type, &format!("{context}[]"), findings, depth + 1)
+            let element_context = format!("{context}[]");
+            if let Some(reason) = UntypedReason::inline_drop(item_type) {
+                findings.push(UntypedFinding {
+                    context: element_context,
+                    shape: UntypedShape::Value,
+                    reason,
+                });
+            } else {
+                collect_untyped(item_type, &element_context, findings, depth + 1);
+            }
         }
         SchemaType::Tuple { element_types } => {
             for (index, element_type) in element_types.iter().enumerate() {
@@ -323,6 +390,17 @@ pub enum UntypedReason {
     UnsupportedTypeKeyword,
     /// A `$ref` that analysis could not resolve to a generated schema.
     UnresolvedReference,
+    /// An `allOf` composition sitting in a field position. Analysis did not
+    /// merge or hoist it, and a field cannot hold one, so the generator emits
+    /// `serde_json::Value` — dropping a type the schema fully described. A
+    /// single-branch `allOf` around a scalar is the common shape.
+    InlineCompositionDropped,
+    /// A union in a field position that was never hoisted to a named enum.
+    InlineUnionDropped,
+    /// An inline object in a field position that was never hoisted to a struct.
+    InlineObjectDropped,
+    /// An inline enum in a field position that was never hoisted.
+    InlineEnumDropped,
     /// A `oneOf`/`anyOf` branch that mapped to an untyped value, so the
     /// generated union carries a `serde_json::Value` variant. Whether that is
     /// faithful depends on the branch, which the analyzed type no longer says.
@@ -345,6 +423,12 @@ impl UntypedReason {
             // positional items permit extras of any type: both are the spec's
             // choice, not a dropped constraint.
             Self::ArrayWithoutItems | Self::OpenPositionalItems => UntypedVerdict::Faithful,
+            // The schema described a type that the generator then dropped
+            // because nothing hoisted it out of the field position.
+            Self::InlineCompositionDropped
+            | Self::InlineUnionDropped
+            | Self::InlineObjectDropped
+            | Self::InlineEnumDropped => UntypedVerdict::Recoverable,
             // These carried type information that did not survive analysis.
             Self::UnrepresentableUnion
             | Self::UnrepresentableComposition
@@ -1351,6 +1435,9 @@ pub struct SchemaAnalyzer {
     /// config; threaded from `GeneratorConfig.types` via
     /// [`Self::with_type_mapper`].
     type_mapper: TypeMapper,
+    /// Pointer targets currently being expanded, so a node that references
+    /// itself through a pointer stops at a reference instead of recursing.
+    resolving_pointers: HashSet<String>,
 }
 
 impl SchemaAnalyzer {
@@ -1421,6 +1508,7 @@ impl SchemaAnalyzer {
             current_schema_name: None,
             component_parameters,
             type_mapper,
+            resolving_pointers: HashSet::new(),
         })
     }
 
@@ -2027,10 +2115,10 @@ impl SchemaAnalyzer {
 
         let schema_type = match schema {
             Schema::Reference { reference, .. } => {
-                // For real-world refs we can't resolve to a known schema name
-                // (e.g. pagerduty's `#/components/parameters/foo/schema`),
-                // fall back to opaque JSON instead of failing whole-document
-                // generation. The rest of the spec is usually unaffected.
+                // A ref that names no component schema may still address a node
+                // in this document — a parameter's schema, a response body, one
+                // member of a composition. Resolve the pointer before giving up
+                // and typing the field as opaque JSON.
                 match self.extract_schema_name(reference) {
                     Some(name) => {
                         let target = name.to_string();
@@ -2038,14 +2126,21 @@ impl SchemaAnalyzer {
                         SchemaType::Reference { target }
                     }
                     None => {
-                        eprintln!(
-                            "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
-                            reference
-                        );
-                        self.untyped_value(
-                            format!("$ref {reference}"),
-                            UntypedReason::UnresolvedReference,
-                        )
+                        let reference = reference.clone();
+                        if let Some(resolved) =
+                            self.resolve_pointer_schema(&reference, &mut dependencies)?
+                        {
+                            resolved
+                        } else {
+                            eprintln!(
+                                "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
+                                reference
+                            );
+                            self.untyped_value(
+                                format!("$ref {reference}"),
+                                UntypedReason::UnresolvedReference,
+                            )
+                        }
                     }
                 }
             }
@@ -2099,6 +2194,17 @@ impl SchemaAnalyzer {
                 discriminator,
                 ..
             } => {
+                if Self::union_only_constrains_requiredness(any_of) {
+                    return Ok(AnalyzedSchema {
+                        name: schema_name.to_string(),
+                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                        schema_type: self.analyze_empty_union(schema, &mut dependencies)?,
+                        dependencies,
+                        nullable,
+                        description,
+                        default: details.default.clone(),
+                    });
+                }
                 // Handle anyOf patterns (nullable vs flexible union vs discriminated)
                 self.analyze_anyof_union(
                     any_of,
@@ -2112,13 +2218,17 @@ impl SchemaAnalyzer {
                 discriminator,
                 ..
             } => {
-                // Handle oneOf discriminated unions
-                self.analyze_oneof_union(
-                    one_of,
-                    discriminator.as_ref(),
-                    schema_name,
-                    &mut dependencies,
-                )?
+                if one_of.is_empty() {
+                    self.analyze_empty_union(schema, &mut dependencies)?
+                } else {
+                    // Handle oneOf discriminated unions
+                    self.analyze_oneof_union(
+                        one_of,
+                        discriminator.as_ref(),
+                        schema_name,
+                        &mut dependencies,
+                    )?
+                }
             }
             Schema::AllOf { all_of, .. } => {
                 // Handle allOf composition (schema inheritance)
@@ -2143,6 +2253,12 @@ impl SchemaAnalyzer {
                                 values: details.string_enum_values().unwrap_or_default(),
                             }
                         }
+                        // `type: null` admits exactly one value; Rust spells
+                        // that `()`, which serde reads from and writes as null.
+                        OpenApiSchemaType::Null => SchemaType::Primitive {
+                            rust_type: self.type_mapper.null_unit().rust_type,
+                            serde_with: None,
+                        },
                         _ => self.untyped_value(
                             self.untyped_context(""),
                             UntypedReason::UnsupportedTypeKeyword,
@@ -2215,10 +2331,12 @@ impl SchemaAnalyzer {
                     self.analyze_object_schema(schema, dependencies)?
                 }
             }
-            _ => self.untyped_value(
-                self.untyped_context(""),
-                UntypedReason::UnsupportedTypeKeyword,
-            ),
+            // `type: null` admits exactly one value. Rust spells that `()`,
+            // which serde reads from and writes as `null`.
+            OpenApiSchemaType::Null => SchemaType::Primitive {
+                rust_type: self.type_mapper.null_unit().rust_type,
+                serde_with: None,
+            },
         })
     }
 
@@ -2236,6 +2354,12 @@ impl SchemaAnalyzer {
             .unwrap_or_default();
 
         let mut property_info = BTreeMap::new();
+        // Names hoisted property types after the schema being analyzed, which
+        // is what `{Parent}{Property}` reads as in generated code.
+        let owner_name = self
+            .current_schema_name
+            .clone()
+            .unwrap_or_else(|| "Inline".to_string());
 
         if let Some(props) = properties {
             for (prop_name, prop_schema) in props {
@@ -2344,6 +2468,16 @@ impl SchemaAnalyzer {
                             Some(prop_name),
                             dependencies,
                         )?;
+                        let owner_name = self
+                            .current_schema_name
+                            .clone()
+                            .unwrap_or_else(|| "Inline".to_string());
+                        let unwrapped = self.hoist_inline_property_type(
+                            &owner_name,
+                            prop_name,
+                            unwrapped,
+                            dependencies,
+                        );
                         let prop_details = prop_schema.details();
                         let prop_nullable = true;
                         let prop_description = prop_details.description.clone();
@@ -2424,6 +2558,13 @@ impl SchemaAnalyzer {
                         dependencies,
                     )?
                 };
+
+                let prop_type = self.hoist_inline_property_type(
+                    &owner_name,
+                    prop_name,
+                    prop_type,
+                    dependencies,
+                );
 
                 let prop_details = prop_schema.details();
                 // Every nullability form, via one helper — see is_nullable_any.
@@ -2579,6 +2720,13 @@ impl SchemaAnalyzer {
                     return Ok(SchemaType::Reference { target });
                 }
                 None => {
+                    // Not a component schema, but possibly still a local
+                    // pointer into one: specs reference a parameter's schema
+                    // (`#/components/parameters/x/schema`) or a member of a
+                    // composition (`#/components/schemas/Tag/allOf/0`).
+                    if let Some(resolved) = self.resolve_pointer_schema(ref_str, dependencies)? {
+                        return Ok(resolved);
+                    }
                     eprintln!(
                         "⚠️  unresolvable $ref `{}` — typing as serde_json::Value",
                         ref_str
@@ -2779,11 +2927,13 @@ impl SchemaAnalyzer {
                         target: object_type_name,
                     });
                 }
-                _ => {
-                    return Ok(self.untyped_value(
-                        self.untyped_context(""),
-                        UntypedReason::UnsupportedTypeKeyword,
-                    ));
+                // `type: null` admits exactly one value; Rust spells that
+                // `()`, which serde reads from and writes as null.
+                OpenApiSchemaType::Null => {
+                    return Ok(SchemaType::Primitive {
+                        rust_type: self.type_mapper.null_unit().rust_type,
+                        serde_with: None,
+                    });
                 }
             }
         }
@@ -3012,6 +3162,19 @@ impl SchemaAnalyzer {
             });
         }
 
+        // A single member composes with nothing: `allOf: [{type: string}]` is
+        // that string. Specs write it to hang a description off a scalar or a
+        // `$ref`, and merging it as an object would lose the type entirely.
+        if let [only] = all_of_schemas
+            && !matches!(
+                only.schema_type(),
+                Some(OpenApiSchemaType::Object) | Some(OpenApiSchemaType::Null)
+            )
+            && only.details().properties.is_none()
+        {
+            return self.analyze_property_schema_with_context(only, None, dependencies);
+        }
+
         // AllOf represents schema composition - merge all schemas into one
         let mut merged_properties = BTreeMap::new();
         let mut merged_required = HashSet::new();
@@ -3147,6 +3310,16 @@ impl SchemaAnalyzer {
                     Some(prop_name),
                     dependencies,
                 )?;
+                let owner_name = self
+                    .current_schema_name
+                    .clone()
+                    .unwrap_or_else(|| "Inline".to_string());
+                let prop_type = self.hoist_inline_property_type(
+                    &owner_name,
+                    prop_name,
+                    prop_type,
+                    dependencies,
+                );
                 let prop_details = prop_schema.details();
 
                 // Properties merged through allOf composition must go through
@@ -3187,6 +3360,29 @@ impl SchemaAnalyzer {
         parent_name: &str,
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // Branches may be pointers into other parts of the document.
+        let expanded_branches;
+        let one_of_schemas = match self.expand_pointer_branches(one_of_schemas) {
+            Some(expanded) => {
+                expanded_branches = expanded;
+                expanded_branches.as_slice()
+            }
+            None => one_of_schemas,
+        };
+
+        // A union of one is that one, and branches that differ only in
+        // constraints share one Rust type. Both are checked before the shape
+        // patterns below, which would otherwise synthesize a union type and
+        // then fail to represent it.
+        if let [only] = one_of_schemas {
+            return self
+                .analyze_schema_value(only, parent_name)
+                .map(|analyzed| analyzed.schema_type);
+        }
+        if let Some(shared) = self.shared_branch_type(one_of_schemas) {
+            return Ok(shared);
+        }
+
         // Pattern: nullable [Type, null] — return the non-null type directly.
         // The nullable bit is recorded at the property level via is_nullable_pattern().
         if one_of_schemas.len() == 2 {
@@ -4286,6 +4482,12 @@ impl SchemaAnalyzer {
                 &format!("{parent_schema_name}Item"),
                 dependencies,
             )?;
+            let item_type = self.hoist_inline_property_type(
+                parent_schema_name,
+                "Item",
+                item_type,
+                dependencies,
+            );
             Ok(SchemaType::Array {
                 item_type: Box::new(item_type),
             })
@@ -4297,6 +4499,294 @@ impl SchemaAnalyzer {
                     UntypedReason::ArrayWithoutItems,
                 ),
             )
+        }
+    }
+
+    /// The single Rust type every branch of a union maps to, if there is one.
+    ///
+    /// Specs routinely spell one type as several branches that differ only in
+    /// constraints — Runway declares a URI field as three `string` branches
+    /// with different `pattern`s and lengths. Every value that matches any
+    /// branch is still a `String`, so the union has an exact Rust type; only
+    /// the constraints, which are documentation here, differ. Branches whose
+    /// mapped types disagree (a `uri` alongside a plain string) are left alone.
+    fn shared_branch_type(&self, branches: &[Schema]) -> Option<SchemaType> {
+        let mut mapped: Option<(String, Option<String>)> = None;
+        let mut scalar_kind: Option<OpenApiSchemaType> = None;
+        let mut formats_agree = true;
+        for branch in branches {
+            if branch.reference().is_some() {
+                return None;
+            }
+            let details = branch.details();
+            if details.enum_values.is_some()
+                || details.const_value.is_some()
+                || details.properties.is_some()
+            {
+                return None;
+            }
+            let scalar = match branch.schema_type()? {
+                scalar @ (OpenApiSchemaType::String
+                | OpenApiSchemaType::Integer
+                | OpenApiSchemaType::Number
+                | OpenApiSchemaType::Boolean) => scalar.clone(),
+                _ => return None,
+            };
+            match &scalar_kind {
+                Some(existing) if *existing != scalar => return None,
+                Some(_) => {}
+                None => scalar_kind = Some(scalar.clone()),
+            }
+
+            let candidate = self.type_mapper.map(scalar, details);
+            let candidate = (candidate.rust_type, candidate.serde_with);
+            match &mapped {
+                Some(existing) if *existing != candidate => formats_agree = false,
+                Some(_) => {}
+                None => mapped = Some(candidate),
+            }
+        }
+
+        if formats_agree {
+            return mapped.map(|(rust_type, serde_with)| SchemaType::Primitive {
+                rust_type,
+                serde_with,
+            });
+        }
+
+        // Same wire type, different typed-scalar refinements — gcore declares an
+        // IP field as `ipv4 | ipv6 | ipv4network | ipv6network`, which map to
+        // three different Rust types. No single refinement holds for every
+        // value, but the declared type does, so fall back to it rather than to
+        // `serde_json::Value`.
+        let scalar = scalar_kind?;
+        let mapped = self
+            .type_mapper
+            .map(scalar, &crate::openapi::SchemaDetails::default());
+        Some(SchemaType::Primitive {
+            rust_type: mapped.rust_type,
+            serde_with: mapped.serde_with,
+        })
+    }
+
+    /// Replace union branches that are local JSON Pointers with the schemas
+    /// they name.
+    ///
+    /// PagerDuty builds a request body from three pointers into a response's
+    /// `oneOf`. Each branch is resolvable, but a union whose branches are
+    /// unresolvable references has nothing to build variants from, so the whole
+    /// union used to degrade to `serde_json::Value`. Expanding is one level
+    /// deep, which is all these shapes need.
+    fn expand_pointer_branches(&self, branches: &[Schema]) -> Option<Vec<Schema>> {
+        let mut expanded = Vec::with_capacity(branches.len());
+        let mut changed = false;
+        for branch in branches {
+            let resolved = branch
+                .reference()
+                .filter(|reference| self.extract_schema_name(reference).is_none())
+                .and_then(|reference| reference.strip_prefix('#'))
+                .filter(|pointer| pointer.starts_with('/'))
+                .and_then(|pointer| self.openapi_spec.pointer(pointer))
+                .and_then(|value| Schema::deserialize(value).ok())
+                .filter(|schema| schema.reference().is_none());
+            match resolved {
+                Some(schema) => {
+                    expanded.push(schema);
+                    changed = true;
+                }
+                None => expanded.push(branch.clone()),
+            }
+        }
+        changed.then_some(expanded)
+    }
+
+    /// Whether a union's branches constrain only which properties are
+    /// required.
+    ///
+    /// Cloudflare writes `{properties: {...}, anyOf: [{required: [commit_hash]},
+    /// {required: [branch]}]}` to say "one of these two fields must be present".
+    /// The branches carry no type of their own, and Rust has no way to express
+    /// the alternation, so the schema is the object its properties describe —
+    /// with both fields optional — rather than an unrepresentable union.
+    fn union_only_constrains_requiredness(branches: &[Schema]) -> bool {
+        !branches.is_empty()
+            && branches.iter().all(|branch| {
+                let details = branch.details();
+                branch.schema_type().is_none()
+                    && branch.reference().is_none()
+                    && branch.union_variants().is_none()
+                    && details.properties.is_none()
+                    && details.enum_values.is_none()
+                    && details.const_value.is_none()
+                    && details.items.is_none()
+                    && details.additional_properties.is_none()
+                    && details.required.is_some()
+            })
+    }
+
+    /// Analyze a union whose branch list is empty.
+    ///
+    /// `oneOf: []` and `anyOf: []` admit every value, so the schema means
+    /// whatever its remaining keywords say. Discord ships
+    /// `{type: integer, format: int32, oneOf: []}` for several enums; reading
+    /// only the empty union throws away a perfectly good `i32`.
+    fn analyze_empty_union(
+        &mut self,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaType> {
+        // A union that declares no type of its own is still an object when it
+        // carries properties: the branches sit alongside them, not instead of
+        // them.
+        let Some(declared) = schema
+            .declared_type()
+            .cloned()
+            .or_else(|| schema.inferred_type())
+            .or_else(|| {
+                schema
+                    .details()
+                    .properties
+                    .is_some()
+                    .then_some(OpenApiSchemaType::Object)
+            })
+        else {
+            return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
+        };
+        match declared {
+            OpenApiSchemaType::Object => self.analyze_object_schema(schema, dependencies),
+            OpenApiSchemaType::Array => {
+                let context = self
+                    .current_schema_name
+                    .clone()
+                    .unwrap_or_else(|| "Inline".to_string());
+                self.analyze_array_schema(schema, &context, dependencies)
+            }
+            scalar => {
+                let mapped = self.type_mapper.map(scalar, schema.details());
+                Ok(SchemaType::Primitive {
+                    rust_type: mapped.rust_type,
+                    serde_with: mapped.serde_with,
+                })
+            }
+        }
+    }
+
+    /// Resolve a local `$ref` that points somewhere other than
+    /// `#/components/schemas/<name>`.
+    ///
+    /// A JSON Pointer may address any node in the document, and real specs use
+    /// that: PagerDuty references a parameter's schema
+    /// (`#/components/parameters/audit_method_type/schema`) and a single member
+    /// of another schema's composition (`#/components/schemas/Tag/allOf/0`).
+    /// Resolving only the component-schema form left those fields untyped even
+    /// though the target is right there in the document.
+    ///
+    /// The target is analyzed as an inline schema and named after its pointer,
+    /// so two references to the same node share one generated type.
+    fn resolve_pointer_schema(
+        &mut self,
+        reference: &str,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<Option<SchemaType>> {
+        let Some(pointer) = reference.strip_prefix('#') else {
+            return Ok(None);
+        };
+        if pointer.is_empty() || !pointer.starts_with('/') {
+            return Ok(None);
+        }
+        let name = pointer_type_name(pointer);
+        if name.is_empty() {
+            return Ok(None);
+        }
+        // Already resolved once, or currently being resolved further up the
+        // stack: reference the name rather than expanding it again.
+        if self.resolved_cache.contains_key(&name) || !self.resolving_pointers.insert(name.clone())
+        {
+            dependencies.insert(name.clone());
+            return Ok(Some(SchemaType::Reference { target: name }));
+        }
+
+        let resolved = (|| {
+            let value = self.openapi_spec.pointer(pointer)?.clone();
+            Schema::deserialize(&value).ok()
+        })();
+        let Some(schema) = resolved else {
+            self.resolving_pointers.remove(&name);
+            return Ok(None);
+        };
+
+        let analyzed = self.analyze_property_schema_with_context(&schema, None, dependencies);
+        self.resolving_pointers.remove(&name);
+        let analyzed = analyzed?;
+        Ok(Some(self.hoist_inline_property_type(
+            &name,
+            "",
+            analyzed,
+            dependencies,
+        )))
+    }
+
+    /// Give a property type a name when it needs one.
+    ///
+    /// A struct field can hold a primitive, a reference, an array, or a tuple.
+    /// Anything else — a merged `allOf`, an inline object, a union, an inline
+    /// enum — has to be generated as its own item, and a field can only reach
+    /// it by reference. Analysis used to leave those in place, and the
+    /// generator, with nothing it could write, emitted `serde_json::Value`:
+    /// the schema was understood and then thrown away at the last step.
+    fn hoist_inline_property_type(
+        &mut self,
+        schema_name: &str,
+        property_name: &str,
+        schema_type: SchemaType,
+        dependencies: &mut HashSet<String>,
+    ) -> SchemaType {
+        if schema_type.renders_inline() {
+            return schema_type;
+        }
+
+        let description = match &schema_type {
+            SchemaType::Object { .. } => None,
+            _ => None,
+        };
+        let hoisted_name = self.unique_hoisted_name(schema_name, property_name);
+        self.resolved_cache.insert(
+            hoisted_name.clone(),
+            AnalyzedSchema {
+                name: hoisted_name.clone(),
+                original: Value::Null,
+                schema_type,
+                dependencies: dependencies.clone(),
+                nullable: false,
+                description,
+                default: None,
+            },
+        );
+        dependencies.insert(hoisted_name.clone());
+        SchemaType::Reference {
+            target: hoisted_name,
+        }
+    }
+
+    /// A generated name for a hoisted property type that no other schema has
+    /// claimed. Collisions are resolved by suffix rather than by overwriting,
+    /// which would silently retype an unrelated schema.
+    fn unique_hoisted_name(&self, schema_name: &str, property_name: &str) -> String {
+        use heck::ToPascalCase;
+
+        let base = format!("{schema_name}{}", property_name.to_pascal_case());
+        if !self.schemas.contains_key(&base) && !self.resolved_cache.contains_key(&base) {
+            return base;
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{base}{suffix}");
+            if !self.schemas.contains_key(&candidate)
+                && !self.resolved_cache.contains_key(&candidate)
+            {
+                return candidate;
+            }
+            suffix += 1;
         }
     }
 
@@ -4322,12 +4812,18 @@ impl SchemaAnalyzer {
         if details.positional_items_are_exact() && !positions.is_empty() {
             let mut element_types = Vec::with_capacity(positions.len());
             for (index, position) in positions.iter().enumerate() {
-                element_types.push(self.analyze_item_schema(
+                let element_type = self.analyze_item_schema(
                     position,
                     parent_schema_name,
                     &format!("{parent_schema_name}Item{}", index + 1),
                     dependencies,
-                )?);
+                )?;
+                element_types.push(self.hoist_inline_property_type(
+                    parent_schema_name,
+                    &format!("Item{}", index + 1),
+                    element_type,
+                    dependencies,
+                ));
             }
             return Ok(SchemaType::Tuple { element_types });
         }
@@ -4559,6 +5055,12 @@ impl SchemaAnalyzer {
                             rust_type: "bool".to_string(),
                             serde_with: None,
                         },
+                        // `type: null` admits exactly one value; Rust spells
+                        // that `()`, which serde reads from and writes as null.
+                        OpenApiSchemaType::Null => SchemaType::Primitive {
+                            rust_type: self.type_mapper.null_unit().rust_type,
+                            serde_with: None,
+                        },
                         _ => self.untyped_value(
                             self.untyped_context(""),
                             UntypedReason::UnsupportedTypeKeyword,
@@ -4568,10 +5070,11 @@ impl SchemaAnalyzer {
                     self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema)
                 }
             }
-            _ => self.untyped_value(
-                self.untyped_context(""),
-                UntypedReason::UnrepresentableComposition,
-            ),
+            // Compositions and anything else this match does not special-case
+            // go through the general property analyzer, which understands
+            // `allOf` merging. The caller hoists whatever comes back if a field
+            // cannot hold it directly.
+            _ => self.analyze_property_schema_with_context(items_schema, None, dependencies)?,
         };
 
         Ok(item_type)
@@ -4600,6 +5103,16 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
         context_name: &str,
     ) -> Result<SchemaType> {
+        // Branches may be pointers into other parts of the document.
+        let expanded_branches;
+        let any_of_schemas = match self.expand_pointer_branches(any_of_schemas) {
+            Some(expanded) => {
+                expanded_branches = expanded;
+                expanded_branches.as_slice()
+            }
+            None => any_of_schemas,
+        };
+
         // Drop {"type": "null"} variants. Nullability is surfaced as Option<T>
         // at the property level via is_nullable_pattern(); leaving the null
         // variant in here would produce a phantom `()` or `serde_json::Value`
@@ -4626,6 +5139,21 @@ impl SchemaAnalyzer {
         } else {
             any_of_schemas
         };
+
+        // A union of one is that one: gcore writes `anyOf: [{allOf: [...]}]`
+        // to attach an example to a referenced error schema.
+        if let [only] = any_of_schemas {
+            return self
+                .analyze_schema_value(only, context_name)
+                .map(|analyzed| analyzed.schema_type);
+        }
+
+        // Branches that differ only in constraints share one Rust type, so
+        // there is no union to build. Checked before the shape patterns below,
+        // which would otherwise synthesize a union type and give up on it.
+        if let Some(shared) = self.shared_branch_type(any_of_schemas) {
+            return Ok(shared);
+        }
 
         // Pattern 2: Multiple complex types or mixed primitive/complex = flexible union
         let has_refs = any_of_schemas.iter().any(|s| s.is_reference());
@@ -4856,12 +5384,27 @@ impl SchemaAnalyzer {
             let mut has_open_string = false;
 
             for schema in any_of_schemas {
-                if let Some(const_val) = &schema.details().const_value {
-                    if let Some(const_str) = const_val.as_str() {
-                        enum_values.push(const_str.to_string());
+                // A branch may enumerate its values (`enum: [...]`), pin one
+                // (`const`), or accept any string. The last is what makes the
+                // union extensible rather than closed: "one of these, or
+                // anything else" is exactly `ExtensibleEnum`.
+                match schema
+                    .details()
+                    .string_enum_values()
+                    .filter(|values| !values.is_empty())
+                {
+                    Some(values) => {
+                        for value in values {
+                            if !enum_values.contains(&value) {
+                                enum_values.push(value);
+                            }
+                        }
                     }
-                } else if matches!(schema.schema_type(), Some(OpenApiSchemaType::String)) {
-                    has_open_string = true;
+                    None => {
+                        if matches!(schema.schema_type(), Some(OpenApiSchemaType::String)) {
+                            has_open_string = true;
+                        }
+                    }
                 }
             }
 
@@ -6407,6 +6950,25 @@ impl SchemaAnalyzer {
 /// untagged `Schema` enum that is "data did not match any variant of untagged
 /// enum Schema", with no field, schema name, or position. Tracking the path
 /// turns that into a JSON Pointer the author can jump straight to (issue #60).
+/// A Rust type name for a JSON Pointer target, e.g.
+/// `/components/schemas/Tag/allOf/0` becomes `TagAllOf0`. The `components`
+/// section prefix carries no information and is dropped.
+fn pointer_type_name(pointer: &str) -> String {
+    use heck::ToPascalCase;
+
+    pointer
+        .split('/')
+        .skip(1)
+        .filter(|segment| !matches!(*segment, "components" | "schemas" | "properties"))
+        .map(|segment| {
+            segment
+                .replace("~1", "/")
+                .replace("~0", "~")
+                .to_pascal_case()
+        })
+        .collect::<String>()
+}
+
 /// The one schema every position shares, if they are interchangeable: the same
 /// `$ref`, or the same primitive type and format. Inline objects never qualify
 /// — two structurally identical inline objects still hoist two named types, so

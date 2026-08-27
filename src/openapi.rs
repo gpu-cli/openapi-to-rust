@@ -136,6 +136,11 @@ pub enum Schema {
     },
     /// OneOf union
     OneOf {
+        /// Some specs declare the branch type alongside the union, the way
+        /// `anyOf` does — Discord ships `{type: integer, oneOf: []}`. Modeling
+        /// it keeps that type reachable instead of leaving it in `extra`.
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        schema_type: Option<SchemaType>,
         #[serde(rename = "oneOf")]
         one_of: Vec<Schema>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -700,6 +705,21 @@ impl Schema {
         }
     }
 
+    /// The `type` keyword as written, including on a union or composition.
+    ///
+    /// [`Self::schema_type`] deliberately reports only standalone typed
+    /// schemas, because most callers ask it in order to pick a Rust type for a
+    /// leaf. A union that also declares `type` needs the declared value —
+    /// notably when the branch list is empty and the union constrains nothing.
+    pub fn declared_type(&self) -> Option<&SchemaType> {
+        match self {
+            Schema::AnyOf { schema_type, .. }
+            | Schema::AllOf { schema_type, .. }
+            | Schema::OneOf { schema_type, .. } => schema_type.as_ref(),
+            other => other.schema_type(),
+        }
+    }
+
     /// Gets all non-null types from `type: [...]` (unlike
     /// [Schema::schema_type] that handles the null value). Returns `None` if
     /// the given [Schema::TypedMulti] has either only one non-null value, or if
@@ -840,9 +860,8 @@ impl Schema {
             _ => return false,
         };
         variants.len() == 2
-            && variants
-                .iter()
-                .any(|s| matches!(s.schema_type(), Some(SchemaType::Null)))
+            && variants.iter().any(Schema::is_null_marker)
+            && variants.iter().any(|s| !s.is_null_marker())
     }
 
     /// Get the non-null variant from a nullable pattern
@@ -855,9 +874,53 @@ impl Schema {
             Schema::OneOf { one_of, .. } => one_of,
             _ => return None,
         };
-        variants
-            .iter()
-            .find(|s| !matches!(s.schema_type(), Some(SchemaType::Null)))
+        variants.iter().find(|s| !s.is_null_marker())
+    }
+
+    /// Whether this branch of a union exists only to admit `null`.
+    ///
+    /// 3.1 spells that `type: "null"`. Tooling that predates it spells it as an
+    /// empty object carrying `nullable: true` — OData emits
+    /// `anyOf: [$ref, {type: object, nullable: true}]` for every navigation
+    /// property, which is "that type, or null", not "that type or any object".
+    /// Reading the second branch literally costs the first branch its type:
+    /// the union has no single Rust representation and the field degrades to
+    /// `serde_json::Value`.
+    ///
+    /// Only an *empty* nullable object qualifies. A nullable branch that
+    /// constrains anything — properties, `additionalProperties`, a `$ref`, an
+    /// enum — is a real alternative and is left alone.
+    pub fn is_null_marker(&self) -> bool {
+        if matches!(self.schema_type(), Some(SchemaType::Null)) {
+            return true;
+        }
+        let details = self.details();
+        if !details.is_nullable() {
+            return false;
+        }
+        if !matches!(
+            self.schema_type(),
+            Some(SchemaType::Object) | Some(SchemaType::Null) | None
+        ) {
+            return false;
+        }
+        self.reference().is_none()
+            && details.properties.as_ref().is_none_or(BTreeMap::is_empty)
+            && details.additional_properties.is_none()
+            && details.enum_values.is_none()
+            && details.const_value.is_none()
+            && details.pattern_properties.is_none()
+            && details.items.is_none()
+            && details.prefix_items.is_none()
+            && self.all_of_len() == 0
+    }
+
+    /// Number of `allOf` members, for shapes that only matter when empty.
+    fn all_of_len(&self) -> usize {
+        match self {
+            Schema::AllOf { all_of, .. } => all_of.len(),
+            _ => 0,
+        }
     }
 
     /// Infer schema type from structure if not explicitly set
