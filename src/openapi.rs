@@ -191,6 +191,11 @@ pub enum Schema {
         #[serde(flatten)]
         details: SchemaDetails,
     },
+    /// JSON Schema 2020-12 boolean schema. `true` accepts every value and
+    /// `false` accepts none, and both are legal anywhere a schema is — a
+    /// property, a `$defs` entry, a `oneOf` branch, `not`. Specs write
+    /// `properties: {extra: true}` to say "this key exists, any value".
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -260,9 +265,19 @@ pub struct SchemaDetails {
     pub maximum: Option<f64>,
 
     // Validation
-    #[serde(rename = "minLength", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minLength",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_length: Option<u64>,
-    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxLength",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
@@ -275,15 +290,35 @@ pub struct SchemaDetails {
     pub exclusive_maximum: Option<ExclusiveBound>,
     #[serde(rename = "multipleOf", skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
-    #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minItems",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_items: Option<u64>,
-    #[serde(rename = "maxItems", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxItems",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_items: Option<u64>,
     #[serde(rename = "uniqueItems", skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
-    #[serde(rename = "minProperties", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minProperties",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_properties: Option<u64>,
-    #[serde(rename = "maxProperties", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxProperties",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_properties: Option<u64>,
 
     // JSON Schema 2020-12 array keywords (J4, J8).
@@ -291,9 +326,19 @@ pub struct SchemaDetails {
     pub prefix_items: Option<Vec<Schema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contains: Option<Box<Schema>>,
-    #[serde(rename = "minContains", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minContains",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_contains: Option<u64>,
-    #[serde(rename = "maxContains", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxContains",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_contains: Option<u64>,
 
     // JSON Schema 2020-12 object keywords (J5, J6, J7).
@@ -358,6 +403,44 @@ pub struct SchemaDetails {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// Deserialize a non-negative integer keyword that a spec may have written as a
+/// decimal.
+///
+/// JSON Schema requires these to be non-negative integers but says nothing
+/// about their JSON spelling, so `maxItems: 2.0` is valid and appears in the
+/// 2020-12 test suite. Reading them as `u64` alone rejected the whole document.
+fn deserialize_count<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match &value {
+        Value::Null => Ok(None),
+        Value::Number(number) => {
+            if let Some(count) = number.as_u64() {
+                return Ok(Some(count));
+            }
+            // A float with no fractional part is the same count written
+            // differently; anything else is not a count at all.
+            match number.as_f64() {
+                Some(float) if float.fract() == 0.0 && float >= 0.0 && float <= u64::MAX as f64 => {
+                    Ok(Some(float as u64))
+                }
+                _ => Err(D::Error::custom(format!(
+                    "expected a non-negative integer, found {number}"
+                ))),
+            }
+        }
+        other => Err(D::Error::custom(format!(
+            "expected a non-negative integer, found {other}"
+        ))),
+    }
+}
+
 fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -390,10 +473,6 @@ pub enum Items {
     Single(Box<Schema>),
     /// Draft-04 tuple form: one schema per position.
     Positional(Vec<Schema>),
-    /// 2020-12 boolean schema. `items: false` is the canonical way to close a
-    /// tuple — no elements beyond `prefixItems` — and `items: true` is the
-    /// no-op "anything goes" schema.
-    Bool(bool),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -773,9 +852,12 @@ impl Schema {
         match self {
             Schema::Typed { details, .. } => details,
             Schema::TypedMulti { details, .. } => details,
-            Schema::Reference { .. } | Schema::RecursiveRef { .. } | Schema::DynamicRef { .. } => {
-                &EMPTY_DETAILS
-            }
+            // Neither a reference nor a boolean schema carries details of its
+            // own: one points elsewhere, the other accepts or rejects outright.
+            Schema::Reference { .. }
+            | Schema::RecursiveRef { .. }
+            | Schema::DynamicRef { .. }
+            | Schema::Bool(_) => &EMPTY_DETAILS,
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
             Schema::AllOf { details, .. } => details,
@@ -796,6 +878,9 @@ impl Schema {
             }
             Schema::DynamicRef { .. } => {
                 panic!("Cannot get mutable details for dynamic reference schema")
+            }
+            Schema::Bool(_) => {
+                panic!("Cannot get mutable details for a boolean schema")
             }
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
@@ -956,12 +1041,12 @@ impl SchemaDetails {
     /// The schema every array element must satisfy, i.e. `items` in its
     /// 2020-12 single-schema spelling. Returns `None` for the draft-04 tuple
     /// form, which constrains positions rather than every element — read that
-    /// through [`Self::positional_items`] — and for a boolean schema, which
-    /// constrains nothing worth typing.
+    /// through [`Self::positional_items`]. A boolean schema is a schema like
+    /// any other here: `items: true` accepts every element.
     pub fn item_schema(&self) -> Option<&Schema> {
         match self.items.as_ref()? {
             Items::Single(schema) => Some(schema),
-            Items::Positional(_) | Items::Bool(_) => None,
+            Items::Positional(_) => None,
         }
     }
 
@@ -973,7 +1058,7 @@ impl SchemaDetails {
         }
         match self.items.as_ref()? {
             Items::Positional(schemas) => Some(schemas),
-            Items::Single(_) | Items::Bool(_) => None,
+            Items::Single(_) => None,
         }
     }
 
@@ -986,7 +1071,12 @@ impl SchemaDetails {
         let Some(positions) = self.positional_items() else {
             return false;
         };
-        if matches!(self.items, Some(Items::Bool(false))) {
+        // `items: false` — no element beyond the positions may exist. It is a
+        // boolean schema in the ordinary single-schema slot.
+        if matches!(
+            self.items.as_ref(),
+            Some(Items::Single(schema)) if matches!(**schema, Schema::Bool(false))
+        ) {
             return true;
         }
         if self.extra.get("additionalItems") == Some(&Value::Bool(false)) {

@@ -467,6 +467,10 @@ pub enum UntypedReason {
     /// generated union carries a `serde_json::Value` variant. Whether that is
     /// faithful depends on the branch, which the analyzed type no longer says.
     UntypedUnionBranch,
+    /// A `false` schema: nothing validates against it, so there is no value to
+    /// give a type. Legal anywhere a schema is, and written to forbid a
+    /// property or close a tuple.
+    NeverMatches,
     /// Reached a fallback that has not been classified yet. Every one of these
     /// is a gap in this taxonomy, not in the generator.
     Unclassified,
@@ -481,6 +485,8 @@ impl UntypedReason {
             Self::AnySchema | Self::OpaqueObject | Self::UntypedAdditionalProperties => {
                 UntypedVerdict::Faithful
             }
+            // Nothing validates against `false`, so nothing is being lost.
+            Self::NeverMatches => UntypedVerdict::Faithful,
             // An array with no `items` says nothing about elements, and open
             // positional items permit extras of any type: both are the spec's
             // choice, not a dropped constraint.
@@ -2181,6 +2187,16 @@ impl SchemaAnalyzer {
         let mut dependencies = HashSet::new();
 
         let schema_type = match schema {
+            // `true` admits every value; `false` admits none. Neither leaves
+            // anything to generate a type from.
+            Schema::Bool(accepts_anything) => self.untyped_value(
+                self.untyped_context(""),
+                if *accepts_anything {
+                    UntypedReason::AnySchema
+                } else {
+                    UntypedReason::NeverMatches
+                },
+            ),
             Schema::Reference { reference, .. } => {
                 // A ref that names no component schema may still address a node
                 // in this document — a parameter's schema, a response body, one
@@ -2808,6 +2824,19 @@ impl SchemaAnalyzer {
         property_name: Option<&str>,
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // `true` admits every value; `false` admits none.
+        if let Schema::Bool(accepts_anything) = schema {
+            let reason = if *accepts_anything {
+                UntypedReason::AnySchema
+            } else {
+                UntypedReason::NeverMatches
+            };
+            return Ok(self.untyped_value(
+                self.untyped_context(property_name.unwrap_or_default()),
+                reason,
+            ));
+        }
+
         if let Some(ref_str) = self.get_any_reference(schema) {
             let target_opt = if ref_str == "#" {
                 Some(
@@ -3473,6 +3502,21 @@ impl SchemaAnalyzer {
             }
             None => one_of_schemas,
         };
+
+        // A boolean branch either opens the union up or can never be taken.
+        let boolean_resolved;
+        let one_of_schemas = match Self::resolve_boolean_branches(one_of_schemas) {
+            Ok(resolved) => {
+                boolean_resolved = resolved;
+                boolean_resolved.as_slice()
+            }
+            Err(()) => {
+                return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
+            }
+        };
+        if one_of_schemas.is_empty() {
+            return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
+        }
 
         // A union of one is that one, and branches that differ only in
         // constraints share one Rust type. Both are checked before the shape
@@ -4787,6 +4831,28 @@ impl SchemaAnalyzer {
         }))
     }
 
+    /// Resolve boolean branches in a union.
+    ///
+    /// `true` accepts every value, so a union containing it admits everything
+    /// and has no narrower type. `false` accepts none, so such a branch can
+    /// never be taken and is dropped — `oneOf: [A, false]` is `A`.
+    ///
+    /// Returns `Err(())` when the union is unconstrained.
+    #[allow(clippy::result_unit_err)]
+    fn resolve_boolean_branches(branches: &[Schema]) -> std::result::Result<Vec<Schema>, ()> {
+        if branches
+            .iter()
+            .any(|branch| matches!(branch, Schema::Bool(true)))
+        {
+            return Err(());
+        }
+        Ok(branches
+            .iter()
+            .filter(|branch| !matches!(branch, Schema::Bool(false)))
+            .cloned()
+            .collect())
+    }
+
     /// Whether a union's branches constrain only which properties are
     /// required.
     ///
@@ -5046,6 +5112,14 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
         let item_type = match items_schema {
+            Schema::Bool(accepts_anything) => self.untyped_value(
+                self.untyped_context(""),
+                if *accepts_anything {
+                    UntypedReason::AnySchema
+                } else {
+                    UntypedReason::NeverMatches
+                },
+            ),
             Schema::Reference { reference, .. } => {
                 // Array of referenced types
                 let target = self
@@ -5296,6 +5370,21 @@ impl SchemaAnalyzer {
             }
             None => any_of_schemas,
         };
+
+        // A boolean branch either opens the union up or can never be taken.
+        let boolean_resolved;
+        let any_of_schemas = match Self::resolve_boolean_branches(any_of_schemas) {
+            Ok(resolved) => {
+                boolean_resolved = resolved;
+                boolean_resolved.as_slice()
+            }
+            Err(()) => {
+                return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
+            }
+        };
+        if any_of_schemas.is_empty() {
+            return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
+        }
 
         // Drop {"type": "null"} variants. Nullability is surfaced as Option<T>
         // at the property level via is_nullable_pattern(); leaving the null

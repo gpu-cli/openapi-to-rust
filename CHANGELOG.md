@@ -6,6 +6,28 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- Boolean subschemas (`true` and `false`) parse wherever JSON Schema 2020-12
+  allows one — a property, a `$defs` entry, `not`, `if`/`then`/`else`,
+  `contains`, `propertyNames`, `patternProperties`, `dependentSchemas`, a
+  `oneOf` branch. `properties: {extra: true}` is how a spec says "this key
+  exists, any value"; one of those anywhere in a document used to fail the whole
+  thing with "data did not match any variant of untagged enum Schema" (#63).
+
+  `true` generates `serde_json::Value` and `false` a value that cannot occur —
+  both reported as faithful by `--report-untyped`. In a union, a `true` branch
+  makes the union unconstrained and a `false` branch is dropped, so
+  `oneOf: [A, false]` is `A`.
+- Integer keywords written as decimals — `maxItems: 2.0`, which JSON Schema
+  permits and the 2020-12 suite exercises — are read as the counts they are
+  rather than rejecting the document. A fractional value like `2.5` is still an
+  error.
+
+  Together these take the vendored JSON Schema 2020-12 corpus from 38 parse
+  failures to zero, with no round-trip loss.
+
+
 ## [0.14.0] - 2026-08-27
 
 ### Added
