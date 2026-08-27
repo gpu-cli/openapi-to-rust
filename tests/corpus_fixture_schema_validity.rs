@@ -75,6 +75,74 @@ fn cloudflare_empty_required_repair_is_draft4_valid() {
 }
 
 #[test]
+fn coda_required_members_are_declared_and_draft4_valid() {
+    let fixture = load_fixture("specs/coda.yaml");
+    let cases = [
+        ("Table", &["viewId"][..], &[][..]),
+        (
+            "DocAnalyticsMetrics",
+            &[
+                "aiCreditsChat,",
+                "aiCreditsBlock,",
+                "aiCreditsColumn,",
+                "aiCreditsAssistant,",
+                "aiCreditsReviewer,",
+                "aiCredits,",
+            ][..],
+            &[
+                "aiCreditsChat",
+                "aiCreditsBlock",
+                "aiCreditsColumn",
+                "aiCreditsAssistant",
+                "aiCreditsReviewer",
+                "aiCredits",
+            ][..],
+        ),
+        (
+            "IngestionBatchExecution",
+            &["errorMessage", "ingestionStatuses"][..],
+            &["ingestionStatusCounts"][..],
+        ),
+        ("IngestionExecutionAttempt", &["message"][..], &[][..]),
+        ("IngestionParentItem", &["creationTimestamp"][..], &[][..]),
+    ];
+
+    for (name, absent_required, present_required) in cases {
+        let pointer = format!("#/components/schemas/{name}");
+        let schema = component_schema(&fixture, name);
+        let required = schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{pointer}/required is not an array"));
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{pointer}/properties is not an object"));
+
+        for member in absent_required {
+            assert!(
+                !required.iter().any(|value| value.as_str() == Some(member)),
+                "{pointer}/required still contains stale member {member:?}"
+            );
+        }
+        for member in present_required {
+            assert!(
+                required.iter().any(|value| value.as_str() == Some(member)),
+                "{pointer}/required lost intended member {member:?}"
+            );
+        }
+        for member in required {
+            let member = member
+                .as_str()
+                .unwrap_or_else(|| panic!("{pointer}/required contains a non-string"));
+            assert!(
+                properties.contains_key(member),
+                "{pointer}/required member {member:?} has no declared property while additionalProperties is false"
+            );
+        }
+        assert_draft4_meta_valid(&pointer, schema);
+    }
+}
+
+#[test]
 fn discord_enum_components_match_upstream_and_are_2020_12_valid() {
     let fixture = load_fixture("specs/discord.json");
 
