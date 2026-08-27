@@ -2734,9 +2734,10 @@ impl SchemaAnalyzer {
                 if let Some(values) = details.string_enum_values() {
                     SchemaType::StringEnum { values }
                 } else {
+                    let mapped = self.type_mapper.string_format(format);
                     SchemaType::Primitive {
-                        rust_type: self.type_mapper.string_format(format).rust_type,
-                        serde_with: None,
+                        rust_type: mapped.rust_type,
+                        serde_with: mapped.serde_with,
                     }
                 }
             }

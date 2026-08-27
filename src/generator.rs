@@ -1,4 +1,8 @@
-use crate::{GeneratorError, Result, analysis::SchemaAnalysis, streaming::StreamingConfig};
+use crate::{
+    GeneratorError, Result,
+    analysis::{SchemaAnalysis, SchemaType},
+    streaming::StreamingConfig,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::BTreeMap;
@@ -383,6 +387,37 @@ fn untyped_tokens(shape: crate::analysis::UntypedShape) -> TokenStream {
     }
 }
 
+fn schema_type_uses_serde_codec(schema_type: &SchemaType, codec: &str) -> bool {
+    match schema_type {
+        SchemaType::Primitive {
+            serde_with: Some(actual),
+            ..
+        } => actual == codec,
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            properties
+                .values()
+                .any(|property| schema_type_uses_serde_codec(&property.schema_type, codec))
+                || matches!(
+                    additional_properties,
+                    crate::analysis::ObjectAdditionalProperties::Typed { value_type }
+                        if schema_type_uses_serde_codec(value_type, codec)
+                )
+        }
+        SchemaType::Array { item_type }
+        | SchemaType::Nullable {
+            inner_type: item_type,
+        } => schema_type_uses_serde_codec(item_type, codec),
+        SchemaType::Tuple { element_types } => element_types
+            .iter()
+            .any(|element| schema_type_uses_serde_codec(element, codec)),
+        _ => false,
+    }
+}
+
 impl CodeGenerator {
     pub fn new(config: GeneratorConfig) -> Self {
         Self {
@@ -640,6 +675,111 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        let uses_binary_bytes_codec = analysis
+            .schemas
+            .values()
+            .any(|schema| schema_type_uses_serde_codec(&schema.schema_type, "binary_bytes_serde"));
+        let binary_bytes_helper = if uses_binary_bytes_codec {
+            quote! {
+                /// UTF-8 JSON string codec for `bytes::Bytes` model fields
+                /// produced from `format: binary`. Raw HTTP body and multipart
+                /// paths use their byte carriers directly and do not invoke it.
+                mod binary_bytes_serde {
+                    use serde::{Deserialize, Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        bytes: &bytes::Bytes,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        let value = std::str::from_utf8(bytes.as_ref())
+                            .map_err(serde::ser::Error::custom)?;
+                        ser.serialize_str(value)
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<bytes::Bytes, D::Error> {
+                        String::deserialize(de).map(bytes::Bytes::from)
+                    }
+
+                    pub mod option {
+                        use serde::{Deserialize, Deserializer, Serializer};
+
+                        pub fn serialize<S: Serializer>(
+                            value: &Option<bytes::Bytes>,
+                            ser: S,
+                        ) -> Result<S::Ok, S::Error> {
+                            match value {
+                                Some(bytes) => super::serialize(bytes, ser),
+                                None => ser.serialize_none(),
+                            }
+                        }
+
+                        pub fn deserialize<'de, D: Deserializer<'de>>(
+                            de: D,
+                        ) -> Result<Option<bytes::Bytes>, D::Error> {
+                            Option::<String>::deserialize(de)
+                                .map(|value| value.map(bytes::Bytes::from))
+                        }
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let uses_binary_vec_codec = analysis
+            .schemas
+            .values()
+            .any(|schema| schema_type_uses_serde_codec(&schema.schema_type, "binary_vec_serde"));
+        let binary_vec_helper = if uses_binary_vec_codec {
+            quote! {
+                /// UTF-8 JSON string codec for `Vec<u8>` model fields produced
+                /// from `format: binary` under the vec_u8 strategy.
+                mod binary_vec_serde {
+                    use serde::{Deserialize, Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        bytes: &Vec<u8>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        let value = std::str::from_utf8(bytes)
+                            .map_err(serde::ser::Error::custom)?;
+                        ser.serialize_str(value)
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Vec<u8>, D::Error> {
+                        String::deserialize(de).map(String::into_bytes)
+                    }
+
+                    pub mod option {
+                        use serde::{Deserialize, Deserializer, Serializer};
+
+                        pub fn serialize<S: Serializer>(
+                            value: &Option<Vec<u8>>,
+                            ser: S,
+                        ) -> Result<S::Ok, S::Error> {
+                            match value {
+                                Some(bytes) => super::serialize(bytes, ser),
+                                None => ser.serialize_none(),
+                            }
+                        }
+
+                        pub fn deserialize<'de, D: Deserializer<'de>>(
+                            de: D,
+                        ) -> Result<Option<Vec<u8>>, D::Error> {
+                            Option::<String>::deserialize(de)
+                                .map(|value| value.map(String::into_bytes))
+                        }
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
         // `time::Date` / `time::Time` have no built-in serde codec
         // in the `time` crate (`time::serde::iso8601` is
         // OffsetDateTime-only — GH #25), so declare one per type via
@@ -698,6 +838,10 @@ impl CodeGenerator {
             use serde::{Deserialize, Serialize};
 
             #base64_helper
+
+            #binary_bytes_helper
+
+            #binary_vec_helper
 
             #time_date_helper
 
@@ -2886,11 +3030,7 @@ impl CodeGenerator {
         // the `::option` submodule of the codec — serde dispatches
         // on field type, and the base codec works on Vec<u8> /
         // chrono::Duration / etc., not their Option wrappers.
-        if let crate::analysis::SchemaType::Primitive {
-            serde_with: Some(codec),
-            ..
-        } = &prop.schema_type
-        {
+        if let Some(codec) = self.schema_type_serde_codec(&prop.schema_type, analysis) {
             let is_option_wrapped = self.property_is_option_wrapped(
                 schema_name,
                 field_name,
@@ -2901,7 +3041,7 @@ impl CodeGenerator {
             let codec_path = if is_option_wrapped {
                 format!("{codec}::option")
             } else {
-                codec.clone()
+                codec
             };
             attrs.push(quote! { with = #codec_path });
             // A `with` codec disables serde's implicit
@@ -2917,6 +3057,36 @@ impl CodeGenerator {
             TokenStream::new()
         } else {
             quote! { #[serde(#(#attrs),*)] }
+        }
+    }
+
+    /// Resolve a field codec through named scalar aliases. A property may
+    /// reference a component whose generated Rust type is `bytes::Bytes`; the
+    /// codec belongs on the property field, because a Rust type alias cannot
+    /// carry serde attributes of its own.
+    fn schema_type_serde_codec(
+        &self,
+        schema_type: &crate::analysis::SchemaType,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> Option<String> {
+        let mut current = schema_type;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            match current {
+                crate::analysis::SchemaType::Primitive {
+                    serde_with: Some(codec),
+                    ..
+                } => return Some(codec.clone()),
+                crate::analysis::SchemaType::Reference { target }
+                    if visited.insert(target.clone()) =>
+                {
+                    current = &analysis.schemas.get(target)?.schema_type;
+                }
+                crate::analysis::SchemaType::Nullable { inner_type } => {
+                    current = inner_type;
+                }
+                _ => return None,
+            }
         }
     }
 

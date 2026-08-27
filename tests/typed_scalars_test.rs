@@ -11,6 +11,7 @@
 //! only on `TypeMapper` would miss the codec threading through
 //! `SchemaType::Primitive.serde_with`.
 
+use openapi_to_rust::type_mapping::BinaryStrategy;
 use openapi_to_rust::{
     ByteStrategy, CodeGenerator, GeneratorConfig, SchemaAnalyzer, TypeMapper, TypeMappingConfig,
 };
@@ -134,6 +135,165 @@ fn binary_default_emits_bytes_bytes() {
         code.contains("pub value: bytes::Bytes"),
         "binary should map to bytes::Bytes by default. Code:\n{code}"
     );
+}
+
+fn binary_model_round_trip_spec() -> serde_json::Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "binary model", "version": "1.0.0" },
+        "paths": {},
+        "components": {
+            "schemas": {
+                "BinaryBlob": {
+                    "type": "string",
+                    "format": "binary"
+                },
+                "BinaryAlias": {
+                    "$ref": "#/components/schemas/BinaryBlob"
+                },
+                "google.protobuf.Any": {
+                    "additionalProperties": true,
+                    "properties": {
+                        "debug": {
+                            "additionalProperties": true,
+                            "type": "object"
+                        },
+                        "type": { "type": "string" },
+                        "value": { "type": "string", "format": "binary" }
+                    },
+                    "type": "object"
+                },
+                "Sample": {
+                    "type": "object",
+                    "required": ["direct", "aliased", "encoded", "gitpod_any"],
+                    "properties": {
+                        "direct": { "type": "string", "format": "binary" },
+                        "optional": { "type": "string", "format": "binary" },
+                        "aliased": { "$ref": "#/components/schemas/BinaryAlias" },
+                        "encoded": { "type": "string", "format": "byte" },
+                        "gitpod_any": { "$ref": "#/components/schemas/google.protobuf.Any" }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn assert_generated_binary_model_round_trip(strategy: BinaryStrategy, name: &str) {
+    let types = TypeMappingConfig {
+        binary: strategy,
+        ..TypeMappingConfig::default()
+    };
+    let code = generate_with_types(binary_model_round_trip_spec(), types);
+    let temp = tempfile::TempDir::new().expect("scratch crate");
+    std::fs::create_dir_all(temp.path().join("src")).expect("scratch src");
+    std::fs::write(temp.path().join("src/generated.rs"), &code).expect("generated module");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "binary-model-{name}"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+base64 = "0.22"
+bytes = {{ version = "1", features = ["serde"] }}
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+"#
+        ),
+    )
+    .expect("scratch manifest");
+    std::fs::write(
+        temp.path().join("src/main.rs"),
+        r##"#![allow(dead_code)]
+mod generated;
+
+fn main() {
+    let input = serde_json::json!({
+        "direct": "direct bytes",
+        "optional": "optional bytes",
+        "aliased": "referenced bytes",
+        "encoded": "aGk=",
+        "gitpod_any": {
+            "debug": {},
+            "type": "type.googleapis.com/example.Message",
+            "value": "protobuf bytes",
+            "synthetic_extension": true
+        }
+    });
+    let value: generated::Sample = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(value).unwrap(), input);
+
+    let missing_optional = serde_json::json!({
+        "direct": "direct bytes",
+        "aliased": "referenced bytes",
+        "encoded": "aGk=",
+        "gitpod_any": {
+            "type": "type.googleapis.com/example.Empty"
+        }
+    });
+    let value: generated::Sample = serde_json::from_value(missing_optional.clone()).unwrap();
+    assert_eq!(serde_json::to_value(value).unwrap(), missing_optional);
+}
+"##,
+    )
+    .expect("scratch main");
+
+    let status = std::process::Command::new("cargo")
+        .args(["run", "--quiet", "--offline"])
+        .current_dir(temp.path())
+        .env(
+            "CARGO_TARGET_DIR",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("target/generated-binary-model-{name}")),
+        )
+        .status()
+        .expect("cargo run");
+    assert!(
+        status.success(),
+        "generated {name} binary model did not round-trip. Code:\n{code}"
+    );
+
+    assert!(
+        code.contains(r#"with = "base64_serde""#),
+        "format: byte must remain base64-encoded under {name}. Code:\n{code}"
+    );
+}
+
+#[test]
+fn generated_binary_model_fields_round_trip_as_json_strings_for_every_strategy() {
+    for (name, strategy, codec) in [
+        ("bytes", BinaryStrategy::Bytes, Some("binary_bytes_serde")),
+        ("vec-u8", BinaryStrategy::VecU8, Some("binary_vec_serde")),
+        ("string", BinaryStrategy::String, None),
+    ] {
+        let types = TypeMappingConfig {
+            binary: strategy,
+            ..TypeMappingConfig::default()
+        };
+        let code = generate_with_types(binary_model_round_trip_spec(), types);
+        match codec {
+            Some(codec) => {
+                assert!(code.contains(&format!("mod {codec}")), "Code:\n{code}");
+                assert!(
+                    code.matches(&format!(r#"with = "{codec}""#)).count() >= 2,
+                    "direct and referenced required fields need the codec. Code:\n{code}"
+                );
+                assert!(
+                    code.contains(&format!(r#"with = "{codec}::option""#)),
+                    "optional field needs the option codec. Code:\n{code}"
+                );
+            }
+            None => {
+                assert!(!code.contains("mod binary_bytes_serde"), "Code:\n{code}");
+                assert!(!code.contains("mod binary_vec_serde"), "Code:\n{code}");
+            }
+        }
+        assert_generated_binary_model_round_trip(strategy, name);
+    }
 }
 
 #[test]

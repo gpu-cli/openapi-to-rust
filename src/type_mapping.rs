@@ -79,6 +79,15 @@ impl MappedType {
             feature: Some(feature),
         }
     }
+
+    /// Mapping with an inlined generated codec and no crate dependency.
+    pub fn with_inline_codec(rust_type: impl Into<String>, codec_path: impl Into<String>) -> Self {
+        Self {
+            rust_type: rust_type.into(),
+            serde_with: Some(codec_path.into()),
+            feature: None,
+        }
+    }
 }
 
 /// Identifies an optional crate a mapping introduced.
@@ -1010,10 +1019,10 @@ impl TypeMapper {
     fn map_binary(&self, strat: BinaryStrategy) -> MappedType {
         match strat {
             BinaryStrategy::String => MappedType::plain("String"),
-            BinaryStrategy::VecU8 => MappedType::plain("Vec<u8>"),
+            BinaryStrategy::VecU8 => MappedType::with_inline_codec("Vec<u8>", "binary_vec_serde"),
             BinaryStrategy::Bytes => {
                 self.record(TypeFeature::Bytes);
-                MappedType::with_feature("bytes::Bytes", TypeFeature::Bytes)
+                MappedType::with_codec("bytes::Bytes", "binary_bytes_serde", TypeFeature::Bytes)
             }
         }
     }
