@@ -37956,13 +37956,6 @@
         "$ref": "#/components/schemas/hyperdrive_api-response-common"
       },
       "hyperdrive_hyperdrive-caching": {
-        "discriminator": {
-          "mapping": {
-            "false": "#/components/schemas/hyperdrive-caching-enabled",
-            "true": "#/components/schemas/hyperdrive-caching-disabled"
-          },
-          "propertyName": "disabled"
-        },
         "type": "object",
         "anyOf": [
           { "$ref": "#/components/schemas/hyperdrive_hyperdrive-caching-disabled" },
