@@ -11,7 +11,7 @@ information that did not survive; those are defects with a fix.
 
 | Reason | Count | Verdict |
 |---|---:|---|
-| `opaque-object` | 4372 | faithful |
+| `opaque-object` | 4405 | faithful |
 | `any-schema` | 3041 | faithful |
 | `untyped-additional-properties` | 1376 | faithful |
 | `unrepresentable-union` | 6 | **recoverable** |
@@ -29,7 +29,7 @@ information that did not survive; those are defects with a fix.
 | `cartesia` | 3 | 0 |
 | `cerebras` | 47 | 0 |
 | `circleci` | 26 | 0 |
-| `cloudflare` | 1078 | 3 |
+| `cloudflare` | 1111 | 3 |
 | `coda` | 27 | 0 |
 | `coingecko` | 0 | 0 |
 | `datadog-v2` | 156 | 0 |

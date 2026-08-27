@@ -854,46 +854,53 @@ impl Schema {
 
     /// Check if this appears to be a nullable pattern (anyOf or oneOf with null)
     pub fn is_nullable_pattern(&self) -> bool {
-        let variants = match self {
-            Schema::AnyOf { any_of, .. } => any_of,
-            Schema::OneOf { one_of, .. } => one_of,
-            _ => return false,
-        };
-        variants.len() == 2
-            && variants.iter().any(Schema::is_null_marker)
-            && variants.iter().any(|s| !s.is_null_marker())
+        self.non_null_variant().is_some()
     }
 
-    /// Get the non-null variant from a nullable pattern
+    /// The one meaningful branch of a two-branch union whose other branch
+    /// exists only to admit `null`.
     pub fn non_null_variant(&self) -> Option<&Schema> {
-        if !self.is_nullable_pattern() {
-            return None;
-        }
         let variants = match self {
             Schema::AnyOf { any_of, .. } => any_of,
             Schema::OneOf { one_of, .. } => one_of,
             _ => return None,
         };
-        variants.iter().find(|s| !s.is_null_marker())
+        let [first, second] = variants.as_slice() else {
+            return None;
+        };
+        match (
+            Self::is_null_marker_beside(first, second),
+            Self::is_null_marker_beside(second, first),
+        ) {
+            (true, false) => Some(second),
+            (false, true) => Some(first),
+            // Two markers describe nothing, and no marker is not this pattern.
+            _ => None,
+        }
     }
 
-    /// Whether this branch of a union exists only to admit `null`.
+    /// Whether `candidate` exists only to admit `null` alongside `sibling`.
     ///
-    /// 3.1 spells that `type: "null"`. Tooling that predates it spells it as an
-    /// empty object carrying `nullable: true` — OData emits
-    /// `anyOf: [$ref, {type: object, nullable: true}]` for every navigation
-    /// property, which is "that type, or null", not "that type or any object".
-    /// Reading the second branch literally costs the first branch its type:
-    /// the union has no single Rust representation and the field degrades to
-    /// `serde_json::Value`.
+    /// 3.1 spells that `type: "null"`, which says so on its own. Tooling that
+    /// predates it spells it as an empty object carrying `nullable: true`, and
+    /// that spelling is ambiguous: read literally,
+    /// `anyOf: [X, {type: object, nullable: true}]` is "X, any object, or
+    /// null".
     ///
-    /// Only an *empty* nullable object qualifies. A nullable branch that
-    /// constrains anything — properties, `additionalProperties`, a `$ref`, an
-    /// enum — is a real alternative and is left alone.
-    pub fn is_null_marker(&self) -> bool {
-        if matches!(self.schema_type(), Some(SchemaType::Null)) {
-            return true;
-        }
+    /// The empty-object spelling is read as a null marker only beside a
+    /// `$ref`, which is the shape
+    /// OData emits for every navigation property and where the intent is not
+    /// in doubt. Beside a scalar the literal reading wins — the corpus has 33
+    /// `anyOf: [{type: string, nullable: true}, {type: object, nullable: true}]`
+    /// fields, and typing those as `Option<String>` would fail to deserialize
+    /// the objects the schema plainly allows.
+    fn is_null_marker_beside(candidate: &Schema, sibling: &Schema) -> bool {
+        matches!(candidate.schema_type(), Some(SchemaType::Null))
+            || (candidate.is_empty_nullable_object() && sibling.reference().is_some())
+    }
+
+    /// An object schema carrying `nullable: true` and constraining nothing.
+    fn is_empty_nullable_object(&self) -> bool {
         let details = self.details();
         if !details.is_nullable() {
             return false;

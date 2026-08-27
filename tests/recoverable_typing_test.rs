@@ -109,6 +109,29 @@ fn a_nullable_branch_that_constrains_something_stays_a_union() {
 }
 
 #[test]
+fn a_nullable_object_beside_a_scalar_is_read_literally() {
+    // The narrowing above is deliberately limited to a `$ref` sibling, where
+    // OData's intent is not in doubt. Beside a scalar, `{type: object,
+    // nullable: true}` means what it says — "or any object, or null" — and 33
+    // corpus fields are written that way. Typing them as `Option<String>` would
+    // fail on the objects the schema allows.
+    let (generated, _) = generate_and_census(spec_with_schemas(json!({
+        "Thing": { "type": "object", "additionalProperties": false, "properties": {
+            "value": { "anyOf": [
+                { "type": "string", "nullable": true },
+                { "type": "object", "nullable": true }
+            ]}
+        }}
+    })));
+
+    assert!(
+        !generated.contains("pub value: Option<String>"),
+        "a nullable object beside a scalar is a real alternative, not a null \
+         marker:\n{generated}"
+    );
+}
+
+#[test]
 fn open_string_enum_union_becomes_an_extensible_enum() {
     // Anthropic's `AnthropicBeta`: a named set of values, plus any other string.
     assert_types(
