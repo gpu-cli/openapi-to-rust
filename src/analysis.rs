@@ -1508,10 +1508,23 @@ fn extract_schema_variants(obj: &Value) -> Option<Vec<Value>> {
 /// name eventually allocated to it. Component names are reserved before any
 /// traversal, while inline and deep-pointer identities retain enough
 /// provenance to reuse their own allocation without impersonating a component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum InlineUnionKind {
+    OneOf,
+    AnyOf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum SchemaIdentity {
     Component(String),
     Pointer(String),
+    InlineUnionBranch {
+        owner_context: String,
+        union_kind: InlineUnionKind,
+        original_index: usize,
+        discriminator: Option<String>,
+        fingerprint: String,
+    },
     Inline {
         context: String,
         kind: &'static str,
@@ -1719,6 +1732,26 @@ impl SchemaAnalyzer {
         };
         self.schema_names
             .allocate(identity, preferred_name, collision_name)
+    }
+
+    fn allocate_inline_union_branch_name(
+        &mut self,
+        preferred_name: &str,
+        owner_context: &str,
+        union_kind: InlineUnionKind,
+        original_index: usize,
+        discriminator: Option<&str>,
+        schema: &Schema,
+    ) -> String {
+        let identity = SchemaIdentity::InlineUnionBranch {
+            owner_context: owner_context.to_string(),
+            union_kind,
+            original_index,
+            discriminator: discriminator.map(str::to_string),
+            fingerprint: serde_json::to_string(schema).unwrap_or_else(|_| format!("{schema:?}")),
+        };
+        self.schema_names
+            .allocate(identity, preferred_name, &format!("{preferred_name}Inline"))
     }
 
     fn allocate_pointer_schema_name(&mut self, pointer: &str, preferred_name: &str) -> String {
@@ -2592,6 +2625,8 @@ impl SchemaAnalyzer {
                         discriminator.as_ref(),
                         schema_name,
                         &mut dependencies,
+                        InlineUnionKind::OneOf,
+                        None,
                     )?
                 }
             }
@@ -2879,6 +2914,8 @@ impl SchemaAnalyzer {
                         discriminator.as_ref(),
                         &union_type_name,
                         dependencies,
+                        InlineUnionKind::OneOf,
+                        None,
                     )?;
 
                     // Store the union as a named schema
@@ -3482,6 +3519,8 @@ impl SchemaAnalyzer {
                             discriminator.as_ref(),
                             &union_name,
                             dependencies,
+                            InlineUnionKind::OneOf,
+                            None,
                         )?;
 
                         // If we got a union type (not discriminated), we need to store it as a named type
@@ -3918,7 +3957,14 @@ impl SchemaAnalyzer {
         discriminator: Option<&crate::openapi::Discriminator>,
         parent_name: &str,
         dependencies: &mut HashSet<String>,
+        union_kind: InlineUnionKind,
+        source_indices: Option<&[usize]>,
     ) -> Result<SchemaType> {
+        let default_indices = (0..one_of_schemas.len()).collect::<Vec<_>>();
+        let source_indices = source_indices
+            .filter(|indices| indices.len() == one_of_schemas.len())
+            .unwrap_or(&default_indices);
+
         // Branches may be pointers into other parts of the document.
         let expanded_branches;
         let one_of_schemas = match self.expand_pointer_branches(one_of_schemas) {
@@ -3931,8 +3977,16 @@ impl SchemaAnalyzer {
 
         // A boolean branch either opens the union up or can never be taken.
         let boolean_resolved;
+        let boolean_resolved_indices;
         let one_of_schemas = match Self::resolve_boolean_branches(one_of_schemas) {
             Ok(resolved) => {
+                boolean_resolved_indices = one_of_schemas
+                    .iter()
+                    .zip(source_indices.iter().copied())
+                    .filter_map(|(branch, index)| {
+                        (!matches!(branch, Schema::Bool(false))).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
                 boolean_resolved = resolved;
                 boolean_resolved.as_slice()
             }
@@ -3940,6 +3994,7 @@ impl SchemaAnalyzer {
                 return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
             }
         };
+        let source_indices = boolean_resolved_indices.as_slice();
         if one_of_schemas.is_empty() {
             return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
         }
@@ -3979,7 +4034,14 @@ impl SchemaAnalyzer {
         // If there's no discriminator, we should create an untagged union
         if discriminator.is_none() {
             // Handle untagged unions (oneOf without discriminator)
-            return self.analyze_untagged_oneof_union(one_of_schemas, parent_name, dependencies);
+            return self.analyze_untagged_oneof_union(
+                one_of_schemas,
+                parent_name,
+                dependencies,
+                union_kind,
+                source_indices,
+                None,
+            );
         }
 
         // Bug openapi-generator-dpd: if any branch resolves to a non-object
@@ -3991,7 +4053,14 @@ impl SchemaAnalyzer {
             .iter()
             .any(|s| !self.branch_resolves_to_object(s))
         {
-            return self.analyze_untagged_oneof_union(one_of_schemas, parent_name, dependencies);
+            return self.analyze_untagged_oneof_union(
+                one_of_schemas,
+                parent_name,
+                dependencies,
+                union_kind,
+                source_indices,
+                discriminator,
+            );
         }
 
         // This is a discriminated union
@@ -4007,7 +4076,9 @@ impl SchemaAnalyzer {
         let mut variants = Vec::new();
         let mut used_variant_names = std::collections::HashSet::new();
 
-        for variant_schema in one_of_schemas {
+        for (variant_schema, original_index) in
+            one_of_schemas.iter().zip(source_indices.iter().copied())
+        {
             // Check if this is a direct reference, recursive reference, or an allOf wrapper with a reference
             let ref_info = if let Some(ref_str) = variant_schema.reference() {
                 Some((ref_str, false))
@@ -4100,7 +4171,7 @@ impl SchemaAnalyzer {
                 }
             } else {
                 // Handle inline schemas in oneOf
-                let variant_index = variants.len();
+                let variant_index = original_index;
                 let inline_type_name =
                     self.generate_inline_type_name(variant_schema, variant_index);
 
@@ -4151,8 +4222,15 @@ impl SchemaAnalyzer {
 
                 // Store inline schema before recording the variant so a
                 // reserved component collision can return the actual name.
-                let inline_type_name =
-                    self.add_inline_schema(&inline_type_name, variant_schema, dependencies)?;
+                let inline_type_name = self.add_inline_union_branch_schema(
+                    &inline_type_name,
+                    variant_schema,
+                    dependencies,
+                    parent_name,
+                    union_kind,
+                    original_index,
+                    Some(&final_discriminator_value),
+                )?;
 
                 variants.push(UnionVariant {
                     rust_name,
@@ -4168,7 +4246,9 @@ impl SchemaAnalyzer {
             // This handles cases where oneOf contains references or inline schemas without proper discriminators
             let mut union_variants = Vec::new();
 
-            for (variant_index, variant_schema) in one_of_schemas.iter().enumerate() {
+            for (variant_schema, original_index) in
+                one_of_schemas.iter().zip(source_indices.iter().copied())
+            {
                 // First check if it's a reference or recursive reference
                 if let Some(ref_str) = variant_schema.reference() {
                     if let Some(schema_name) = self.extract_schema_name(ref_str) {
@@ -4195,11 +4275,16 @@ impl SchemaAnalyzer {
                         nullable: false,
                     });
                 } else {
+                    let branch_discriminator = self.inline_union_branch_discriminator_value(
+                        variant_schema,
+                        discriminator,
+                        original_index,
+                    );
                     // Handle inline schemas by creating type aliases or using primitive types directly
                     let inline_name = self.generate_context_aware_name(
                         parent_name,
                         "InlineVariant",
-                        variant_index,
+                        original_index,
                         Some(variant_schema),
                     );
                     let analyzed = self.analyze_schema_value(variant_schema, &inline_name)?;
@@ -4240,13 +4325,17 @@ impl SchemaAnalyzer {
                                     let inline_type_name = self.generate_context_aware_name(
                                         parent_name,
                                         "Variant",
-                                        variant_index,
+                                        original_index,
                                         None,
                                     );
-                                    let inline_type_name = self.add_inline_schema(
+                                    let inline_type_name = self.add_inline_union_branch_schema(
                                         &inline_type_name,
                                         variant_schema,
                                         dependencies,
+                                        parent_name,
+                                        union_kind,
+                                        original_index,
+                                        branch_discriminator.as_deref(),
                                     )?;
                                     union_variants.push(SchemaRef {
                                         target: inline_type_name,
@@ -4265,11 +4354,15 @@ impl SchemaAnalyzer {
                         // For other complex types, create an inline type
                         _ => {
                             let inline_type_name =
-                                format!("{}Variant{}", parent_name, variant_index + 1);
-                            let inline_type_name = self.add_inline_schema(
+                                format!("{}Variant{}", parent_name, original_index + 1);
+                            let inline_type_name = self.add_inline_union_branch_schema(
                                 &inline_type_name,
                                 variant_schema,
                                 dependencies,
+                                parent_name,
+                                union_kind,
+                                original_index,
+                                branch_discriminator.as_deref(),
                             )?;
                             union_variants.push(SchemaRef {
                                 target: inline_type_name,
@@ -4304,25 +4397,32 @@ impl SchemaAnalyzer {
         one_of_schemas: &[Schema],
         parent_name: &str,
         dependencies: &mut HashSet<String>,
+        union_kind: InlineUnionKind,
+        source_indices: &[usize],
+        discriminator: Option<&Discriminator>,
     ) -> Result<SchemaType> {
         // Drop {"type": "null"} variants. They mean "may be null" and are surfaced
         // as Option<T> at the property level — including them here produces a junk
         // `SerdeJsonValue(serde_json::Value)` variant.
-        let filtered: Vec<&Schema> = one_of_schemas
+        let filtered: Vec<(usize, &Schema)> = one_of_schemas
             .iter()
-            .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+            .zip(source_indices.iter().copied())
+            .filter_map(|(schema, original_index)| {
+                (!matches!(schema.schema_type(), Some(OpenApiSchemaType::Null)))
+                    .then_some((original_index, schema))
+            })
             .collect();
 
         // If filtering leaves a single variant, return its analyzed type directly.
         if filtered.len() == 1 {
             return self
-                .analyze_schema_value(filtered[0], parent_name)
+                .analyze_schema_value(filtered[0].1, parent_name)
                 .map(|a| a.schema_type);
         }
 
         let mut union_variants = Vec::new();
 
-        for (variant_index, variant_schema) in filtered.iter().copied().enumerate() {
+        for (original_index, variant_schema) in filtered {
             // First check if it's a reference or recursive reference
             if let Some(ref_str) = variant_schema.reference() {
                 if let Some(schema_name) = self.extract_schema_name(ref_str) {
@@ -4349,11 +4449,16 @@ impl SchemaAnalyzer {
                     nullable: false,
                 });
             } else {
+                let branch_discriminator = self.inline_union_branch_discriminator_value(
+                    variant_schema,
+                    discriminator,
+                    original_index,
+                );
                 // Handle inline schemas by creating type aliases or using primitive types directly
                 let inline_name = self.generate_context_aware_name(
                     parent_name,
                     "InlineVariant",
-                    variant_index,
+                    original_index,
                     Some(variant_schema),
                 );
                 let analyzed = self.analyze_schema_value(variant_schema, &inline_name)?;
@@ -4413,14 +4518,19 @@ impl SchemaAnalyzer {
                                         let inline_type_name = self.generate_context_aware_name(
                                             parent_name,
                                             "Variant",
-                                            variant_index,
+                                            original_index,
                                             None,
                                         );
-                                        let inline_type_name = self.add_inline_schema(
-                                            &inline_type_name,
-                                            variant_schema,
-                                            dependencies,
-                                        )?;
+                                        let inline_type_name = self
+                                            .add_inline_union_branch_schema(
+                                                &inline_type_name,
+                                                variant_schema,
+                                                dependencies,
+                                                parent_name,
+                                                union_kind,
+                                                original_index,
+                                                branch_discriminator.as_deref(),
+                                            )?;
                                         union_variants.push(SchemaRef {
                                             target: inline_type_name,
                                             nullable: false,
@@ -4433,13 +4543,17 @@ impl SchemaAnalyzer {
                                 let inline_type_name = self.generate_context_aware_name(
                                     parent_name,
                                     "Variant",
-                                    variant_index,
+                                    original_index,
                                     None,
                                 );
-                                let inline_type_name = self.add_inline_schema(
+                                let inline_type_name = self.add_inline_union_branch_schema(
                                     &inline_type_name,
                                     variant_schema,
                                     dependencies,
+                                    parent_name,
+                                    union_kind,
+                                    original_index,
+                                    branch_discriminator.as_deref(),
                                 )?;
                                 union_variants.push(SchemaRef {
                                     target: inline_type_name,
@@ -4460,13 +4574,17 @@ impl SchemaAnalyzer {
                         let inline_type_name = self.generate_context_aware_name(
                             parent_name,
                             "Variant",
-                            variant_index,
+                            original_index,
                             None,
                         );
-                        let inline_type_name = self.add_inline_schema(
+                        let inline_type_name = self.add_inline_union_branch_schema(
                             &inline_type_name,
                             variant_schema,
                             dependencies,
+                            parent_name,
+                            union_kind,
+                            original_index,
+                            branch_discriminator.as_deref(),
                         )?;
                         union_variants.push(SchemaRef {
                             target: inline_type_name,
@@ -4502,6 +4620,37 @@ impl SchemaAnalyzer {
             "inline-schema",
             schema,
         );
+        self.add_allocated_inline_schema(allocated_name, schema, dependencies)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_inline_union_branch_schema(
+        &mut self,
+        type_name: &str,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+        owner_context: &str,
+        union_kind: InlineUnionKind,
+        original_index: usize,
+        discriminator: Option<&str>,
+    ) -> Result<String> {
+        let allocated_name = self.allocate_inline_union_branch_name(
+            type_name,
+            owner_context,
+            union_kind,
+            original_index,
+            discriminator,
+            schema,
+        );
+        self.add_allocated_inline_schema(allocated_name, schema, dependencies)
+    }
+
+    fn add_allocated_inline_schema(
+        &mut self,
+        allocated_name: String,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<String> {
         // For primitive types, we need to ensure they are stored as type aliases
         if let Some(schema_type) = schema.schema_type() {
             match schema_type {
@@ -4553,6 +4702,33 @@ impl SchemaAnalyzer {
         }
 
         Ok(allocated_name)
+    }
+
+    fn inline_union_branch_discriminator_value(
+        &self,
+        schema: &Schema,
+        discriminator: Option<&Discriminator>,
+        original_index: usize,
+    ) -> Option<String> {
+        let discriminator = discriminator?;
+        discriminator
+            .mapping
+            .as_ref()
+            .and_then(|mappings| {
+                mappings
+                    .iter()
+                    .find(|(_, target_ref)| {
+                        target_ref.contains(&format!("variant_{original_index}"))
+                    })
+                    .map(|(key, _)| key.clone())
+            })
+            .or_else(|| {
+                Some(self.extract_inline_discriminator_value(
+                    schema,
+                    &discriminator.property_name,
+                    original_index,
+                ))
+            })
     }
 
     fn extract_inline_discriminator_value(
@@ -5776,6 +5952,8 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
         context_name: &str,
     ) -> Result<SchemaType> {
+        let original_indices = (0..any_of_schemas.len()).collect::<Vec<_>>();
+
         // Branches may be pointers into other parts of the document.
         let expanded_branches;
         let any_of_schemas = match self.expand_pointer_branches(any_of_schemas) {
@@ -5788,8 +5966,16 @@ impl SchemaAnalyzer {
 
         // A boolean branch either opens the union up or can never be taken.
         let boolean_resolved;
+        let boolean_resolved_indices;
         let any_of_schemas = match Self::resolve_boolean_branches(any_of_schemas) {
             Ok(resolved) => {
+                boolean_resolved_indices = any_of_schemas
+                    .iter()
+                    .zip(original_indices.iter().copied())
+                    .filter_map(|(branch, index)| {
+                        (!matches!(branch, Schema::Bool(false))).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
                 boolean_resolved = resolved;
                 boolean_resolved.as_slice()
             }
@@ -5797,6 +5983,7 @@ impl SchemaAnalyzer {
                 return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
             }
         };
+        let source_indices = boolean_resolved_indices.as_slice();
         if any_of_schemas.is_empty() {
             return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
         }
@@ -5806,7 +5993,8 @@ impl SchemaAnalyzer {
         // variant in here would produce a phantom `()` or `serde_json::Value`
         // type alias that the generator can't render.
         let filtered_owned: Vec<Schema>;
-        let any_of_schemas: &[Schema] = if any_of_schemas
+        let filtered_indices: Vec<usize>;
+        let (any_of_schemas, source_indices): (&[Schema], &[usize]) = if any_of_schemas
             .iter()
             .any(|s| matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
         {
@@ -5814,6 +6002,14 @@ impl SchemaAnalyzer {
                 .iter()
                 .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
                 .cloned()
+                .collect();
+            filtered_indices = any_of_schemas
+                .iter()
+                .zip(source_indices.iter().copied())
+                .filter_map(|(schema, index)| {
+                    (!matches!(schema.schema_type(), Some(OpenApiSchemaType::Null)))
+                        .then_some(index)
+                })
                 .collect();
             if filtered_owned.is_empty() {
                 return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
@@ -5823,9 +6019,9 @@ impl SchemaAnalyzer {
                     .analyze_schema_value(&filtered_owned[0], context_name)
                     .map(|a| a.schema_type);
             }
-            &filtered_owned
+            (&filtered_owned, &filtered_indices)
         } else {
-            any_of_schemas
+            (any_of_schemas, source_indices)
         };
 
         // A union of one is that one: gcore writes `anyOf: [{allOf: [...]}]`
@@ -5869,6 +6065,8 @@ impl SchemaAnalyzer {
                     Some(disc),
                     context_name,
                     dependencies,
+                    InlineUnionKind::AnyOf,
+                    Some(source_indices),
                 );
             }
 
@@ -5884,13 +6082,17 @@ impl SchemaAnalyzer {
                     }),
                     context_name,
                     dependencies,
+                    InlineUnionKind::AnyOf,
+                    Some(source_indices),
                 );
             }
 
             // Create an untagged union for flexible matching
             let mut variants = Vec::new();
 
-            for schema in any_of_schemas {
+            for (schema, original_index) in
+                any_of_schemas.iter().zip(source_indices.iter().copied())
+            {
                 if let Some(ref_str) = schema.reference() {
                     if let Some(target) = self.extract_schema_name(ref_str) {
                         dependencies.insert(target.to_string());
@@ -5903,12 +6105,18 @@ impl SchemaAnalyzer {
                     || schema.inferred_type() == Some(OpenApiSchemaType::Object)
                 {
                     // Generate inline object type for anyOf union
-                    let inline_index = variants.len();
-                    let inline_type_name = self.generate_inline_type_name(schema, inline_index);
+                    let inline_type_name = self.generate_inline_type_name(schema, original_index);
 
                     // Store inline schema for later analysis and generation
-                    let inline_type_name =
-                        self.add_inline_schema(&inline_type_name, schema, dependencies)?;
+                    let inline_type_name = self.add_inline_union_branch_schema(
+                        &inline_type_name,
+                        schema,
+                        dependencies,
+                        context_name,
+                        InlineUnionKind::AnyOf,
+                        original_index,
+                        None,
+                    )?;
 
                     variants.push(SchemaRef {
                         target: inline_type_name,
@@ -5926,7 +6134,7 @@ impl SchemaAnalyzer {
                                     self.generate_context_aware_name(
                                         context_name,
                                         "Array",
-                                        variants.len(),
+                                        original_index,
                                         Some(schema),
                                     )
                                 }
@@ -5934,7 +6142,7 @@ impl SchemaAnalyzer {
                                 self.generate_context_aware_name(
                                     context_name,
                                     "Array",
-                                    variants.len(),
+                                    original_index,
                                     Some(schema),
                                 )
                             }
@@ -5942,14 +6150,16 @@ impl SchemaAnalyzer {
                             self.generate_context_aware_name(
                                 context_name,
                                 "Array",
-                                variants.len(),
+                                original_index,
                                 Some(schema),
                             )
                         };
-                    let array_type_name = self.allocate_inline_schema_name(
+                    let array_type_name = self.allocate_inline_union_branch_name(
                         &preferred_array_type_name,
-                        &format!("{preferred_array_type_name}Inline"),
-                        "anyof-array-variant",
+                        context_name,
+                        InlineUnionKind::AnyOf,
+                        original_index,
+                        None,
                         schema,
                     );
                     // Handle array types in unions by creating a type alias.
@@ -5999,42 +6209,43 @@ impl SchemaAnalyzer {
                             nullable: false,
                         });
                     } else {
-                        let inline_index = variants.len();
                         let preferred_inline_type_name = match schema_type {
                             OpenApiSchemaType::String => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}String")
                                 } else {
-                                    format!("{context_name}StringVariant{inline_index}")
+                                    format!("{context_name}StringVariant{original_index}")
                                 }
                             }
                             OpenApiSchemaType::Number => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}Number")
                                 } else {
-                                    format!("{context_name}NumberVariant{inline_index}")
+                                    format!("{context_name}NumberVariant{original_index}")
                                 }
                             }
                             OpenApiSchemaType::Integer => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}Integer")
                                 } else {
-                                    format!("{context_name}IntegerVariant{inline_index}")
+                                    format!("{context_name}IntegerVariant{original_index}")
                                 }
                             }
                             OpenApiSchemaType::Boolean => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}Boolean")
                                 } else {
-                                    format!("{context_name}BooleanVariant{inline_index}")
+                                    format!("{context_name}BooleanVariant{original_index}")
                                 }
                             }
-                            _ => format!("{context_name}Variant{inline_index}"),
+                            _ => format!("{context_name}Variant{original_index}"),
                         };
-                        let inline_type_name = self.allocate_inline_schema_name(
+                        let inline_type_name = self.allocate_inline_union_branch_name(
                             &preferred_inline_type_name,
-                            &format!("{preferred_inline_type_name}Inline"),
-                            "anyof-primitive-alias",
+                            context_name,
+                            InlineUnionKind::AnyOf,
+                            original_index,
+                            None,
                             schema,
                         );
 
@@ -6072,15 +6283,21 @@ impl SchemaAnalyzer {
                     // it and leave the generated Rust union unable to hydrate
                     // schema-valid object input. Hoist the branch and let the
                     // normal analyzer preserve its nested composition.
-                    let inline_index = variants.len();
                     let inline_type_name = self.generate_context_aware_name(
                         context_name,
                         "InlineVariant",
-                        inline_index,
+                        original_index,
                         Some(schema),
                     );
-                    let inline_type_name =
-                        self.add_inline_schema(&inline_type_name, schema, dependencies)?;
+                    let inline_type_name = self.add_inline_union_branch_schema(
+                        &inline_type_name,
+                        schema,
+                        dependencies,
+                        context_name,
+                        InlineUnionKind::AnyOf,
+                        original_index,
+                        None,
+                    )?;
                     dependencies.insert(inline_type_name.clone());
                     variants.push(SchemaRef {
                         target: inline_type_name,
