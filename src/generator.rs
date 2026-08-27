@@ -1513,6 +1513,13 @@ impl CodeGenerator {
                     pub type #array_name = Vec<#inner_type>;
                 })
             }
+            SchemaType::Nullable { inner_type } => {
+                let nullable_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
+                let inner_type = self.generate_array_item_type(inner_type, analysis);
+                Ok(quote! {
+                    pub type #nullable_name = Option<#inner_type>;
+                })
+            }
             SchemaType::Composition { schemas } => {
                 self.generate_composition_struct(schema, schemas)
             }
@@ -2793,6 +2800,10 @@ impl CodeGenerator {
                 let inner_type = self.generate_array_item_type(item_type, analysis);
                 quote! { Vec<#inner_type> }
             }
+            SchemaType::Nullable { inner_type } => {
+                let inner_type = self.generate_array_item_type(inner_type, analysis);
+                quote! { Option<#inner_type> }
+            }
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)
             }
@@ -3538,6 +3549,10 @@ impl CodeGenerator {
                 // Nested arrays
                 let inner_type = self.generate_array_item_type(item_type, analysis);
                 quote! { Vec<#inner_type> }
+            }
+            SchemaType::Nullable { inner_type } => {
+                let inner_type = self.generate_array_item_type(inner_type, analysis);
+                quote! { Option<#inner_type> }
             }
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)

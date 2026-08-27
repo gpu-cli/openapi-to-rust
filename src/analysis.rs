@@ -120,6 +120,7 @@ impl SchemaType {
             | Self::Reference { .. }
             | Self::Array { .. }
             | Self::Tuple { .. }
+            | Self::Nullable { .. }
             | Self::Untyped { .. } => true,
             Self::Object { .. }
             | Self::StringEnum { .. }
@@ -177,6 +178,9 @@ fn collect_type_dependencies(
             targets.insert(target.clone());
         }
         SchemaType::Array { item_type } => collect_type_dependencies(item_type, targets, depth + 1),
+        SchemaType::Nullable { inner_type } => {
+            collect_type_dependencies(inner_type, targets, depth + 1)
+        }
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
                 collect_type_dependencies(element_type, targets, depth + 1);
@@ -251,6 +255,7 @@ fn normalize_untyped(schema_type: &mut SchemaType, depth: usize) {
             }
         }
         SchemaType::Array { item_type } => normalize_untyped(item_type, depth + 1),
+        SchemaType::Nullable { inner_type } => normalize_untyped(inner_type, depth + 1),
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
                 normalize_untyped(element_type, depth + 1);
@@ -354,6 +359,9 @@ fn collect_untyped(
             } else {
                 collect_untyped(item_type, &element_context, findings, depth + 1);
             }
+        }
+        SchemaType::Nullable { inner_type } => {
+            collect_untyped(inner_type, context, findings, depth + 1)
         }
         SchemaType::Tuple { element_types } => {
             for (index, element_type) in element_types.iter().enumerate() {
@@ -622,6 +630,11 @@ pub enum SchemaType {
     Union { variants: Vec<SchemaRef> },
     /// Array type
     Array { item_type: Box<SchemaType> },
+    /// A nullable value in a container position. Object properties carry
+    /// nullability separately because their `Option<T>` also participates in
+    /// required-vs-missing serde behavior; array items, tuple positions, and
+    /// typed additional-property values need an inline wrapper instead.
+    Nullable { inner_type: Box<SchemaType> },
     /// Fixed-arity array — one schema per position, no extras — rendered as a
     /// Rust tuple. Only emitted when the spec proves the length (see
     /// `SchemaDetails::positional_items_are_exact`); an open `prefixItems`
@@ -2270,6 +2283,24 @@ impl SchemaAnalyzer {
         }
     }
 
+    /// Carry schema nullability into positions that do not have
+    /// [`PropertyInfo::nullable`] metadata of their own. This is deliberately
+    /// applied only by container analyzers: wrapping an ordinary object
+    /// property here would conflate a missing field with an explicit JSON
+    /// `null` and would double-wrap the generator's field-level `Option<T>`.
+    fn nullable_container_value(&self, schema: &Schema, schema_type: SchemaType) -> SchemaType {
+        if !self.schema_or_reference_is_nullable(schema)
+            || matches!(schema_type, SchemaType::Nullable { .. })
+            || matches!(schema.schema_type(), Some(OpenApiSchemaType::Null))
+        {
+            schema_type
+        } else {
+            SchemaType::Nullable {
+                inner_type: Box::new(schema_type),
+            }
+        }
+    }
+
     fn extract_type_mappings(&self, schema: &Schema) -> Result<Option<BTreeMap<String, String>>> {
         let variants = schema.union_variants().ok_or_else(|| {
             GeneratorError::InvalidSchema("No variants found for discriminated union".to_string())
@@ -3019,6 +3050,8 @@ impl SchemaAnalyzer {
                         None,
                         dependencies,
                     )?;
+                    let nullable_value =
+                        self.nullable_container_value(value_schema, analyzed.clone());
                     let value_details = value_schema.details();
                     let required_property = PropertyInfo {
                         schema_type: analyzed.clone(),
@@ -3033,7 +3066,7 @@ impl SchemaAnalyzer {
                     };
                     (
                         ObjectAdditionalProperties::Typed {
-                            value_type: Box::new(analyzed),
+                            value_type: Box::new(nullable_value),
                         },
                         Some(required_property),
                         false,
@@ -5926,7 +5959,7 @@ impl SchemaAnalyzer {
             _ => self.analyze_property_schema_with_context(items_schema, None, dependencies)?,
         };
 
-        Ok(item_type)
+        Ok(self.nullable_container_value(items_schema, item_type))
     }
 
     fn get_number_rust_type(
@@ -8410,6 +8443,7 @@ fn rewrite_schema_type_names(schema_type: &mut SchemaType, aliases: &BTreeMap<St
             }
         }
         SchemaType::Array { item_type } => rewrite_schema_type_names(item_type, aliases),
+        SchemaType::Nullable { inner_type } => rewrite_schema_type_names(inner_type, aliases),
         SchemaType::Untyped { .. } => {}
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
