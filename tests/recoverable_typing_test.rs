@@ -376,6 +376,93 @@ fn union_branches_that_are_deep_pointers_are_expanded() {
 }
 
 #[test]
+fn a_pointer_into_a_composition_resolves_to_that_member() {
+    // The other pointer form PagerDuty uses: one member of another schema's
+    // `allOf`, addressed by index.
+    let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
+        "Tag": { "allOf": [
+            { "type": "object", "additionalProperties": false,
+              "properties": { "label": { "type": "string" } } }
+        ]},
+        "Action": { "type": "object", "additionalProperties": false, "properties": {
+            "base": { "$ref": "#/components/schemas/Tag/allOf/0" }
+        }}
+    })));
+
+    assert!(
+        !generated.contains("pub base: Option<serde_json::Value>"),
+        "a pointer into a composition must resolve:\n{generated}"
+    );
+    assert!(recoverable.is_empty(), "{recoverable:?}");
+}
+
+#[test]
+fn an_unresolvable_reference_still_degrades_rather_than_failing() {
+    // Pointer resolution must not turn a bad reference into a hard error: the
+    // rest of the document still generates, and the census reports the field so
+    // it can be found.
+    let analysis = analyze(spec_with_schemas(json!({
+        "Thing": { "type": "object", "additionalProperties": false, "properties": {
+            "external": { "$ref": "https://example.com/schemas/Other.json" },
+            "missing": { "$ref": "#/components/schemas/DoesNotExist/allOf/7" }
+        }}
+    })));
+
+    let reasons = analysis
+        .untyped_fields()
+        .into_iter()
+        .map(|finding| finding.reason)
+        .collect::<Vec<_>>();
+    assert!(
+        reasons
+            .iter()
+            .all(|reason| *reason == openapi_to_rust::analysis::UntypedReason::UnresolvedReference),
+        "unresolvable refs must be reported as such, got {reasons:?}"
+    );
+}
+
+#[test]
+fn a_nullable_reference_branch_is_not_treated_as_null() {
+    // `{$ref: ..., nullable: true}` constrains its target; only an *empty*
+    // nullable object is the null marker. Collapsing this would pick the wrong
+    // branch of the union.
+    let (generated, _) = generate_and_census(spec_with_schemas(json!({
+        "A": { "type": "object", "additionalProperties": false,
+               "properties": { "a": { "type": "string" } } },
+        "B": { "type": "object", "additionalProperties": false,
+               "properties": { "b": { "type": "string" } } },
+        "Holder": { "type": "object", "additionalProperties": false, "properties": {
+            "either": { "anyOf": [
+                { "$ref": "#/components/schemas/A" },
+                { "$ref": "#/components/schemas/B", "nullable": true }
+            ]}
+        }}
+    })));
+
+    assert!(
+        !generated.contains("pub either: Option<A>"),
+        "a nullable $ref branch is a real alternative, not a null marker:\n{generated}"
+    );
+}
+
+#[test]
+fn items_true_parses_as_an_unconstrained_array() {
+    // The other half of boolean `items`: `true` accepts anything, so the array
+    // is untyped but the document still parses.
+    let (generated, recoverable) = generate_and_census(spec_with_schemas(json!({
+        "Thing": { "type": "object", "additionalProperties": false, "properties": {
+            "anything": { "type": "array", "items": true }
+        }}
+    })));
+
+    assert!(
+        generated.contains("pub anything: Option<Vec<serde_json::Value>>"),
+        "`items: true` must parse and stay unconstrained:\n{generated}"
+    );
+    assert!(recoverable.is_empty(), "{recoverable:?}");
+}
+
+#[test]
 fn a_genuinely_unconstrained_value_stays_untyped() {
     // The counterweight to every narrowing above: when the schema says "any
     // JSON", `serde_json::Value` is the right answer and the census must call
