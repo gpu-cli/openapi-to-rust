@@ -11,17 +11,107 @@ expression: "&generated_code"
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum EventUnion {
-    #[serde(rename = "response.reasoning_summary_part.added")]
     ReasoningSummaryPartAdded(ResponseReasoningSummaryPartAddedEvent),
-    #[serde(rename = "response.reasoning_summary_part.done")]
     ReasoningSummaryPartDone(ResponseReasoningSummaryPartDoneEvent),
+}
+impl serde::Serialize for EventUnion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::ReasoningSummaryPartAdded(payload) => {
+                let mut value = serde_json::to_value(payload)
+                    .map_err(serde::ser::Error::custom)?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        serde::ser::Error::custom(
+                            concat!(
+                                "discriminated union variant `",
+                                stringify!(ReasoningSummaryPartAdded),
+                                "` did not serialize as an object",
+                            ),
+                        )
+                    })?;
+                object
+                    .insert(
+                        "type".to_string(),
+                        serde_json::Value::String(
+                            "response.reasoning_summary_part.added".to_string(),
+                        ),
+                    );
+                value.serialize(serializer)
+            }
+            Self::ReasoningSummaryPartDone(payload) => {
+                let mut value = serde_json::to_value(payload)
+                    .map_err(serde::ser::Error::custom)?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        serde::ser::Error::custom(
+                            concat!(
+                                "discriminated union variant `",
+                                stringify!(ReasoningSummaryPartDone),
+                                "` did not serialize as an object",
+                            ),
+                        )
+                    })?;
+                object
+                    .insert(
+                        "type".to_string(),
+                        serde_json::Value::String(
+                            "response.reasoning_summary_part.done".to_string(),
+                        ),
+                    );
+                value.serialize(serializer)
+            }
+        }
+    }
+}
+impl<'de> serde::Deserialize<'de> for EventUnion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let discriminator = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom(
+                concat!("missing string discriminator `", "type", "`",),
+            ))?
+            .to_string();
+        match discriminator.as_str() {
+            "response.reasoning_summary_part.added" => {
+                serde_json::from_value::<ResponseReasoningSummaryPartAddedEvent>(value)
+                    .map(Self::ReasoningSummaryPartAdded)
+                    .map_err(serde::de::Error::custom)
+            }
+            "response.reasoning_summary_part.done" => {
+                serde_json::from_value::<ResponseReasoningSummaryPartDoneEvent>(value)
+                    .map(Self::ReasoningSummaryPartDone)
+                    .map_err(serde::de::Error::custom)
+            }
+            other => {
+                Err(
+                    serde::de::Error::custom(
+                        format!(
+                            "unknown discriminator value `{other}` for `{}`", "type",
+                        ),
+                    ),
+                )
+            }
+        }
+    }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseReasoningSummaryPartDoneEvent {
     pub part: ReasoningPart,
+    ///The type of the event. Always `response.reasoning_summary_part.done`.
+    pub r#type: ResponseReasoningSummaryPartDoneEventType,
 }
 ///The type of the event. Always `response.reasoning_summary_part.done`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -52,6 +142,8 @@ impl AsRef<str> for ResponseReasoningSummaryPartDoneEventType {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseReasoningSummaryPartAddedEvent {
     pub part: ReasoningPart,
+    ///The type of the event. Always `response.reasoning_summary_part.added`.
+    pub r#type: ResponseReasoningSummaryPartAddedEventType,
 }
 ///The type of the event. Always `response.reasoning_summary_part.added`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]

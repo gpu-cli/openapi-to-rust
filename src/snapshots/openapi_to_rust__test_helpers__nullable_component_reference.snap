@@ -12,16 +12,7 @@ expression: "&generated_code"
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Pod {
-    pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-    #[serde(rename = "startedAt")]
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub template: Option<String>,
+pub struct Envelope {
+    pub items: Option<NullableItems>,
 }
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ContainerConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
-}
+pub type NullableItems = Vec<String>;

@@ -6,7 +6,31 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- The 55-spec compile gate now generates deterministic JSON instances for
+  representable component schemas, validates them against the source JSON
+  Schema, hydrates and serializes the exact generated Rust models, validates
+  their output, and requires a stable second round trip. Targeted runs such as
+  `scripts/spec-compile.sh anthropic` use the same gate and report sample and
+  skip coverage.
+
+### Changed
+
+- **Breaking (generated API).** Structs used as discriminated-union variants
+  retain their discriminator fields, so constructing one directly now requires
+  the same tag its standalone component schema requires. Parent unions perform
+  explicit discriminator-directed Serde dispatch instead of stripping the
+  field and relying on an internally tagged derive. This keeps direct values,
+  arrays, and union payloads on one schema-valid wire shape.
+
 ### Fixed
+
+- Required nullable fields serialize `None` as explicit JSON `null` instead of
+  omitting a key listed by the schema's `required` array. Nullable component
+  schemas referenced by a property now propagate that nullability to the field.
+- A composition nested as one branch of an outer `anyOf` is retained as a named
+  Rust union variant instead of being silently dropped.
 
 - Boolean subschemas (`true` and `false`) parse wherever JSON Schema 2020-12
   allows one — a property, a `$defs` entry, `not`, `if`/`then`/`else`,

@@ -404,12 +404,15 @@ mod tests {
     fn sample_plugin() -> Plugin {
         Plugin {
             added_at: "2024-01-01T00:00:00Z".parse().unwrap(),
-            connection: PluginModeUnion::PluginSupervisedProps(PluginSupervisedProps {}),
+            connection: PluginModeUnion::PluginSupervisedProps(PluginSupervisedProps {
+                mode: PluginMode::Supervised,
+            }),
             description: None,
             id: "plugin-one".to_string(),
             manifest: PluginManifest::default(),
             name: "Test Plugin".to_string(),
             status: PluginStatus::PluginStatusActive(PluginStatusActive {
+                active_state: PluginStatusActiveActiveState::Active,
                 activated_at: "2024-01-01T00:00:00Z".parse().unwrap(),
             }),
             version: None,

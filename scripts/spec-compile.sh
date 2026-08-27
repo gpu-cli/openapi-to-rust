@@ -17,6 +17,9 @@
 #   SPEC_COMPILE_LIMIT=N    process only the first N alphabetically-sorted specs
 #   SPEC_COMPILE_PARSE_ONLY=1  skip cargo check; only verify the generator
 #                              parses+emits without errors. Faster.
+#   SPEC_COMPILE_SCHEMA_ROUNDTRIP=0  skip synthetic JSON -> generated Rust ->
+#                              JSON Schema round trips. Enabled by default for
+#                              compile runs; parse-only runs always skip it.
 #   SPEC_COMPILE_FORCE_CHECK=1 also cargo check the specs in
 #                              GENERATE_ONLY_SPECS (see below), which are
 #                              skipped by default because their generated
@@ -36,10 +39,20 @@ if [ "${SPEC_COMPILE_OFFLINE:-}" = "1" ]; then
   OFFLINE="--offline"
 fi
 
+ROUNDTRIP_ENABLED="${SPEC_COMPILE_SCHEMA_ROUNDTRIP:-1}"
+if [ "${SPEC_COMPILE_PARSE_ONLY:-}" = "1" ]; then
+  ROUNDTRIP_ENABLED=0
+fi
+
 echo "[spec-compile] building openapi-to-rust binary..."
-cargo build --bin openapi-to-rust $OFFLINE >/dev/null
+if [ "$ROUNDTRIP_ENABLED" = "1" ]; then
+  cargo build --features internal-tools --bin openapi-to-rust --bin schema-roundtrip $OFFLINE >/dev/null
+else
+  cargo build --bin openapi-to-rust $OFFLINE >/dev/null
+fi
 
 GEN_BIN="$(pwd)/target/debug/openapi-to-rust"
+ROUNDTRIP_BIN="$(pwd)/target/debug/schema-roundtrip"
 WORKSPACE="$(pwd)"
 
 ROOT="$WORKSPACE/tmp/spec-compile"
@@ -114,9 +127,17 @@ generate_only_reason() {
 passed=()
 failed_gen=()
 failed_check=()
+failed_roundtrip_plan=()
+failed_roundtrip=()
 skipped=()
 generate_only=()
 gen_ok=()
+roundtrip_planned=()
+roundtrip_tested=()
+roundtrip_schema_total=0
+roundtrip_schema_tested=0
+roundtrip_schema_skipped=0
+roundtrip_sample_total=0
 for entry in "${SPECS[@]}"; do
   IFS='|' read -r name spec_path <<<"$entry"
 
@@ -170,6 +191,41 @@ EOF
     failed_gen+=("$name")
     continue
   fi
+  roundtrip_ready=0
+  rt_components=0
+  rt_tested=0
+  rt_skipped=0
+  rt_samples=0
+  if [ "$ROUNDTRIP_ENABLED" = "1" ] && ! is_generate_only "$name"; then
+    mkdir -p "$dir/tests"
+    rt_log="$dir/roundtrip-plan.log"
+    rt_stats="$dir/roundtrip.stats"
+    if ! "$ROUNDTRIP_BIN" "$spec_path" "$dir/src/schema_roundtrip_test.rs" "$rt_stats" >"$rt_log" 2>&1; then
+      echo "RT-PLAN-FAIL"
+      failed_roundtrip_plan+=("$name")
+      continue
+    fi
+    {
+      echo
+      echo '#[cfg(test)]'
+      echo 'mod schema_roundtrip_test;'
+    } >>"$dir/src/lib.rs"
+    while IFS='=' read -r key value; do
+      case "$key" in
+        component_schemas) rt_components="$value" ;;
+        tested_schemas) rt_tested="$value" ;;
+        skipped_schemas) rt_skipped="$value" ;;
+        samples) rt_samples="$value" ;;
+      esac
+    done <"$rt_stats"
+    roundtrip_ready=1
+    roundtrip_planned+=("$name")
+    roundtrip_schema_total=$((roundtrip_schema_total + rt_components))
+    roundtrip_schema_tested=$((roundtrip_schema_tested + rt_tested))
+    roundtrip_schema_skipped=$((roundtrip_schema_skipped + rt_skipped))
+    roundtrip_sample_total=$((roundtrip_sample_total + rt_samples))
+  fi
+
   {
     # Empty [workspace] keeps the scratch crate out of the repo's workspace;
     # without it cargo walks up, finds the root manifest, and refuses.
@@ -182,15 +238,26 @@ EOF
     echo "publish = false"
     echo
     cat "$deps"
+    if [ "$roundtrip_ready" = "1" ]; then
+      echo
+      echo "[dev-dependencies]"
+      echo 'jsonschema = { version = "0.49", default-features = false }'
+    fi
   } >"$dir/Cargo.toml"
 
-  echo "GEN-OK"
+  if [ "$roundtrip_ready" = "1" ]; then
+    echo "GEN+RT-OK ($rt_tested/$rt_components schemas, $rt_samples samples)"
+  else
+    echo "GEN-OK"
+  fi
   gen_ok+=("$name")
 done
 
 if [ "${SPEC_COMPILE_PARSE_ONLY:-}" = "1" ]; then
   passed=("${gen_ok[@]}")
-  [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
+  if [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && [ ${#failed_gen[@]} -eq 0 ]; then
+    rm -rf "$ROOT"
+  fi
 elif [ ${#gen_ok[@]} -gt 0 ]; then
   # ---- Phase 2: check every exact generated manifest ---------------------
   echo
@@ -202,30 +269,55 @@ elif [ ${#gen_ok[@]} -gt 0 ]; then
       continue
     fi
     log="$ROOT/$name/check.log"
-    if ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check $OFFLINE ) >"$log" 2>&1; then
-      printf "%-30s PASS\n" "$name"
-      passed+=("$name")
-    else
+    if ! ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check $OFFLINE ) >"$log" 2>&1; then
       err_count=$(grep -cE "^error" "$log" || true)
       printf "%-30s CHECK-FAIL (%s errs)\n" "$name" "$err_count"
       failed_check+=("$name")
+      continue
+    fi
+    if [ -f "$ROOT/$name/src/schema_roundtrip_test.rs" ]; then
+      rt_log="$ROOT/$name/roundtrip.log"
+      if ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo test --lib generated_models_preserve_schema_valid_json $OFFLINE ) >"$rt_log" 2>&1; then
+        printf "%-30s PASS + ROUNDTRIP\n" "$name"
+        roundtrip_tested+=("$name")
+        passed+=("$name")
+      else
+        err_count=$(grep -cE "^(error|failures:|thread .* panicked)" "$rt_log" || true)
+        printf "%-30s ROUNDTRIP-FAIL (%s diagnostics)\n" "$name" "$err_count"
+        failed_roundtrip+=("$name")
+      fi
+    else
+      printf "%-30s PASS\n" "$name"
+      passed+=("$name")
     fi
   done
-  [ "${SPEC_COMPILE_KEEP:-}" != "1" ] && rm -rf "$ROOT"
+  if [ "${SPEC_COMPILE_KEEP:-}" != "1" ] \
+    && [ ${#failed_gen[@]} -eq 0 ] \
+    && [ ${#failed_check[@]} -eq 0 ] \
+    && [ ${#failed_roundtrip_plan[@]} -eq 0 ] \
+    && [ ${#failed_roundtrip[@]} -eq 0 ]; then
+    rm -rf "$ROOT"
+  fi
 fi
 
 echo
-echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed, ${#failed_check[@]} check-failed, ${#generate_only[@]} generate-only, ${#skipped[@]} skipped"
+echo "[spec-compile] summary: ${#passed[@]} passed, ${#failed_gen[@]} gen-failed, ${#failed_check[@]} check-failed, ${#failed_roundtrip_plan[@]} roundtrip-plan-failed, ${#failed_roundtrip[@]} roundtrip-failed, ${#generate_only[@]} generate-only, ${#skipped[@]} skipped"
 [ ${#failed_gen[@]}   -gt 0 ] && echo "  gen-fail:   ${failed_gen[*]}"
 [ ${#failed_check[@]} -gt 0 ] && echo "  check-fail: ${failed_check[*]}"
+[ ${#failed_roundtrip_plan[@]} -gt 0 ] && echo "  roundtrip-plan-fail: ${failed_roundtrip_plan[*]}"
+[ ${#failed_roundtrip[@]} -gt 0 ] && echo "  roundtrip-fail: ${failed_roundtrip[*]}"
 [ ${#skipped[@]}      -gt 0 ] && echo "  skipped:    ${skipped[*]}"
+if [ "$ROUNDTRIP_ENABLED" = "1" ]; then
+  echo "  roundtrip: ${#roundtrip_tested[@]}/${#roundtrip_planned[@]} spec(s), $roundtrip_schema_tested/$roundtrip_schema_total component schema(s), $roundtrip_sample_total sample(s), $roundtrip_schema_skipped schema skip(s)"
+fi
 if [ ${#generate_only[@]} -gt 0 ]; then
   echo "  generate-only (NOT compile-verified): ${generate_only[*]}"
   echo "  ^ these generated cleanly but were never compiled. Run them locally"
   echo "    on a machine with enough RAM: scripts/spec-compile.sh ${generate_only[*]}"
 fi
 
-if [ ${#failed_gen[@]} -gt 0 ] || [ ${#failed_check[@]} -gt 0 ]; then
+if [ ${#failed_gen[@]} -gt 0 ] || [ ${#failed_check[@]} -gt 0 ] || [ ${#failed_roundtrip_plan[@]} -gt 0 ] || [ ${#failed_roundtrip[@]} -gt 0 ]; then
+  echo "[spec-compile] failure artifacts retained under $ROOT"
   exit 1
 fi
 if [ ${#generate_only[@]} -gt 0 ]; then

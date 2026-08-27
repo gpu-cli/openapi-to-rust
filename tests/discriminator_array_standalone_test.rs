@@ -3,10 +3,9 @@
 //! Test that structs used in both tagged enums and standalone arrays
 //! serialize correctly in both contexts.
 //!
-//! Reproduces the Anthropic `system` field bug where `RequestTextBlock` has its
-//! `type` field stripped for use in `InputContentBlock` (tagged enum), but then
-//! `RequestTextBlockArray = Vec<RequestTextBlock>` is missing the `type` field
-//! when serialized standalone.
+//! Reproduces the Anthropic `system` field bug where `RequestTextBlock` used to
+//! have its `type` field stripped for use in `InputContentBlock`, leaving
+//! standalone `RequestTextBlock` values unable to satisfy their own schema.
 
 use openapi_to_rust::test_helpers::*;
 use serde_json::json;
@@ -88,14 +87,22 @@ fn test_discriminator_stripped_struct_in_standalone_array() {
     let result =
         test_generation("discriminator_array_standalone", spec).expect("Generation failed");
 
-    // The system field's array variant must serialize RequestTextBlock with type: "text".
-    // This means the array can't use bare Vec<RequestTextBlock> since the struct had
-    // its `type` field stripped for InputContentBlock's tagged enum.
-    //
-    // The generator should produce a wrapper that re-adds the tag.
+    // The standalone struct remains schema-faithful, including its required
+    // discriminator field, so the array can safely use it directly.
     assert!(
-        !result.contains("pub type RequestTextBlockArray = Vec<RequestTextBlock>"),
-        "Should NOT produce bare Vec<RequestTextBlock> — the struct is missing its type field.\n\
+        result.contains("pub r#type: RequestTextBlockType")
+            || result.contains("pub r#type: serde_json::Value"),
+        "RequestTextBlock must retain its required discriminator field.\n\
+         Generated:\n{result}"
+    );
+    assert!(
+        result.contains("pub type RequestTextBlockArray = Vec<RequestTextBlock>"),
+        "A schema-faithful RequestTextBlock should be reusable directly in arrays.\n\
+         Generated:\n{result}"
+    );
+    assert!(
+        result.contains("match discriminator.as_str()"),
+        "InputContentBlock must deserialize by inspecting its discriminator.\n\
          Generated:\n{result}"
     );
 }

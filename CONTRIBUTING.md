@@ -90,6 +90,23 @@ The full corpus generates and compile-checks 55 OpenAPI documents and can take
 several minutes. CI runs a fast generation tier on pull requests and the full
 compile tier weekly or on manual dispatch.
 
+Compile runs also generate deterministic, schema-valid JSON samples for each
+representable component model. Each sample is independently validated against
+the source OpenAPI JSON Schema, hydrated into the generated Rust type,
+serialized, validated again, and round-tripped a second time to require a stable
+wire representation. Start with one production spec while iterating:
+
+```bash
+scripts/spec-compile.sh anthropic
+```
+
+The full `scripts/spec-compile.sh` command applies the same check across the
+55-spec compile suite. Its summary reports component and sample coverage plus
+explicit schema skips. Set `SPEC_COMPILE_SCHEMA_ROUNDTRIP=0` only when isolating
+an unrelated compile failure; parse-only runs skip model round trips because
+they do not compile generated Rust. Failed scratch crates and logs are retained
+under `tmp/spec-compile/`.
+
 ## Compatibility expectations
 
 Until 1.0, a minor release may correct generated Rust APIs that were incomplete

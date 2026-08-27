@@ -82,6 +82,11 @@ name = "file-beads"
 path = "src/bin/file-beads.rs"
 required-features = ["internal-tools"]
 
+[[bin]]
+name = "schema-roundtrip"
+path = "src/bin/schema-roundtrip.rs"
+required-features = ["internal-tools"]
+
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "warn"

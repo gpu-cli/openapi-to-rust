@@ -58,6 +58,8 @@ pub mod http_error;
 pub mod openapi;
 pub mod patterns;
 pub mod registry_generator;
+#[cfg(feature = "internal-tools")]
+pub mod schema_roundtrip;
 pub mod server;
 pub mod spec_source;
 pub mod streaming;

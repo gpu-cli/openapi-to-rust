@@ -997,7 +997,6 @@ impl CodeGenerator {
                     required,
                     additional_properties,
                     analysis,
-                    None,
                 );
                 let required_fields: Vec<_> = emitted
                     .iter()
@@ -1080,7 +1079,6 @@ impl CodeGenerator {
                     required,
                     additional_properties,
                     analysis,
-                    None,
                 ) {
                     if field.is_required {
                         continue;
@@ -2560,7 +2558,6 @@ impl CodeGenerator {
             required,
             additional_properties,
             analysis,
-            None,
         );
         if matches!(
             additional_properties,

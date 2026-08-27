@@ -73,7 +73,7 @@ fn repeated_implicit_discriminator_values_fall_back_to_untagged_union() {
 }
 
 #[test]
-fn unique_implicit_discriminator_values_still_generate_tagged_union() {
+fn unique_implicit_discriminator_values_still_generate_discriminated_union() {
     let generated = generate(json!({
         "Event": {
             "anyOf": [
@@ -99,6 +99,7 @@ fn unique_implicit_discriminator_values_still_generate_tagged_union() {
         }
     }));
 
-    assert!(generated.contains("#[serde(tag = \"type\")]\npub enum Event"));
+    assert!(generated.contains("pub enum Event"));
+    assert!(generated.contains("match discriminator.as_str()"));
     assert!(!generated.contains("#[serde(untagged)]\npub enum Event"));
 }

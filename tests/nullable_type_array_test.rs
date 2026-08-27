@@ -41,6 +41,12 @@ fn required_type_array_null_property_is_optional() {
         "A required property typed [\"string\", \"null\"] must be Option, got:\n{result}"
     );
     assert!(
+        !result.contains(
+            "#[serde(skip_serializing_if = \"Option::is_none\")]\n    pub pool: Option<String>"
+        ),
+        "A required nullable property must serialize None as JSON null, got:\n{result}"
+    );
+    assert!(
         result.contains("pub id: String") && !result.contains("pub id: Option<String>"),
         "A required non-nullable property must stay non-Option, got:\n{result}"
     );
@@ -123,5 +129,49 @@ fn all_three_nullability_spellings_agree() {
             result.contains(&format!("pub {field}: Option<")),
             "required nullable `{field}` must be Option, got:\n{result}"
         );
+        assert!(
+            !result.contains(&format!(
+                "#[serde(skip_serializing_if = \"Option::is_none\")]\n    pub {field}: Option<"
+            )),
+            "required nullable `{field}` must serialize None as JSON null, got:\n{result}"
+        );
     }
+}
+
+#[test]
+fn required_reference_inherits_component_nullability() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "components": {
+            "schemas": {
+                "NullableItems": {
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "null"}
+                    ]
+                },
+                "Envelope": {
+                    "type": "object",
+                    "required": ["items"],
+                    "properties": {
+                        "items": {"$ref": "#/components/schemas/NullableItems"}
+                    }
+                }
+            }
+        }
+    });
+
+    let result = test_generation("nullable_component_reference", spec).expect("Generation failed");
+
+    assert!(
+        result.contains("pub items: Option<NullableItems>"),
+        "a field must inherit nullability from its referenced component, got:\n{result}"
+    );
+    assert!(
+        !result.contains(
+            "#[serde(skip_serializing_if = \"Option::is_none\")]\n    pub items: Option<NullableItems>"
+        ),
+        "a required nullable reference must emit explicit JSON null, got:\n{result}"
+    );
 }

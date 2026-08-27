@@ -175,8 +175,8 @@ mod tests {
             "EventUnion should be generated as discriminated union"
         );
         assert!(
-            result.contains("#[serde(tag = \"type\")]"),
-            "EventUnion should use type as discriminator tag"
+            result.contains("match discriminator.as_str()"),
+            "EventUnion should deserialize by its type discriminator"
         );
     }
 
@@ -399,8 +399,8 @@ mod tests {
             "EventUnion should be generated as discriminated union"
         );
         assert!(
-            result.contains("#[serde(tag = \"type\")]"),
-            "EventUnion should use type as discriminator tag"
+            result.contains("match discriminator.as_str()"),
+            "EventUnion should deserialize by its type discriminator"
         );
     }
 }

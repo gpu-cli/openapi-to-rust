@@ -2008,6 +2008,33 @@ impl SchemaAnalyzer {
         false
     }
 
+    /// Resolve local component-reference chains when deciding field
+    /// nullability. A `$ref` node has no nullable details of its own, but its
+    /// target may be `anyOf: [T, null]`, `type: [T, null]`, or OpenAPI 3.0
+    /// `nullable: true`.
+    fn schema_or_reference_is_nullable(&self, schema: &Schema) -> bool {
+        let mut current = schema;
+        let mut visited = HashSet::new();
+        loop {
+            if current.is_nullable_any() {
+                return true;
+            }
+            let Some(reference) = current.reference() else {
+                return false;
+            };
+            let Some(name) = self.extract_schema_name(reference) else {
+                return false;
+            };
+            if !visited.insert(name.to_string()) {
+                return false;
+            }
+            let Some(target) = self.schemas.get(name) else {
+                return false;
+            };
+            current = target;
+        }
+    }
+
     fn extract_type_mappings(&self, schema: &Schema) -> Result<Option<BTreeMap<String, String>>> {
         let variants = schema.union_variants().ok_or_else(|| {
             GeneratorError::InvalidSchema("No variants found for discriminated union".to_string())
@@ -2182,8 +2209,10 @@ impl SchemaAnalyzer {
     ) -> Result<AnalyzedSchema> {
         let details = schema.details();
         let description = details.description.clone();
-        // Combine 3.0-style `nullable: true` with 3.1's `type: ["X", "null"]`.
-        let nullable = details.is_nullable() || schema.type_array_contains_null();
+        // Retain every OpenAPI nullability spelling on named schemas. Named
+        // Rust models are the non-null carrier; reference sites consult this
+        // bit to wrap the carrier in Option when the target also admits null.
+        let nullable = schema.is_nullable_any();
         let mut dependencies = HashSet::new();
 
         let schema_type = match schema {
@@ -2686,7 +2715,7 @@ impl SchemaAnalyzer {
 
                 let prop_details = prop_schema.details();
                 // Every nullability form, via one helper — see is_nullable_any.
-                let prop_nullable = prop_schema.is_nullable_any();
+                let prop_nullable = self.schema_or_reference_is_nullable(prop_schema);
                 let prop_description = prop_details.description.clone();
                 let prop_default = prop_details.default.clone();
 
@@ -3461,7 +3490,7 @@ impl SchemaAnalyzer {
                 // openapi-generator-bgo) and RunPod Pod.startedAt / Pod.template
                 // (3.1 type-array, openapi-generator-dsu) — the latter arrive
                 // as `null` from the live API for any pod that hasn't started.
-                let nullable = prop_schema.is_nullable_any();
+                let nullable = self.schema_or_reference_is_nullable(prop_schema);
                 merged_properties.insert(
                     prop_name.clone(),
                     PropertyInfo {
@@ -5637,6 +5666,27 @@ impl SchemaAnalyzer {
                             nullable: false,
                         });
                     }
+                } else {
+                    // A composition can itself be one branch of an outer
+                    // union, for example `anyOf: [{ oneOf: [...],
+                    // discriminator: ... }, { type: string }]`. It has no
+                    // direct `type`, so the arms above used to silently drop
+                    // it and leave the generated Rust union unable to hydrate
+                    // schema-valid object input. Hoist the branch and let the
+                    // normal analyzer preserve its nested composition.
+                    let inline_index = variants.len();
+                    let inline_type_name = self.generate_context_aware_name(
+                        context_name,
+                        "InlineVariant",
+                        inline_index,
+                        Some(schema),
+                    );
+                    self.add_inline_schema(&inline_type_name, schema, dependencies)?;
+                    dependencies.insert(inline_type_name.clone());
+                    variants.push(SchemaRef {
+                        target: inline_type_name,
+                        nullable: false,
+                    });
                 }
             }
 
@@ -7503,12 +7553,12 @@ fn json_pointer(path: &serde_path_to_error::Path) -> String {
     pointer
 }
 
-fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
+pub(crate) fn component_schema_name_aliases(openapi_spec: &Value) -> BTreeMap<String, String> {
     let Some(schemas) = openapi_spec
-        .pointer_mut("/components/schemas")
-        .and_then(Value::as_object_mut)
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
     else {
-        return;
+        return BTreeMap::new();
     };
 
     let mut names_by_rust_name = BTreeMap::<String, Vec<String>>::new();
@@ -7522,7 +7572,7 @@ fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
     // Reserve every identifier already represented by the document so a
     // suffix never steals another component's canonical Rust name.
     let mut claimed_rust_names = names_by_rust_name.keys().cloned().collect::<HashSet<_>>();
-    let mut aliases = BTreeMap::<String, String>::new();
+    let mut aliases = BTreeMap::new();
 
     for (rust_name, mut names) in names_by_rust_name {
         if names.len() < 2 {
@@ -7542,16 +7592,32 @@ fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
                 suffix += 1;
             };
 
-            eprintln!(
-                "⚠️  schema `{source_name}` maps to the existing Rust type `{rust_name}` — disambiguated to `{replacement}`"
-            );
             aliases.insert(source_name, replacement);
         }
     }
 
+    aliases
+}
+
+fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
+    let aliases = component_schema_name_aliases(openapi_spec);
     if aliases.is_empty() {
         return;
     }
+
+    for (source_name, replacement) in &aliases {
+        let rust_name = crate::generator::rust_type_name(source_name);
+        eprintln!(
+            "⚠️  schema `{source_name}` maps to the existing Rust type `{rust_name}` — disambiguated to `{replacement}`"
+        );
+    }
+
+    let Some(schemas) = openapi_spec
+        .pointer_mut("/components/schemas")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
 
     let original_schemas = std::mem::take(schemas);
     for (name, schema) in original_schemas {

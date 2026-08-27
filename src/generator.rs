@@ -84,18 +84,7 @@ fn strip_trailing_zero(v: f64) -> String {
     }
 }
 
-/// Info about schemas that are variants in discriminated unions
-#[derive(Clone)]
-pub(crate) struct DiscriminatedVariantInfo {
-    /// The discriminator field name (e.g., "type")
-    pub(crate) discriminator_field: String,
-    /// The const value of the discriminator (e.g., "text")
-    pub(crate) discriminator_value: String,
-    /// Whether the parent union is untagged
-    pub(crate) is_parent_untagged: bool,
-}
-
-/// One object property after discriminator filtering and Rust-identifier
+/// One object property after Rust-identifier
 /// disambiguation. Struct fields, request-model constructors, and builders
 /// all consume this shared projection so their names and types cannot drift.
 pub(crate) struct EmittedObjectProperty<'a> {
@@ -115,7 +104,6 @@ struct TypeGenerationIndex {
 }
 
 struct TypeGenerationContext<'a> {
-    discriminated_variants: &'a BTreeMap<String, DiscriminatedVariantInfo>,
     index: &'a TypeGenerationIndex,
 }
 
@@ -542,53 +530,8 @@ impl CodeGenerator {
         let provenance_attribute = self.provenance_attribute();
         let mut type_definitions = TokenStream::new();
 
-        // Collect all schemas that are used as variants in discriminated unions
-        // Only include direct references, not schemas wrapped in allOf
-        let mut discriminated_variant_info: BTreeMap<String, DiscriminatedVariantInfo> =
-            BTreeMap::new();
-
-        // Sort schemas for deterministic processing
-        let mut sorted_schemas: Vec<_> = analysis.schemas.iter().collect();
-        sorted_schemas.sort_by_key(|(name, _)| name.as_str());
-
-        for (_parent_name, schema) in sorted_schemas {
-            if let crate::analysis::SchemaType::DiscriminatedUnion {
-                variants,
-                discriminator_field,
-            } = &schema.schema_type
-            {
-                // Check if this discriminated union will be generated as untagged
-                let is_parent_untagged =
-                    self.should_use_untagged_discriminated_union(schema, analysis);
-
-                for variant in variants {
-                    // Only add if it's a direct reference to a schema that will have the discriminator field
-                    // Check if the schema exists and has the discriminator field as a property
-                    if let Some(variant_schema) = analysis.schemas.get(&variant.type_name) {
-                        if let crate::analysis::SchemaType::Object { properties, .. } =
-                            &variant_schema.schema_type
-                        {
-                            if properties.contains_key(discriminator_field) {
-                                discriminated_variant_info.insert(
-                                    variant.type_name.clone(),
-                                    DiscriminatedVariantInfo {
-                                        discriminator_field: discriminator_field.clone(),
-                                        discriminator_value: variant.discriminator_value.clone(),
-                                        is_parent_untagged,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         let type_index = self.type_generation_index(analysis);
-        let type_context = TypeGenerationContext {
-            discriminated_variants: &discriminated_variant_info,
-            index: &type_index,
-        };
+        let type_context = TypeGenerationContext { index: &type_index };
 
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
@@ -1555,46 +1498,7 @@ impl CodeGenerator {
             SchemaType::Array { item_type } => {
                 // Generate type alias for named array schemas.
                 //
-                // Special case: if the array item is a struct whose discriminator
-                // field was stripped (because it's used in a tagged enum), the bare
-                // struct won't serialize the discriminator in standalone contexts.
-                // Generate a single-variant tagged wrapper enum so the discriminator
-                // field is re-added by serde's tag attribute.
                 let array_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
-
-                // Check if the item type is a Reference to a discriminator-stripped struct
-                if let SchemaType::Reference { target } = item_type.as_ref() {
-                    if let Some(info) = type_context.discriminated_variants.get(target) {
-                        if !info.is_parent_untagged {
-                            // Generate a wrapper enum that re-adds the discriminator tag
-                            let wrapper_name =
-                                format_ident!("{}Item", self.to_rust_type_name(&schema.name));
-                            let variant_type = format_ident!("{}", self.to_rust_type_name(target));
-                            let disc_field = &info.discriminator_field;
-                            let disc_value = &info.discriminator_value;
-
-                            let doc_comment = if let Some(desc) = &schema.description {
-                                quote! { #[doc = #desc] }
-                            } else {
-                                TokenStream::new()
-                            };
-
-                            return Ok(quote! {
-                                /// Wrapper enum that re-adds the discriminator tag
-                                /// for array contexts where the inner struct had its
-                                /// discriminator field stripped for tagged enum use.
-                                #[derive(Debug, Clone, Deserialize, Serialize)]
-                                #[serde(tag = #disc_field)]
-                                pub enum #wrapper_name {
-                                    #[serde(rename = #disc_value)]
-                                    #variant_type(#variant_type),
-                                }
-                                #doc_comment
-                                pub type #array_name = Vec<#wrapper_name>;
-                            });
-                        }
-                    }
-                }
 
                 let inner_type = self.generate_array_item_type(item_type, analysis);
 
@@ -1970,7 +1874,6 @@ impl CodeGenerator {
             required,
             additional_properties,
             analysis,
-            type_context.discriminated_variants.get(&schema.name),
         );
 
         let mut fields: Vec<TokenStream> = emitted_properties
@@ -2132,7 +2035,6 @@ impl CodeGenerator {
         required: &std::collections::HashSet<String>,
         additional_properties: &crate::analysis::ObjectAdditionalProperties,
         analysis: &crate::analysis::SchemaAnalysis,
-        discriminator_info: Option<&DiscriminatedVariantInfo>,
     ) -> Vec<EmittedObjectProperty<'a>> {
         let mut sorted_properties: Vec<_> = properties.iter().collect();
         sorted_properties.sort_by_key(|(name, _)| name.as_str());
@@ -2147,12 +2049,6 @@ impl CodeGenerator {
 
         let mut emitted = Vec::new();
         for (field_name, property) in sorted_properties {
-            if discriminator_info.is_some_and(|info| {
-                !info.is_parent_untagged && field_name.as_str() == info.discriminator_field.as_str()
-            }) {
-                continue;
-            }
-
             let raw = self.to_rust_field_name(field_name);
             let mut chosen = raw.clone();
             let mut suffix = 2;
@@ -2423,29 +2319,61 @@ impl CodeGenerator {
         }
 
         let enclosing = self.to_rust_type_name(&schema.name);
-        let enum_variants = variants.iter().map(|variant| {
-            let variant_name = format_ident!("{}", variant.rust_name);
+        let variant_shapes: Vec<_> = variants
+            .iter()
+            .map(|variant| {
+                let variant_name = format_ident!("{}", variant.rust_name);
+                let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.type_name));
+                // Box variant payloads that point at the enclosing enum or any
+                // schema in the analysis's recursive set, otherwise the enum has
+                // infinite size (E0072).
+                let payload = if self.to_rust_type_name(&variant.type_name) == enclosing
+                    || analysis
+                        .dependencies
+                        .recursive_schemas
+                        .contains(&variant.type_name)
+                {
+                    quote! { Box<#variant_type> }
+                } else {
+                    quote! { #variant_type }
+                };
+                (variant, variant_name, payload)
+            })
+            .collect();
+        let enum_variants = variant_shapes.iter().map(|(_, variant_name, payload)| {
+            quote! { #variant_name(#payload), }
+        });
+        let serialize_arms = variant_shapes.iter().map(|(variant, variant_name, _)| {
             let variant_value = &variant.discriminator_value;
-
-            let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.type_name));
-            // Box variant payloads that point at the enclosing enum or any
-            // schema in the analysis's recursive set, otherwise the enum has
-            // infinite size (E0072).
-            let payload = if self.to_rust_type_name(&variant.type_name) == enclosing
-                || analysis
-                    .dependencies
-                    .recursive_schemas
-                    .contains(&variant.type_name)
-            {
-                quote! { Box<#variant_type> }
-            } else {
-                quote! { #variant_type }
-            };
             quote! {
-                #[serde(rename = #variant_value)]
-                #variant_name(#payload),
+                Self::#variant_name(payload) => {
+                    let mut value = serde_json::to_value(payload)
+                        .map_err(serde::ser::Error::custom)?;
+                    let object = value.as_object_mut().ok_or_else(|| {
+                        serde::ser::Error::custom(concat!(
+                            "discriminated union variant `",
+                            stringify!(#variant_name),
+                            "` did not serialize as an object",
+                        ))
+                    })?;
+                    object.insert(
+                        #discriminator_field.to_string(),
+                        serde_json::Value::String(#variant_value.to_string()),
+                    );
+                    value.serialize(serializer)
+                }
             }
         });
+        let deserialize_arms = variant_shapes
+            .iter()
+            .map(|(variant, variant_name, payload)| {
+                let variant_value = &variant.discriminator_value;
+                quote! {
+                    #variant_value => serde_json::from_value::<#payload>(value)
+                        .map(Self::#variant_name)
+                        .map_err(serde::de::Error::custom),
+                }
+            });
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -2453,17 +2381,20 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Generate derives with optional Specta support
+        // Keep the discriminator on each standalone component model, then do
+        // explicit discriminator-directed dispatch here. A derive-based
+        // internally tagged enum requires stripping the tag from its payload;
+        // that made the same component serialize invalid JSON when used
+        // directly or in an array. Explicit dispatch retains O(1)-by-tag
+        // behavior without giving the payload two incompatible wire shapes.
         let derives = if self.config.enable_specta {
             quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize)]
+                #[derive(Debug, Clone)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
-                #[serde(tag = #discriminator_field)]
             }
         } else {
             quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize)]
-                #[serde(tag = #discriminator_field)]
+                #[derive(Debug, Clone)]
             }
         };
 
@@ -2472,6 +2403,42 @@ impl CodeGenerator {
             #derives
             pub enum #enum_name {
                 #(#enum_variants)*
+            }
+
+            impl serde::Serialize for #enum_name {
+                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                where
+                    S: serde::Serializer,
+                {
+                    match self {
+                        #(#serialize_arms)*
+                    }
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for #enum_name {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    let value = serde_json::Value::deserialize(deserializer)?;
+                    let discriminator = value
+                        .get(#discriminator_field)
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| serde::de::Error::custom(concat!(
+                            "missing string discriminator `",
+                            #discriminator_field,
+                            "`",
+                        )))?
+                        .to_string();
+                    match discriminator.as_str() {
+                        #(#deserialize_arms)*
+                        other => Err(serde::de::Error::custom(format!(
+                            "unknown discriminator value `{other}` for `{}`",
+                            #discriminator_field,
+                        ))),
+                    }
+                }
             }
         })
     }
@@ -2882,8 +2849,10 @@ impl CodeGenerator {
             attrs.push(quote! { rename = #field_name });
         }
 
-        // Add skip_serializing_if for optional fields to avoid sending null values
-        if !is_required || prop.nullable {
+        // Optional fields may be omitted when their Option is None. Required
+        // nullable fields must serialize None as an explicit JSON null;
+        // skipping them would violate the schema's `required` list.
+        if !is_required {
             attrs.push(quote! { skip_serializing_if = "Option::is_none" });
         }
 
