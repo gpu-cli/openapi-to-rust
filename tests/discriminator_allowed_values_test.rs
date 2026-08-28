@@ -98,6 +98,80 @@ fn discriminator_spec() -> Value {
                     { "$ref": "#/components/schemas/ScheduledSmsEventResponse" }
                 ],
                 "discriminator": { "propertyName": "channel" }
+            },
+            "BroadMappedKind": {
+                "type": "string",
+                "enum": ["alpha", "beta"]
+            },
+            "BroadMappedObject": {
+                "type": "object",
+                "required": ["kind", "id"],
+                "properties": {
+                    "kind": { "$ref": "#/components/schemas/BroadMappedKind" },
+                    "id": { "type": "string" }
+                }
+            },
+            "MappedAlpha": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/BroadMappedObject" },
+                    {
+                        "type": "object",
+                        "required": ["alpha"],
+                        "properties": {
+                            "kind": { "type": "string", "const": "alpha" },
+                            "alpha": { "type": "string" }
+                        }
+                    }
+                ]
+            },
+            "MappedBeta": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/BroadMappedObject" },
+                    {
+                        "type": "object",
+                        "required": ["beta"],
+                        "properties": {
+                            "kind": { "type": "string", "const": "beta" },
+                            "beta": { "type": "string" }
+                        }
+                    }
+                ]
+            },
+            "ConflictingMappedUnion": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/MappedAlpha" },
+                    { "$ref": "#/components/schemas/MappedBeta" }
+                ],
+                "discriminator": {
+                    "propertyName": "kind",
+                    "mapping": {
+                        "alpha": "#/components/schemas/MappedBeta",
+                        "beta": "#/components/schemas/MappedAlpha",
+                        "bogus": "#/components/schemas/MappedAlpha"
+                    }
+                }
+            },
+            "ScalarCarrier": {
+                "oneOf": [
+                    { "type": "string" },
+                    { "type": "number" },
+                    { "type": "boolean" }
+                ]
+            },
+            "ObjectCarrier": {
+                "type": "object",
+                "required": ["@type", "value"],
+                "properties": {
+                    "@type": { "type": "string", "const": "object" },
+                    "value": { "type": "string" }
+                }
+            },
+            "ScalarOrTaggedObject": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/ScalarCarrier" },
+                    { "$ref": "#/components/schemas/ObjectCarrier" }
+                ],
+                "discriminator": { "propertyName": "@type" }
             }
         } }
     })
@@ -160,6 +234,14 @@ fn discriminator_values_follow_refs_compositions_and_multi_value_enums() {
             vec![String::from("sms_chat")]
         ]
     );
+    assert_eq!(
+        union_values(&analysis, "ConflictingMappedUnion"),
+        vec![vec![String::from("alpha")], vec![String::from("beta")]]
+    );
+    assert!(matches!(
+        &analysis.schemas["ScalarOrTaggedObject"].schema_type,
+        SchemaType::Union { .. }
+    ));
 }
 
 #[test]
@@ -175,7 +257,10 @@ fn generated_unions_preserve_every_allowed_discriminator_value() {
         r#"
 #[cfg(test)]
 mod discriminator_allowed_value_roundtrip {
-    use super::{InterpreterOutput, Media, ScheduledEventResponse};
+    use super::{
+        ConflictingMappedUnion, InterpreterOutput, Media, ScalarOrTaggedObject,
+        ScheduledEventResponse,
+    };
     use serde::{Serialize, de::DeserializeOwned};
 
     fn exact<T>(input: serde_json::Value)
@@ -209,6 +294,18 @@ mod discriminator_allowed_value_roundtrip {
         // phone payload while preserving the original tag.
         exact::<ScheduledEventResponse>(serde_json::json!({
             "channel": "sms_chat", "target": "voice-without-text"
+        }));
+
+        exact::<ConflictingMappedUnion>(serde_json::json!({
+            "kind": "alpha", "id": "a", "alpha": "payload"
+        }));
+        exact::<ConflictingMappedUnion>(serde_json::json!({
+            "kind": "beta", "id": "b", "beta": "payload"
+        }));
+
+        exact::<ScalarOrTaggedObject>(serde_json::json!(12.5));
+        exact::<ScalarOrTaggedObject>(serde_json::json!({
+            "@type": "object", "value": "payload"
         }));
     }
 }

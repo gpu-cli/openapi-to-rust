@@ -2234,15 +2234,28 @@ impl SchemaAnalyzer {
     /// openapi-generator-dpd) so we can downgrade those unions to
     /// `#[serde(untagged)]`.
     fn branch_resolves_to_object(&self, schema: &Schema) -> bool {
+        self.branch_resolves_to_object_inner(schema, &mut HashSet::new())
+    }
+
+    fn branch_resolves_to_object_inner(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+    ) -> bool {
         // Follow $ref one hop, then ask the same question of the target.
         if let Some(ref_str) = schema.reference() {
-            return match self
+            if !visited_refs.insert(ref_str.to_string()) {
+                return false;
+            }
+            let result = match self
                 .extract_schema_name(ref_str)
                 .and_then(|n| self.schemas.get(n))
             {
-                Some(target) => self.branch_resolves_to_object(target),
+                Some(target) => self.branch_resolves_to_object_inner(target, visited_refs),
                 None => false,
             };
+            visited_refs.remove(ref_str);
+            return result;
         }
         // An allOf wrapper around one scalar/array carrier and neutral
         // annotation siblings remains that non-object carrier. Other allOf
@@ -2254,11 +2267,17 @@ impl SchemaAnalyzer {
             return all_of
                 .iter()
                 .filter(|member| !schema_is_annotation_only(member))
-                .any(|member| self.branch_resolves_to_object(member));
+                .any(|member| self.branch_resolves_to_object_inner(member, visited_refs));
         }
-        // anyOf/oneOf wrappers reduce to objects or to further unions.
-        if matches!(schema, Schema::AnyOf { .. } | Schema::OneOf { .. }) {
-            return true;
+        // A nested anyOf/oneOf can carry an object discriminator only when
+        // every possible branch is itself object-shaped. Treating the wrapper
+        // as unconditionally object-like made scalar carrier unions (such as
+        // string-or-number aliases) enter object-only discriminator codegen.
+        if let Some(variants) = schema.union_variants() {
+            return !variants.is_empty()
+                && variants
+                    .iter()
+                    .all(|variant| self.branch_resolves_to_object_inner(variant, visited_refs));
         }
         if matches!(schema.schema_type(), Some(OpenApiSchemaType::Object)) {
             return true;
@@ -2439,116 +2458,131 @@ impl SchemaAnalyzer {
         schema: &Schema,
         field_name: &str,
     ) -> Vec<String> {
-        let mut values = Vec::new();
-        let mut visited_refs = HashSet::new();
-        self.collect_discriminator_values_for_field(
-            schema,
-            field_name,
-            &mut visited_refs,
-            &mut values,
-        );
-        values
+        self.extract_discriminator_value_domain_for_field(schema, field_name)
+            .unwrap_or_default()
     }
 
-    fn collect_discriminator_values_for_field(
+    fn extract_discriminator_value_domain_for_field(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+    ) -> Option<Vec<String>> {
+        let mut visited_refs = HashSet::new();
+        self.discriminator_value_domain(schema, field_name, &mut visited_refs)
+    }
+
+    /// Returns the string values admitted for `field_name`, or `None` when
+    /// the schema does not constrain that field. An empty domain means the
+    /// constraints are contradictory. JSON Schema composition matters here:
+    /// `allOf` intersects constraints, while `anyOf`/`oneOf` combine the
+    /// alternatives. Flattening all of them into one union allowed explicit
+    /// discriminator mappings to manufacture tags rejected by their payload.
+    fn discriminator_value_domain(
         &self,
         schema: &Schema,
         field_name: &str,
         visited_refs: &mut HashSet<String>,
-        values: &mut Vec<String>,
-    ) {
+    ) -> Option<Vec<String>> {
         if let Some(reference) = schema.reference() {
             if !visited_refs.insert(reference.to_string()) {
-                return;
+                return None;
             }
-            if let Some(target) = self
+            let result = self
                 .extract_schema_name(reference)
                 .and_then(|name| self.schemas.get(name))
-            {
-                self.collect_discriminator_values_for_field(
-                    target,
-                    field_name,
-                    visited_refs,
-                    values,
-                );
-            }
-            return;
+                .and_then(|target| {
+                    self.discriminator_value_domain(target, field_name, visited_refs)
+                });
+            visited_refs.remove(reference);
+            return result;
         }
 
-        if let Some(property) = schema
+        let own_domain = schema
             .details()
             .properties
             .as_ref()
             .and_then(|properties| properties.get(field_name))
-        {
-            self.collect_string_constraint_values(property, visited_refs, values);
-        }
+            .and_then(|property| self.string_constraint_domain(property, visited_refs));
 
-        match schema {
+        let composition_domain = match schema {
             Schema::AllOf { all_of, .. } => {
+                let mut domain = None;
                 for member in all_of {
-                    self.collect_discriminator_values_for_field(
-                        member,
-                        field_name,
-                        visited_refs,
-                        values,
+                    domain = Self::intersect_optional_domains(
+                        domain,
+                        self.discriminator_value_domain(member, field_name, visited_refs),
                     );
                 }
+                domain
             }
             Schema::AnyOf { any_of, .. } => {
-                for member in any_of {
-                    self.collect_discriminator_values_for_field(
-                        member,
-                        field_name,
-                        visited_refs,
-                        values,
-                    );
-                }
+                self.union_discriminator_domains(any_of, field_name, visited_refs)
             }
             Schema::OneOf { one_of, .. } => {
-                for member in one_of {
-                    self.collect_discriminator_values_for_field(
-                        member,
-                        field_name,
-                        visited_refs,
-                        values,
-                    );
-                }
+                self.union_discriminator_domains(one_of, field_name, visited_refs)
             }
-            _ => {}
-        }
+            Schema::Bool(false) => Some(Vec::new()),
+            _ => None,
+        };
+
+        Self::intersect_optional_domains(own_domain, composition_domain)
     }
 
-    fn collect_string_constraint_values(
+    fn union_discriminator_domains(
+        &self,
+        schemas: &[Schema],
+        field_name: &str,
+        visited_refs: &mut HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if schemas.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut domain = Vec::new();
+        for schema in schemas {
+            let values = self.discriminator_value_domain(schema, field_name, visited_refs)?;
+            for value in values {
+                Self::push_unique_string(&mut domain, &value);
+            }
+        }
+        Some(domain)
+    }
+
+    fn string_constraint_domain(
         &self,
         schema: &Schema,
         visited_refs: &mut HashSet<String>,
-        values: &mut Vec<String>,
-    ) {
+    ) -> Option<Vec<String>> {
         if let Some(reference) = schema.reference() {
             if !visited_refs.insert(reference.to_string()) {
-                return;
+                return None;
             }
-            if let Some(target) = self
+            let result = self
                 .extract_schema_name(reference)
                 .and_then(|name| self.schemas.get(name))
-            {
-                self.collect_string_constraint_values(target, visited_refs, values);
-            }
-            return;
+                .and_then(|target| self.string_constraint_domain(target, visited_refs));
+            visited_refs.remove(reference);
+            return result;
         }
 
         let details = schema.details();
-        if let Some(value) = details.const_value.as_ref().and_then(Value::as_str) {
-            Self::push_unique_string(values, value);
+        let mut own_domain = None;
+        if let Some(value) = details.const_value.as_ref() {
+            own_domain = Self::intersect_optional_domains(
+                own_domain,
+                Some(value.as_str().into_iter().map(str::to_string).collect()),
+            );
         }
         if let Some(enum_values) = &details.enum_values {
-            for value in enum_values.iter().filter_map(Value::as_str) {
-                Self::push_unique_string(values, value);
-            }
-        }
-        if let Some(value) = details.extra.get("const").and_then(Value::as_str) {
-            Self::push_unique_string(values, value);
+            own_domain = Self::intersect_optional_domains(
+                own_domain,
+                Some(
+                    enum_values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            );
         }
         if details
             .extra
@@ -2556,28 +2590,73 @@ impl SchemaAnalyzer {
             .and_then(Value::as_bool)
             == Some(true)
         {
-            if let Some(value) = details.default.as_ref().and_then(Value::as_str) {
-                Self::push_unique_string(values, value);
-            }
+            own_domain = Self::intersect_optional_domains(
+                own_domain,
+                Some(
+                    details
+                        .default
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            );
         }
 
-        match schema {
+        let composition_domain = match schema {
             Schema::AllOf { all_of, .. } => {
+                let mut domain = None;
                 for member in all_of {
-                    self.collect_string_constraint_values(member, visited_refs, values);
+                    domain = Self::intersect_optional_domains(
+                        domain,
+                        self.string_constraint_domain(member, visited_refs),
+                    );
                 }
+                domain
             }
             Schema::AnyOf { any_of, .. } => {
-                for member in any_of {
-                    self.collect_string_constraint_values(member, visited_refs, values);
-                }
+                self.union_string_constraint_domains(any_of, visited_refs)
             }
             Schema::OneOf { one_of, .. } => {
-                for member in one_of {
-                    self.collect_string_constraint_values(member, visited_refs, values);
-                }
+                self.union_string_constraint_domains(one_of, visited_refs)
             }
-            _ => {}
+            Schema::Bool(false) => Some(Vec::new()),
+            _ => None,
+        };
+
+        Self::intersect_optional_domains(own_domain, composition_domain)
+    }
+
+    fn union_string_constraint_domains(
+        &self,
+        schemas: &[Schema],
+        visited_refs: &mut HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if schemas.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut domain = Vec::new();
+        for schema in schemas {
+            let values = self.string_constraint_domain(schema, visited_refs)?;
+            for value in values {
+                Self::push_unique_string(&mut domain, &value);
+            }
+        }
+        Some(domain)
+    }
+
+    fn intersect_optional_domains(
+        left: Option<Vec<String>>,
+        right: Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        match (left, right) {
+            (None, other) | (other, None) => other,
+            (Some(left), Some(right)) => Some(
+                left.into_iter()
+                    .filter(|value| right.contains(value))
+                    .collect(),
+            ),
         }
     }
 
@@ -4566,6 +4645,26 @@ impl SchemaAnalyzer {
             .property_name
             .clone();
 
+        // A contradictory tag domain has no schema-valid discriminator value.
+        // Keep the payload structural instead of inventing and serializing a
+        // tag that the branch's own JSON Schema rejects.
+        if one_of_schemas.iter().any(|branch| {
+            self.extract_discriminator_value_domain_for_field(branch, &discriminator_field)
+                .is_some_and(|values| values.is_empty())
+        }) {
+            eprintln!(
+                "⚠️  discriminated union `{parent_name}` has a branch with contradictory `{discriminator_field}` constraints; using structural union fallback"
+            );
+            return self.analyze_untagged_oneof_union(
+                one_of_schemas,
+                parent_name,
+                dependencies,
+                union_kind,
+                source_indices,
+                discriminator,
+            );
+        }
+
         let mut variants = Vec::new();
         let mut used_variant_names = std::collections::HashSet::new();
 
@@ -4609,26 +4708,41 @@ impl SchemaAnalyzer {
                 if !schema_name.is_empty() {
                     dependencies.insert(schema_name.clone());
 
-                    // Explicit mapping keys and every const/enum value declared
-                    // by the branch are all legal wire tags for that branch.
-                    // Only an entirely unconstrained branch falls back to a
-                    // schema-name-derived value.
+                    // Mapping keys are dispatch hints, not schema constraints.
+                    // When the target branch constrains the discriminator,
+                    // retain only mapping keys admitted by that target.
                     let mut discriminator_values = Vec::new();
+                    let allowed_domain = self.schemas.get(&schema_name).and_then(|ref_schema| {
+                        self.extract_discriminator_value_domain_for_field(
+                            ref_schema,
+                            &discriminator_field,
+                        )
+                    });
                     if let Some(mappings) = discriminator.and_then(|disc| disc.mapping.as_ref()) {
                         for (key, target_ref) in mappings {
                             if target_ref == ref_str
                                 || self.extract_schema_name(target_ref)
                                     == Some(schema_name.as_str())
                             {
-                                Self::push_unique_string(&mut discriminator_values, key);
+                                if allowed_domain
+                                    .as_ref()
+                                    .is_some_and(|allowed| !allowed.contains(key))
+                                {
+                                    let allowed = allowed_domain
+                                        .as_ref()
+                                        .map(|values| values.join("`, `"))
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "⚠️  discriminator mapping conflict in union `{parent_name}`: key `{key}` targets `{schema_name}` but branch allows `{allowed}`; ignoring mapping key"
+                                    );
+                                } else {
+                                    Self::push_unique_string(&mut discriminator_values, key);
+                                }
                             }
                         }
                     }
-                    if let Some(ref_schema) = self.schemas.get(&schema_name) {
-                        for value in self.extract_discriminator_values_for_field(
-                            ref_schema,
-                            &discriminator_field,
-                        ) {
+                    if let Some(allowed_domain) = allowed_domain {
+                        for value in allowed_domain {
                             Self::push_unique_string(&mut discriminator_values, &value);
                         }
                     }
@@ -4673,17 +4787,34 @@ impl SchemaAnalyzer {
                 // Inline branches follow the same multi-value rules as
                 // referenced branches.
                 let mut discriminator_values = Vec::new();
+                let allowed_domain = self.extract_discriminator_value_domain_for_field(
+                    variant_schema,
+                    &discriminator_field,
+                );
                 if let Some(mappings) = discriminator.and_then(|disc| disc.mapping.as_ref()) {
                     for (key, target_ref) in mappings {
                         if target_ref.contains(&format!("variant_{variant_index}")) {
-                            Self::push_unique_string(&mut discriminator_values, key);
+                            if allowed_domain
+                                .as_ref()
+                                .is_some_and(|allowed| !allowed.contains(key))
+                            {
+                                let allowed = allowed_domain
+                                    .as_ref()
+                                    .map(|values| values.join("`, `"))
+                                    .unwrap_or_default();
+                                eprintln!(
+                                    "⚠️  discriminator mapping conflict in union `{parent_name}`: key `{key}` targets `{inline_type_name}` but branch allows `{allowed}`; ignoring mapping key"
+                                );
+                            } else {
+                                Self::push_unique_string(&mut discriminator_values, key);
+                            }
                         }
                     }
                 }
-                for value in self
-                    .extract_discriminator_values_for_field(variant_schema, &discriminator_field)
-                {
-                    Self::push_unique_string(&mut discriminator_values, &value);
+                if let Some(allowed_domain) = allowed_domain {
+                    for value in allowed_domain {
+                        Self::push_unique_string(&mut discriminator_values, &value);
+                    }
                 }
                 if discriminator_values.is_empty() {
                     discriminator_values.push(format!("variant_{variant_index}"));
