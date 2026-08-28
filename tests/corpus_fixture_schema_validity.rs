@@ -102,6 +102,88 @@ fn assert_discriminator_mapping_matches_tag(fixture: &Value, union_name: &str) {
     }
 }
 
+fn assert_discriminator_branches_require_constrained_tags(
+    fixture: &Value,
+    node: &Value,
+    pointer: &str,
+) {
+    let Some(object) = node.as_object() else {
+        return;
+    };
+    if let Some(discriminator) = object.get("discriminator").and_then(Value::as_object) {
+        let field = discriminator["propertyName"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{pointer}/discriminator/propertyName is not a string"));
+        let mappings = discriminator.get("mapping").and_then(Value::as_object);
+        let branches = object
+            .get("oneOf")
+            .or_else(|| object.get("anyOf"))
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("{pointer} discriminator has no union branches"));
+
+        for (index, branch) in branches.iter().enumerate() {
+            if branch.get("type").and_then(Value::as_str) == Some("null") {
+                continue;
+            }
+            let reference = branch.get("$ref").and_then(Value::as_str);
+            let (target, target_label) = if let Some(reference) = reference {
+                let name = reference
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or_else(|| panic!("{pointer} branch ref is not local: {reference}"));
+                (component_schema(fixture, name), name.to_string())
+            } else {
+                (branch, format!("{pointer}/branch/{index}"))
+            };
+            let required = target["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{target_label} has no required array"));
+            assert!(
+                required.iter().any(|value| value.as_str() == Some(field)),
+                "{target_label} does not require discriminator {field:?}"
+            );
+            let property = &target["properties"][field];
+            let mut allowed = property["enum"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            if let Some(constant) = property.get("const").and_then(Value::as_str) {
+                allowed.push(constant);
+            }
+            assert!(
+                !allowed.is_empty(),
+                "{target_label} does not constrain discriminator {field:?}"
+            );
+
+            if let (Some(reference), Some(mappings)) = (reference, mappings) {
+                let branch_mappings = mappings
+                    .iter()
+                    .filter(|(_, target)| target.as_str() == Some(reference))
+                    .collect::<Vec<_>>();
+                assert!(
+                    !branch_mappings.is_empty(),
+                    "{pointer} has no mapping for branch {reference}"
+                );
+                for (wire_value, _) in branch_mappings {
+                    assert!(
+                        allowed.contains(&wire_value.as_str()),
+                        "{pointer} maps {wire_value:?} to {target_label}, whose {field} allows {allowed:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    for (key, child) in object {
+        assert_discriminator_branches_require_constrained_tags(
+            fixture,
+            child,
+            &format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1")),
+        );
+    }
+}
+
 #[test]
 fn cloudflare_empty_required_repair_is_draft4_valid() {
     let fixture = load_fixture("specs/cloudflare.yaml");
@@ -183,6 +265,44 @@ fn coda_required_members_are_declared_and_draft4_valid() {
         }
         assert_draft4_meta_valid(&pointer, schema);
     }
+}
+
+#[test]
+fn letta_closed_objects_do_not_require_undeclared_organization_ids() {
+    let fixture = load_fixture("specs/letta.yaml");
+    for name in ["Archive", "UserCreate"] {
+        let pointer = format!("#/components/schemas/{name}");
+        let schema = component_schema(&fixture, name);
+        let required = schema["required"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{pointer}/required is not an array"));
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{pointer}/properties is not an object"));
+
+        assert!(
+            !required
+                .iter()
+                .any(|value| value.as_str() == Some("organization_id")),
+            "{pointer}/required retains stale organization_id"
+        );
+        for member in required {
+            let member = member
+                .as_str()
+                .unwrap_or_else(|| panic!("{pointer}/required contains a non-string"));
+            assert!(
+                properties.contains_key(member),
+                "{pointer}/required member {member:?} is undeclared"
+            );
+        }
+        assert_draft202012_meta_valid(&pointer, schema);
+    }
+}
+
+#[test]
+fn letta_discriminator_branches_require_and_constrain_their_tags() {
+    let fixture = load_fixture("specs/letta.yaml");
+    assert_discriminator_branches_require_constrained_tags(&fixture, &fixture, "#");
 }
 
 #[test]
