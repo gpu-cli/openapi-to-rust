@@ -160,7 +160,7 @@ pub fn build_round_trip_plan(
     });
 
     let validators = validator_options(dialect).build_map(&document)?;
-    let generator = SyntheticGenerator::new(&document);
+    let generator = SyntheticGenerator::with_validators(&document, &validators);
     let mut cases = Vec::new();
     let mut skipped = Vec::new();
 
@@ -1008,15 +1008,26 @@ fn schema_contains_binary_format_inner(
 struct SyntheticGenerator<'a> {
     root: &'a Value,
     dynamic_anchors: BTreeMap<String, &'a Value>,
+    validators: Option<&'a jsonschema::ValidatorMap>,
 }
 
 impl<'a> SyntheticGenerator<'a> {
+    #[cfg(test)]
     fn new(root: &'a Value) -> Self {
+        Self::new_inner(root, None)
+    }
+
+    fn with_validators(root: &'a Value, validators: &'a jsonschema::ValidatorMap) -> Self {
+        Self::new_inner(root, Some(validators))
+    }
+
+    fn new_inner(root: &'a Value, validators: Option<&'a jsonschema::ValidatorMap>) -> Self {
         let mut dynamic_anchors = BTreeMap::new();
         collect_dynamic_anchors(root, &mut dynamic_anchors);
         Self {
             root,
             dynamic_anchors,
+            validators,
         }
     }
 
@@ -1091,9 +1102,27 @@ impl<'a> SyntheticGenerator<'a> {
             return generated;
         }
         if let Some(branches) = object.get("oneOf").and_then(Value::as_array) {
+            if let Some(discriminator) = object.get("discriminator").and_then(Value::as_object) {
+                return self.generate_discriminated_branch(
+                    branches,
+                    discriminator,
+                    seed,
+                    depth,
+                    refs,
+                );
+            }
             return self.generate_branch(branches, seed, depth, refs);
         }
         if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+            if let Some(discriminator) = object.get("discriminator").and_then(Value::as_object) {
+                return self.generate_discriminated_branch(
+                    branches,
+                    discriminator,
+                    seed,
+                    depth,
+                    refs,
+                );
+            }
             return self.generate_branch(branches, seed, depth, refs);
         }
         if let Some(branches) = object.get("allOf").and_then(Value::as_array) {
@@ -1140,6 +1169,110 @@ impl<'a> SyntheticGenerator<'a> {
             }
         }
         None
+    }
+
+    fn generate_discriminated_branch(
+        &self,
+        branches: &[Value],
+        discriminator: &Map<String, Value>,
+        seed: usize,
+        depth: usize,
+        refs: &mut Vec<String>,
+    ) -> Option<Value> {
+        if branches.is_empty() {
+            return None;
+        }
+        let field = discriminator.get("propertyName").and_then(Value::as_str)?;
+        let mappings = discriminator.get("mapping").and_then(Value::as_object);
+
+        for offset in 0..branches.len() {
+            let index = (seed + offset) % branches.len();
+            let branch = &branches[index];
+            if schema_contains_binary_format(branch, self.root) {
+                continue;
+            }
+            let Some(candidate) = self.generate(branch, seed + offset + 2, depth + 1, refs) else {
+                continue;
+            };
+            let Some(mappings) = mappings else {
+                return Some(candidate);
+            };
+            let matching_keys = mappings
+                .iter()
+                .filter_map(|(key, target)| {
+                    target
+                        .as_str()
+                        .filter(|target| self.mapping_target_matches_branch(target, branch))
+                        .map(|_| key.as_str())
+                })
+                .collect::<Vec<_>>();
+            if matching_keys.is_empty() {
+                if self.branch_accepts_candidate(branch, &candidate)
+                    && !candidate
+                        .get(field)
+                        .and_then(Value::as_str)
+                        .and_then(|tag| mappings.get(tag))
+                        .and_then(Value::as_str)
+                        .is_some_and(|target| !self.mapping_target_matches_branch(target, branch))
+                {
+                    return Some(candidate);
+                }
+                continue;
+            }
+            let Value::Object(candidate_object) = &candidate else {
+                return Some(candidate);
+            };
+
+            for key_offset in 0..matching_keys.len() {
+                let key = matching_keys[(seed + key_offset) % matching_keys.len()];
+                let mut tagged = candidate_object.clone();
+                tagged.insert(field.to_string(), Value::String(key.to_string()));
+                let tagged = Value::Object(tagged);
+                if self.branch_accepts_candidate(branch, &tagged) {
+                    return Some(tagged);
+                }
+            }
+
+            // A contradictory mapping is only a hint and must not fabricate
+            // validity. If the branch generated a value that satisfies its
+            // own constraints, keep that schema-faithful value and let the
+            // independent union validator decide whether it is usable.
+            if self.branch_accepts_candidate(branch, &candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn mapping_target_matches_branch(&self, target: &str, branch: &Value) -> bool {
+        let Some(branch_reference) = branch.get("$ref").and_then(Value::as_str) else {
+            return false;
+        };
+        self.normalized_component_reference(target) == branch_reference
+            || self.normalized_component_reference(branch_reference) == target
+    }
+
+    fn normalized_component_reference(&self, reference: &str) -> String {
+        let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+            return reference.to_string();
+        };
+        let definitions_key = if self.root.get("$defs").is_some() {
+            "$defs"
+        } else {
+            "definitions"
+        };
+        format!("#/{definitions_key}/{name}")
+    }
+
+    fn branch_accepts_candidate(&self, branch: &Value, candidate: &Value) -> bool {
+        let Some(reference) = branch.get("$ref").and_then(Value::as_str) else {
+            // Inline branches still receive independent validation against the
+            // containing component before becoming round-trip samples.
+            return true;
+        };
+        self.validators
+            .and_then(|validators| validators.get(reference))
+            .is_none_or(|validator| validator.is_valid(candidate))
     }
 
     fn object_value(
@@ -2127,6 +2260,227 @@ mod tests {
                 "samples=16\n"
             )
         );
+    }
+
+    #[test]
+    fn discriminated_synthesis_aligns_mapping_tags_with_branch_shapes() {
+        let document = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "BroadKind": { "type": "string", "enum": ["alpha", "beta"] },
+                "BroadBase": {
+                    "type": "object",
+                    "required": ["kind", "id"],
+                    "properties": {
+                        "kind": { "$ref": "#/$defs/BroadKind" },
+                        "id": { "type": "string" }
+                    }
+                },
+                "Alpha": {
+                    "allOf": [
+                        { "$ref": "#/$defs/BroadBase" },
+                        {
+                            "type": "object",
+                            "required": ["alpha"],
+                            "properties": { "alpha": { "type": "string" } }
+                        }
+                    ]
+                },
+                "Beta": {
+                    "allOf": [
+                        { "$ref": "#/$defs/BroadBase" },
+                        {
+                            "type": "object",
+                            "required": ["beta"],
+                            "properties": { "beta": { "type": "string" } }
+                        }
+                    ]
+                },
+                "Mapped": {
+                    "oneOf": [
+                        { "$ref": "#/$defs/Alpha" },
+                        { "$ref": "#/$defs/Beta" }
+                    ],
+                    "discriminator": {
+                        "propertyName": "kind",
+                        "mapping": {
+                            "alpha": "#/components/schemas/Alpha",
+                            "beta": "#/components/schemas/Beta"
+                        }
+                    }
+                },
+                "RoundRobin": {
+                    "type": "object",
+                    "properties": {
+                        "manager_type": { "type": "string", "const": "round_robin" }
+                    }
+                },
+                "Supervisor": {
+                    "type": "object",
+                    "properties": {
+                        "manager_type": { "type": "string", "const": "supervisor" }
+                    }
+                },
+                "OptionalManager": {
+                    "oneOf": [
+                        { "$ref": "#/$defs/RoundRobin" },
+                        { "$ref": "#/$defs/Supervisor" }
+                    ],
+                    "discriminator": {
+                        "propertyName": "manager_type",
+                        "mapping": {
+                            "round_robin": "#/components/schemas/RoundRobin",
+                            "supervisor": "#/components/schemas/Supervisor"
+                        }
+                    }
+                },
+                "StrictAlpha": {
+                    "type": "object",
+                    "required": ["kind", "alpha"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "alpha" },
+                        "alpha": { "type": "string" }
+                    }
+                },
+                "StrictBeta": {
+                    "type": "object",
+                    "required": ["kind", "beta"],
+                    "properties": {
+                        "kind": { "type": "string", "const": "beta" },
+                        "beta": { "type": "string" }
+                    }
+                },
+                "ContradictoryMapping": {
+                    "oneOf": [
+                        { "$ref": "#/$defs/StrictAlpha" },
+                        { "$ref": "#/$defs/StrictBeta" }
+                    ],
+                    "discriminator": {
+                        "propertyName": "kind",
+                        "mapping": {
+                            "alpha": "#/components/schemas/StrictBeta",
+                            "beta": "#/components/schemas/StrictAlpha"
+                        }
+                    }
+                },
+                "ClosedBase": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "common"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["button", "text", "other"] },
+                        "common": { "type": "string" }
+                    }
+                },
+                "ImpossibleButton": {
+                    "allOf": [
+                        { "$ref": "#/$defs/ClosedBase" },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": { "label": { "type": "string" } }
+                        }
+                    ]
+                },
+                "ClosedMapped": {
+                    "oneOf": [
+                        { "$ref": "#/$defs/ImpossibleButton" },
+                        { "$ref": "#/$defs/ClosedBase" }
+                    ],
+                    "discriminator": {
+                        "propertyName": "kind",
+                        "mapping": {
+                            "button": "#/components/schemas/ImpossibleButton",
+                            "text": "#/components/schemas/ClosedBase",
+                            "other": "#/components/schemas/ClosedBase"
+                        }
+                    }
+                }
+            }
+        });
+        let validators = validator_options(Dialect::Draft202012)
+            .build_map(&document)
+            .expect("validator map");
+        let generator = SyntheticGenerator::with_validators(&document, &validators);
+
+        for schema_name in [
+            "Mapped",
+            "OptionalManager",
+            "ContradictoryMapping",
+            "ClosedMapped",
+        ] {
+            let schema = &document["$defs"][schema_name];
+            let validator = validators
+                .get(&format!("#/$defs/{schema_name}"))
+                .expect("component validator");
+            for seed in 0..8 {
+                let candidate = generator
+                    .generate(schema, seed, 0, &mut Vec::new())
+                    .expect("discriminated candidate");
+                assert!(
+                    validator.is_valid(&candidate),
+                    "{schema_name} seed {seed}: {candidate}"
+                );
+                let tag = candidate
+                    .as_object()
+                    .and_then(|object| object.get("kind").or_else(|| object.get("manager_type")))
+                    .and_then(Value::as_str)
+                    .expect("mapped candidate tag");
+                match tag {
+                    "alpha" => assert!(candidate.get("alpha").is_some()),
+                    "beta" => assert!(candidate.get("beta").is_some()),
+                    "round_robin" | "supervisor" => {}
+                    "text" | "other" => {
+                        assert!(candidate.get("common").is_some());
+                    }
+                    other => panic!("unexpected tag {other}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coda_column_format_synthesis_avoids_uninhabitable_mapped_branches() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("specs/coda.yaml");
+        let body = std::fs::read_to_string(&path).expect("Coda fixture");
+        let spec = crate::spec_source::parse_spec(&body, "specs/coda.yaml").expect("Coda spec");
+        let dialect = Dialect::from_spec(&spec).expect("Coda dialect");
+        let components = spec
+            .pointer("/components/schemas")
+            .and_then(Value::as_object)
+            .expect("Coda components");
+        let normalized = components
+            .iter()
+            .map(|(name, schema)| {
+                (
+                    name.clone(),
+                    normalize_component_schema(name, schema, dialect),
+                )
+            })
+            .collect::<Map<_, _>>();
+        let document = json!({
+            "$schema": dialect.schema_uri(),
+            dialect.definitions_key(): Value::Object(normalized),
+        });
+        let validators = validator_options(dialect)
+            .build_map(&document)
+            .expect("Coda validator map");
+        let generator = SyntheticGenerator::with_validators(&document, &validators);
+        let pointer = format!("#/{}/ColumnFormat", dialect.definitions_key());
+        let schema = document
+            .pointer(pointer.trim_start_matches('#'))
+            .expect("ColumnFormat schema");
+        let validator = validators.get(&pointer).expect("ColumnFormat validator");
+
+        for seed in 0..32 {
+            let candidate = generator
+                .generate(schema, seed, 0, &mut Vec::new())
+                .expect("ColumnFormat candidate");
+            assert!(validator.is_valid(&candidate), "seed {seed}: {candidate}");
+            let tag = candidate["type"].as_str().expect("ColumnFormat tag");
+            assert_ne!(tag, "checkbox", "seed {seed}: {candidate}");
+            assert_ne!(tag, "button", "seed {seed}: {candidate}");
+        }
     }
 
     #[test]
