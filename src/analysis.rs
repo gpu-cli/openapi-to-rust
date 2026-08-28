@@ -7124,8 +7124,10 @@ impl SchemaAnalyzer {
 
         let details = schema.details();
 
-        // If it has explicit additionalProperties, it should remain as a typed object
-        // that will be generated as BTreeMap<String, serde_json::Value> or similar
+        // An explicit additionalProperties policy is structural even when no
+        // named properties exist. `true`/a schema needs a map carrier, while
+        // `false` is a closed empty object (GitHub's `empty-object`) and must
+        // not become `serde_json::Value`, which would match every oneOf branch.
         if self.has_explicit_additional_properties(schema) {
             return false;
         }
@@ -7161,16 +7163,10 @@ impl SchemaAnalyzer {
         false
     }
 
-    /// Check if this is an object that explicitly allows arbitrary additional properties
+    /// Check whether the object declares any explicit additional-properties policy.
     fn has_explicit_additional_properties(&self, schema: &Schema) -> bool {
         let details = schema.details();
-
-        // Check if additionalProperties is explicitly set to true or a schema
-        matches!(
-            &details.additional_properties,
-            Some(crate::openapi::AdditionalProperties::Boolean(true))
-                | Some(crate::openapi::AdditionalProperties::Schema(_))
-        )
+        details.additional_properties.is_some()
     }
 
     /// Analyze OpenAPI operations to extract request/response schemas

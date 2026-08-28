@@ -64,6 +64,22 @@ fn schema_aware_oneof_spec() -> Value {
                     { "$ref": "#/components/schemas/OverlapA" },
                     { "$ref": "#/components/schemas/OverlapB" }
                 ]
+            },
+            "RequiredUser": {
+                "type": "object",
+                "required": ["login"],
+                "properties": { "login": { "type": "string" } }
+            },
+            "ClosedEmpty": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "UserOrEmpty": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/RequiredUser" },
+                    { "$ref": "#/components/schemas/ClosedEmpty" }
+                ]
             }
         } }
     })
@@ -105,7 +121,7 @@ fn generated_oneof_selects_one_complete_shape_independent_of_branch_order() {
         r#"
 #[cfg(test)]
 mod schema_aware_oneof_runtime {
-    use super::{Connection, ConnectionReversed, ExclusiveOverlap, NonExclusiveOverlap};
+    use super::{Connection, ConnectionReversed, ExclusiveOverlap, NonExclusiveOverlap, UserOrEmpty};
 
     #[test]
     fn complete_shape_wins_regardless_of_branch_order() {
@@ -140,6 +156,14 @@ mod schema_aware_oneof_runtime {
         let input = serde_json::json!({"shared": "either"});
         let hydrated: NonExclusiveOverlap = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(serde_json::to_value(hydrated).unwrap(), input);
+    }
+
+    #[test]
+    fn closed_empty_object_is_not_an_unconstrained_value_branch() {
+        for input in [serde_json::json!({}), serde_json::json!({"login": "octocat"})] {
+            let hydrated: UserOrEmpty = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(hydrated).unwrap(), input);
+        }
     }
 }
 "#,
