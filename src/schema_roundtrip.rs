@@ -1194,8 +1194,14 @@ impl<'a> SyntheticGenerator<'a> {
             let Some(candidate) = self.generate(branch, seed + offset + 2, depth + 1, refs) else {
                 continue;
             };
+            let branch_tags = self.discriminator_tags_for_branch(branch, field);
             let Some(mappings) = mappings else {
-                return Some(candidate);
+                if let Some(tagged) =
+                    self.tagged_branch_candidate(branch, &candidate, field, &branch_tags, seed)
+                {
+                    return Some(tagged);
+                }
+                continue;
             };
             let matching_keys = mappings
                 .iter()
@@ -1233,6 +1239,20 @@ impl<'a> SyntheticGenerator<'a> {
                 }
             }
 
+            if let Some(tagged) =
+                self.tagged_branch_candidate(branch, &candidate, field, &branch_tags, seed)
+            {
+                let redirects_elsewhere = tagged
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .and_then(|tag| mappings.get(tag))
+                    .and_then(Value::as_str)
+                    .is_some_and(|target| !self.mapping_target_matches_branch(target, branch));
+                if !redirects_elsewhere {
+                    return Some(tagged);
+                }
+            }
+
             // A contradictory mapping is only a hint and must not fabricate
             // validity. If the branch generated a value that satisfies its
             // own constraints, keep that schema-faithful value and let the
@@ -1242,6 +1262,203 @@ impl<'a> SyntheticGenerator<'a> {
             }
         }
         None
+    }
+
+    fn tagged_branch_candidate(
+        &self,
+        branch: &Value,
+        candidate: &Value,
+        field: &str,
+        tags: &[String],
+        seed: usize,
+    ) -> Option<Value> {
+        let Value::Object(candidate_object) = candidate else {
+            return self
+                .branch_accepts_candidate(branch, candidate)
+                .then(|| candidate.clone());
+        };
+        if tags.is_empty() {
+            return self
+                .branch_accepts_candidate(branch, candidate)
+                .then(|| candidate.clone());
+        }
+        for offset in 0..tags.len() {
+            let tag = &tags[(seed + offset) % tags.len()];
+            let mut tagged = candidate_object.clone();
+            tagged.insert(field.to_string(), Value::String(tag.clone()));
+            let tagged = Value::Object(tagged);
+            if self.branch_accepts_candidate(branch, &tagged) {
+                return Some(tagged);
+            }
+        }
+        None
+    }
+
+    fn discriminator_tags_for_branch(&self, branch: &Value, field: &str) -> Vec<String> {
+        if let Some(domain) = self.discriminator_field_domain(branch, field, &mut BTreeSet::new())
+            && !domain.is_empty()
+        {
+            return domain;
+        }
+        branch
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|reference| reference.rsplit('/').next())
+            .map(Self::implicit_discriminator_tag)
+            .into_iter()
+            .collect()
+    }
+
+    fn discriminator_field_domain(
+        &self,
+        schema: &Value,
+        field: &str,
+        visited_refs: &mut BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        let object = schema.as_object()?;
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+            if !visited_refs.insert(reference.to_string()) {
+                return None;
+            }
+            let result = resolve_local_ref(self.root, reference)
+                .and_then(|target| self.discriminator_field_domain(target, field, visited_refs));
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let own_domain = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get(field))
+            .and_then(|property| self.string_constraint_domain(property, visited_refs));
+        let composition_domain =
+            if let Some(branches) = object.get("allOf").and_then(Value::as_array) {
+                branches.iter().fold(None, |domain, branch| {
+                    Self::intersect_string_domains(
+                        domain,
+                        self.discriminator_field_domain(branch, field, visited_refs),
+                    )
+                })
+            } else if let Some(branches) = object
+                .get("anyOf")
+                .or_else(|| object.get("oneOf"))
+                .and_then(Value::as_array)
+            {
+                self.union_string_domains(branches, field, visited_refs)
+            } else {
+                None
+            };
+        Self::intersect_string_domains(own_domain, composition_domain)
+    }
+
+    fn string_constraint_domain(
+        &self,
+        schema: &Value,
+        visited_refs: &mut BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        let object = schema.as_object()?;
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+            if !visited_refs.insert(reference.to_string()) {
+                return None;
+            }
+            let result = resolve_local_ref(self.root, reference)
+                .and_then(|target| self.string_constraint_domain(target, visited_refs));
+            visited_refs.remove(reference);
+            return result;
+        }
+        let own_domain = object
+            .get("const")
+            .and_then(Value::as_str)
+            .map(|value| vec![value.to_string()])
+            .or_else(|| {
+                object.get("enum").and_then(Value::as_array).map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+            });
+        let composition_domain =
+            if let Some(branches) = object.get("allOf").and_then(Value::as_array) {
+                branches.iter().fold(None, |domain, branch| {
+                    Self::intersect_string_domains(
+                        domain,
+                        self.string_constraint_domain(branch, visited_refs),
+                    )
+                })
+            } else if let Some(branches) = object
+                .get("anyOf")
+                .or_else(|| object.get("oneOf"))
+                .and_then(Value::as_array)
+            {
+                let mut values = Vec::new();
+                for branch in branches {
+                    for value in self.string_constraint_domain(branch, visited_refs)? {
+                        if !values.contains(&value) {
+                            values.push(value);
+                        }
+                    }
+                }
+                Some(values)
+            } else {
+                None
+            };
+        Self::intersect_string_domains(own_domain, composition_domain)
+    }
+
+    fn union_string_domains(
+        &self,
+        branches: &[Value],
+        field: &str,
+        visited_refs: &mut BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        let mut values = Vec::new();
+        for branch in branches {
+            for value in self.discriminator_field_domain(branch, field, visited_refs)? {
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+        }
+        Some(values)
+    }
+
+    fn intersect_string_domains(
+        left: Option<Vec<String>>,
+        right: Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        match (left, right) {
+            (None, other) | (other, None) => other,
+            (Some(left), Some(right)) => Some(
+                left.into_iter()
+                    .filter(|value| right.contains(value))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn implicit_discriminator_tag(schema_name: &str) -> String {
+        let mut result = String::new();
+        let mut chars = schema_name.chars().peekable();
+        let mut first = true;
+        while let Some(character) = chars.next() {
+            if character.is_uppercase()
+                && !first
+                && chars.peek().is_some_and(|next| next.is_lowercase())
+            {
+                result.push('.');
+            }
+            result.push(character.to_ascii_lowercase());
+            first = false;
+        }
+        if result.ends_with("event") {
+            result.truncate(result.len() - "event".len());
+        }
+        if schema_name.starts_with("Response") && !result.starts_with("response.") {
+            result = format!("response.{}", result.trim_start_matches("response"));
+        }
+        result
     }
 
     fn mapping_target_matches_branch(&self, target: &str, branch: &Value) -> bool {
@@ -2395,6 +2612,50 @@ mod tests {
                             "other": "#/components/schemas/ClosedBase"
                         }
                     }
+                },
+                "ImplicitAlpha": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "const": "implicit.alpha" },
+                        "alpha": { "type": "string" }
+                    }
+                },
+                "ImplicitBeta": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["implicit.beta"] },
+                        "beta": { "type": "string" }
+                    }
+                },
+                "ImplicitOptional": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/ImplicitAlpha" },
+                        { "$ref": "#/$defs/ImplicitBeta" }
+                    ],
+                    "discriminator": { "propertyName": "kind" }
+                },
+                "mcn_string_item": {
+                    "type": "object",
+                    "required": ["item_type", "text"],
+                    "properties": {
+                        "item_type": { "type": "string" },
+                        "text": { "type": "string" }
+                    }
+                },
+                "mcn_yaml_item": {
+                    "type": "object",
+                    "required": ["item_type", "yaml"],
+                    "properties": {
+                        "item_type": { "type": "string" },
+                        "yaml": { "type": "string" }
+                    }
+                },
+                "ImplicitNames": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/mcn_string_item" },
+                        { "$ref": "#/$defs/mcn_yaml_item" }
+                    ],
+                    "discriminator": { "propertyName": "item_type" }
                 }
             }
         });
@@ -2408,6 +2669,8 @@ mod tests {
             "OptionalManager",
             "ContradictoryMapping",
             "ClosedMapped",
+            "ImplicitOptional",
+            "ImplicitNames",
         ] {
             let schema = &document["$defs"][schema_name];
             let validator = validators
@@ -2423,13 +2686,20 @@ mod tests {
                 );
                 let tag = candidate
                     .as_object()
-                    .and_then(|object| object.get("kind").or_else(|| object.get("manager_type")))
+                    .and_then(|object| {
+                        object
+                            .get("kind")
+                            .or_else(|| object.get("manager_type"))
+                            .or_else(|| object.get("item_type"))
+                    })
                     .and_then(Value::as_str)
                     .expect("mapped candidate tag");
                 match tag {
                     "alpha" => assert!(candidate.get("alpha").is_some()),
                     "beta" => assert!(candidate.get("beta").is_some()),
                     "round_robin" | "supervisor" => {}
+                    "implicit.alpha" | "implicit.beta" => {}
+                    "mcn_string_item" | "mcn_yaml_item" => {}
                     "text" | "other" => {
                         assert!(candidate.get("common").is_some());
                     }

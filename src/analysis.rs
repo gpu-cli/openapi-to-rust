@@ -2591,10 +2591,8 @@ impl SchemaAnalyzer {
             == Some(true)
             && let Some(default) = details.default.as_ref().and_then(Value::as_str)
         {
-            own_domain = Self::intersect_optional_domains(
-                own_domain,
-                Some(vec![default.to_string()]),
-            );
+            own_domain =
+                Self::intersect_optional_domains(own_domain, Some(vec![default.to_string()]));
         }
 
         let composition_domain = match schema {
