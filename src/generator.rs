@@ -3214,11 +3214,8 @@ impl CodeGenerator {
 
         // Check if this schema is used as a variant in another discriminated union
         for other_schema in analysis.schemas.values() {
-            if let crate::analysis::SchemaType::DiscriminatedUnion {
-                variants,
-                discriminator_field: _,
-                ..
-            } = &other_schema.schema_type
+            if let crate::analysis::SchemaType::DiscriminatedUnion { variants, .. } =
+                &other_schema.schema_type
             {
                 for variant in variants {
                     if variant.type_name == schema.name {
@@ -3772,7 +3769,7 @@ impl CodeGenerator {
         let composed = object
             .get("allOf")
             .and_then(serde_json::Value::as_array)
-            .map(|branches| {
+            .and_then(|branches| {
                 branches.iter().fold(None, |domain, branch| {
                     let branch_domain = self.schema_literal_domain(branch, analysis, visited);
                     match (domain, branch_domain) {
@@ -3783,8 +3780,7 @@ impl CodeGenerator {
                         }
                     }
                 })
-            })
-            .flatten();
+            });
         match (own, composed) {
             (None, other) | (other, None) => other,
             (Some(mut left), Some(right)) => {
