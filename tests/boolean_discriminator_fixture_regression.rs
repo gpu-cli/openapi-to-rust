@@ -87,7 +87,7 @@ fn cloudflare_hyperdrive_union_keeps_its_boolean_typed_branches() {
 }
 
 #[test]
-fn boolean_branch_union_generates_untagged_without_manual_string_dispatch() {
+fn boolean_branch_union_uses_lossless_anyof_without_manual_string_dispatch() {
     let spec = json!({
         "openapi": "3.1.0",
         "info": { "title": "boolean caching", "version": "1.0.0" },
@@ -128,8 +128,9 @@ fn boolean_branch_union_generates_untagged_without_manual_string_dispatch() {
     let generated = CodeGenerator::new(GeneratorConfig::default())
         .generate(&mut analysis)
         .expect("discriminator-free boolean union should generate valid Rust");
-    assert!(generated.contains("#[serde(untagged)]"));
     assert!(generated.contains("pub enum Caching"));
+    assert!(generated.contains("impl<'de> Deserialize<'de> for Caching"));
+    assert!(generated.contains("preserves_complete_json_input"));
     assert!(!generated.contains("missing string discriminator"));
     assert!(!generated.contains("Value::String(\"false\""));
     assert!(!generated.contains("\"false\" =>"));
