@@ -1779,6 +1779,48 @@ impl SchemaAnalyzer {
             .allocate(identity, preferred_name, collision_name)
     }
 
+    /// Run nested analysis under the name of the schema that will own the
+    /// generated Rust item. Restoring the previous context even on error keeps
+    /// sibling paths independent and makes names encode the complete owning
+    /// path (`RootWrapperUser`, not a second `RootUser`).
+    fn with_schema_context<T>(
+        &mut self,
+        schema_name: &str,
+        analyze: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let previous = self.current_schema_name.replace(schema_name.to_string());
+        let result = analyze(self);
+        self.current_schema_name = previous;
+        result
+    }
+
+    fn add_allocated_object_schema(
+        &mut self,
+        object_type_name: String,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaType> {
+        let object_type = self.with_schema_context(&object_type_name, |analyzer| {
+            analyzer.analyze_object_schema(schema, dependencies)
+        })?;
+        self.resolved_cache.insert(
+            object_type_name.clone(),
+            AnalyzedSchema {
+                name: object_type_name.clone(),
+                original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                schema_type: object_type,
+                dependencies: dependencies.clone(),
+                nullable: false,
+                description: schema.details().description.clone(),
+                default: None,
+            },
+        );
+        dependencies.insert(object_type_name.clone());
+        Ok(SchemaType::Reference {
+            target: object_type_name,
+        })
+    }
+
     fn allocate_inline_union_branch_name(
         &mut self,
         preferred_name: &str,
@@ -3043,12 +3085,18 @@ impl SchemaAnalyzer {
                     // `{properties: {...}, anyOf: [{required: [a]}, {required: [b]}]}`.
                     if Self::union_only_constrains_requiredness(any_of) {
                         self.analyze_empty_union(prop_schema, dependencies)?
-                    } else if let Some(with_variants) = self.analyze_object_with_variants(
-                        prop_schema,
-                        any_of,
-                        &format!("{owner_name}{}", self.to_pascal_case(prop_name)),
-                        dependencies,
-                    )? {
+                    } else if let Some(with_variants) = {
+                        let variant_owner =
+                            format!("{owner_name}{}", self.to_pascal_case(prop_name));
+                        self.with_schema_context(&variant_owner, |analyzer| {
+                            analyzer.analyze_object_with_variants(
+                                prop_schema,
+                                any_of,
+                                &variant_owner,
+                                dependencies,
+                            )
+                        })?
+                    } {
                         with_variants
                     } else if self.should_use_dynamic_json(prop_schema) {
                         // This is a dynamic JSON pattern, use serde_json::Value directly
@@ -3288,7 +3336,7 @@ impl SchemaAnalyzer {
                 {
                     let analyzed = self.analyze_property_schema_with_context(
                         value_schema,
-                        None,
+                        Some("AdditionalProperty"),
                         dependencies,
                     )?;
                     let nullable_value =
@@ -3484,22 +3532,16 @@ impl SchemaAnalyzer {
                     "typed-multi-object",
                     schema,
                 );
-                let object_type = self.analyze_object_schema(schema, dependencies)?;
-                self.resolved_cache.insert(
+                let object_type = self.add_allocated_object_schema(
                     object_type_name.clone(),
-                    AnalyzedSchema {
-                        name: object_type_name.clone(),
-                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                        schema_type: object_type,
-                        dependencies: dependencies.clone(),
-                        nullable: false,
-                        description: schema.details().description.clone(),
-                        default: None,
-                    },
-                );
-                dependencies.insert(object_type_name.clone());
+                    schema,
+                    dependencies,
+                )?;
+                let SchemaType::Reference { target } = object_type else {
+                    unreachable!("allocated object schemas always return a reference");
+                };
                 Ok(SchemaRef {
-                    target: object_type_name,
+                    target,
                     nullable: false,
                 })
             }
@@ -3724,29 +3766,11 @@ impl SchemaAnalyzer {
                         schema,
                     );
 
-                    // Analyze the object schema
-                    let object_type = self.analyze_object_schema(schema, dependencies)?;
-
-                    // Create an analyzed schema for the inline object
-                    let inline_schema = AnalyzedSchema {
-                        name: object_type_name.clone(),
-                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                        schema_type: object_type,
-                        dependencies: dependencies.clone(),
-                        nullable: false,
-                        description: schema.details().description.clone(),
-                        default: None,
-                    };
-
-                    // Add the inline object as a named schema
-                    self.resolved_cache
-                        .insert(object_type_name.clone(), inline_schema);
-                    dependencies.insert(object_type_name.clone());
-
-                    // Return a reference to the named schema
-                    return Ok(SchemaType::Reference {
-                        target: object_type_name,
-                    });
+                    return self.add_allocated_object_schema(
+                        object_type_name,
+                        schema,
+                        dependencies,
+                    );
                 }
                 // `type: null` admits exactly one value; Rust spells that
                 // `()`, which serde reads from and writes as null.
@@ -3777,6 +3801,16 @@ impl SchemaAnalyzer {
 
         // Handle allOf composition patterns
         if let Schema::AllOf { all_of, .. } = schema {
+            if let Some(property_name) = property_name {
+                let owner = self
+                    .current_schema_name
+                    .clone()
+                    .unwrap_or_else(|| "Inline".to_string());
+                let composition_name = format!("{owner}{}", self.to_pascal_case(property_name));
+                return self.with_schema_context(&composition_name, |analyzer| {
+                    analyzer.analyze_allof_composition(schema, all_of, dependencies)
+                });
+            }
             return self.analyze_allof_composition(schema, all_of, dependencies);
         }
 
@@ -3899,7 +3933,25 @@ impl SchemaAnalyzer {
                         return Ok(self
                             .untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
                     }
-                    return self.analyze_object_schema(schema, dependencies);
+                    let owner = self
+                        .current_schema_name
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let preferred_name = property_name.map_or_else(
+                        || format!("{owner}Object"),
+                        |property_name| format!("{owner}{}", self.to_pascal_case(property_name)),
+                    );
+                    let object_type_name = self.allocate_inline_schema_name(
+                        &preferred_name,
+                        &format!("{preferred_name}Inline"),
+                        "property-object",
+                        schema,
+                    );
+                    return self.add_allocated_object_schema(
+                        object_type_name,
+                        schema,
+                        dependencies,
+                    );
                 }
                 OpenApiSchemaType::Array => {
                     let context_name = if let Some(prop_name) = property_name {
@@ -5137,10 +5189,9 @@ impl SchemaAnalyzer {
         // For non-primitive types, analyze the inline schema and add it to our collection
         // Set current_schema_name so nested inline properties (enums, unions, objects)
         // get named with the correct parent context instead of inheriting a stale name
-        let previous_schema_name = self.current_schema_name.take();
-        self.current_schema_name = Some(allocated_name.clone());
-        let analyzed = self.analyze_schema_value(schema, &allocated_name)?;
-        self.current_schema_name = previous_schema_name;
+        let analyzed = self.with_schema_context(&allocated_name, |analyzer| {
+            analyzer.analyze_schema_value(schema, &allocated_name)
+        })?;
 
         // Add to resolved cache so it can be generated
         self.resolved_cache.insert(allocated_name.clone(), analyzed);
@@ -6372,29 +6423,11 @@ impl SchemaAnalyzer {
                             items_schema,
                         );
 
-                        // Analyze the object schema
-                        let object_type = self.analyze_object_schema(items_schema, dependencies)?;
-
-                        // Create an analyzed schema for the inline object
-                        let inline_schema = AnalyzedSchema {
-                            name: object_type_name.clone(),
-                            original: serde_json::to_value(items_schema).unwrap_or(Value::Null),
-                            schema_type: object_type,
-                            dependencies: dependencies.clone(),
-                            nullable: false,
-                            description: items_schema.details().description.clone(),
-                            default: None,
-                        };
-
-                        // Add the inline object as a named schema
-                        self.resolved_cache
-                            .insert(object_type_name.clone(), inline_schema);
-                        dependencies.insert(object_type_name.clone());
-
-                        // Return a reference to the named schema
-                        SchemaType::Reference {
-                            target: object_type_name,
-                        }
+                        self.add_allocated_object_schema(
+                            object_type_name,
+                            items_schema,
+                            dependencies,
+                        )?
                     }
                     OpenApiSchemaType::Array => {
                         // Array of arrays - recursively analyze
@@ -6453,30 +6486,11 @@ impl SchemaAnalyzer {
                                 items_schema,
                             );
 
-                            // Analyze the object schema
-                            let object_type =
-                                self.analyze_object_schema(items_schema, dependencies)?;
-
-                            // Create an analyzed schema for the inline object
-                            let inline_schema = AnalyzedSchema {
-                                name: object_type_name.clone(),
-                                original: serde_json::to_value(items_schema).unwrap_or(Value::Null),
-                                schema_type: object_type,
-                                dependencies: dependencies.clone(),
-                                nullable: false,
-                                description: items_schema.details().description.clone(),
-                                default: None,
-                            };
-
-                            // Add the inline object as a named schema
-                            self.resolved_cache
-                                .insert(object_type_name.clone(), inline_schema);
-                            dependencies.insert(object_type_name.clone());
-
-                            // Return a reference to the named schema
-                            SchemaType::Reference {
-                                target: object_type_name,
-                            }
+                            self.add_allocated_object_schema(
+                                object_type_name,
+                                items_schema,
+                                dependencies,
+                            )?
                         }
                         OpenApiSchemaType::String => {
                             // Typeless (OpenAPI 3.1) enum in array items —
