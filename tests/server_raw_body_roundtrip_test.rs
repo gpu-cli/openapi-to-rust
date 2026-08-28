@@ -405,7 +405,7 @@ mod tests {
         Plugin {
             added_at: "2024-01-01T00:00:00Z".parse().unwrap(),
             connection: PluginModeUnion::PluginSupervisedProps(PluginSupervisedProps {
-                mode: PluginMode::Supervised,
+                mode: PluginSupervisedPropsMode::Supervised,
             }),
             description: None,
             id: "plugin-one".to_string(),
