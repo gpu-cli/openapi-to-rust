@@ -97,6 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
                     discriminator_field,
                     variants,
+                    ..
                 } => {
                     let variant_info: Vec<String> = variants
                         .iter()

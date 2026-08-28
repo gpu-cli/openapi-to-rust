@@ -118,6 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
                     discriminator_field,
                     variants,
+                    ..
                 } => {
                     let variant_info: Vec<String> = variants
                         .iter()
@@ -134,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         variant_info.join(", ")
                     )
                 }
-                openapi_to_rust::analysis::SchemaType::Union { variants } => {
+                openapi_to_rust::analysis::SchemaType::Union { variants, .. } => {
                     let variant_info: Vec<String> =
                         variants.iter().map(|v| v.target.to_string()).collect();
                     format!("Union(variants: [{}])", variant_info.join(", "))

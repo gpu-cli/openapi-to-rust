@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
             discriminator_field,
             variants,
+            ..
         } = &schema.schema_type
         {
             println!("\nDiscriminator field: {discriminator_field}");

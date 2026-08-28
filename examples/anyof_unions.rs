@@ -107,12 +107,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "  - {}: {:?}",
             name,
             match &schema.schema_type {
-                openapi_to_rust::analysis::SchemaType::Union { variants } => {
+                openapi_to_rust::analysis::SchemaType::Union { variants, .. } => {
                     format!("Union(variants: {})", variants.len())
                 }
                 openapi_to_rust::analysis::SchemaType::DiscriminatedUnion {
                     discriminator_field,
                     variants,
+                    ..
                 } => {
                     format!(
                         "DiscriminatedUnion(discriminator: {}, variants: {})",

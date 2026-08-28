@@ -110,6 +110,7 @@ fn inferred_anyof_discriminator_keeps_branch_scoped_payloads() {
     let SchemaType::DiscriminatedUnion {
         discriminator_field,
         variants,
+        ..
     } = &analysis.schemas["InferredAnyOf"].schema_type
     else {
         panic!("InferredAnyOf should infer a discriminated union");
