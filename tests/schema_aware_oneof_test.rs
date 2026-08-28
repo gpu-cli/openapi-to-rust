@@ -121,6 +121,35 @@ fn schema_aware_oneof_spec() -> Value {
                     { "$ref": "#/components/schemas/RequiredUser" },
                     { "$ref": "#/components/schemas/ClosedEmpty" }
                 ]
+            },
+            "ConflictingKindBase": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["base"] }
+                }
+            },
+            "ConflictingKindNarrow": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/ConflictingKindBase" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "enum": ["narrow"] }
+                        }
+                    }
+                ]
+            },
+            "Marker": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["marker"],
+                "properties": { "marker": { "type": "string" } }
+            },
+            "EmptyDomainUnion": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/ConflictingKindNarrow" },
+                    { "$ref": "#/components/schemas/Marker" }
+                ]
             }
         } }
     })
@@ -163,7 +192,7 @@ fn generated_oneof_selects_one_complete_shape_independent_of_branch_order() {
 #[cfg(test)]
 mod schema_aware_oneof_runtime {
     use super::{
-        Connection, ConnectionReversed, ExclusiveOverlap, LosslessAny,
+        Connection, ConnectionReversed, EmptyDomainUnion, ExclusiveOverlap, LosslessAny,
         NonExclusiveOverlap, NumericKind, UserOrEmpty,
     };
 
@@ -219,6 +248,10 @@ mod schema_aware_oneof_runtime {
             let hydrated: UserOrEmpty = serde_json::from_value(input.clone()).unwrap();
             assert_eq!(serde_json::to_value(hydrated).unwrap(), input);
         }
+
+        let marker = serde_json::json!({"marker": "valid"});
+        let hydrated: EmptyDomainUnion = serde_json::from_value(marker.clone()).unwrap();
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), marker);
     }
 }
 "#,

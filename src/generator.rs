@@ -3460,7 +3460,11 @@ impl CodeGenerator {
                                     .iter()
                                     .map(serde_json::Value::to_string)
                                     .collect::<Vec<_>>();
-                                if *required {
+                                if allowed.is_empty() && *required {
+                                    quote! { false }
+                                } else if allowed.is_empty() {
+                                    quote! { object.get(#field).is_none() }
+                                } else if *required {
                                     quote! {
                                         object.get(#field).is_some_and(|value| {
                                             matches!(value.to_string().as_str(), #(#allowed)|*)
