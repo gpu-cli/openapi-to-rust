@@ -93,6 +93,51 @@ fn structural_fallback_spec() -> Value {
                     { "$ref": "#/components/schemas/TaglessTwin" }
                 ],
                 "discriminator": { "propertyName": "kind" }
+            },
+            "OptionalRed": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["red"],
+                "properties": {
+                    "kind": { "type": "string", "const": "red" },
+                    "red": { "type": "string" }
+                }
+            },
+            "OptionalBlue": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["blue"],
+                "properties": {
+                    "kind": { "type": "string", "const": "blue" },
+                    "blue": { "type": "string" }
+                }
+            },
+            "OptionalPaint": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/OptionalRed" },
+                    { "$ref": "#/components/schemas/OptionalBlue" }
+                ],
+                "discriminator": { "propertyName": "kind" }
+            },
+            "PaintWrapper": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["paint"],
+                "properties": {
+                    "paint": { "$ref": "#/components/schemas/OptionalPaint" }
+                }
+            },
+            "OtherWrapper": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["other"],
+                "properties": { "other": { "type": "string" } }
+            },
+            "CanonicalizingAnyUnion": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/PaintWrapper" },
+                    { "$ref": "#/components/schemas/OtherWrapper" }
+                ]
             }
         } }
     })
@@ -144,8 +189,8 @@ fn generated_discriminator_dispatch_uses_unique_structural_fallbacks() {
 #[cfg(test)]
 mod structural_fallback_runtime {
     use super::{
-        AmbiguousTaglessAnyUnion, AmbiguousTaglessUnion, MappedUnion, OptionalTagUnion,
-        TaglessUnion,
+        AmbiguousTaglessAnyUnion, AmbiguousTaglessUnion, CanonicalizingAnyUnion, MappedUnion,
+        OptionalTagUnion, TaglessUnion,
     };
 
     #[test]
@@ -176,6 +221,20 @@ mod structural_fallback_runtime {
         let hydrated: AmbiguousTaglessAnyUnion =
             serde_json::from_value(ambiguous_any.clone()).unwrap();
         assert_eq!(serde_json::to_value(hydrated).unwrap(), ambiguous_any);
+    }
+
+    #[test]
+    fn object_anyof_preserves_input_while_allowing_nested_canonical_tags() {
+        let input = serde_json::json!({"paint": {"red": "warm"}});
+        let hydrated: CanonicalizingAnyUnion = serde_json::from_value(input).unwrap();
+        let canonical = serde_json::to_value(hydrated).unwrap();
+        assert_eq!(canonical, serde_json::json!({
+            "paint": {"kind": "red", "red": "warm"}
+        }));
+
+        let hydrated_again: CanonicalizingAnyUnion =
+            serde_json::from_value(canonical.clone()).unwrap();
+        assert_eq!(serde_json::to_value(hydrated_again).unwrap(), canonical);
     }
 
     #[test]

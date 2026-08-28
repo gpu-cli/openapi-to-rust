@@ -3509,7 +3509,9 @@ impl CodeGenerator {
                                 serde_json::from_value::<#variant_type>(input.clone())
                             {
                                 let preserves_complete_input = serde_json::to_value(&candidate)
-                                    .map(|encoded| encoded == input)
+                                    .map(|encoded| {
+                                        preserves_complete_json_input(&encoded, &input)
+                                    })
                                     .unwrap_or(false);
                                 if preserves_complete_input {
                                     return Ok(Self::#variant_name(candidate));
@@ -3537,6 +3539,35 @@ impl CodeGenerator {
                 }
             };
             let matched_declaration = exclusive.then(|| quote! { let mut matched = None; });
+            let preservation_helper = (!exclusive).then(|| {
+                quote! {
+                    fn preserves_complete_json_input(
+                        encoded: &serde_json::Value,
+                        input: &serde_json::Value,
+                    ) -> bool {
+                        match (encoded, input) {
+                            (
+                                serde_json::Value::Object(encoded),
+                                serde_json::Value::Object(input),
+                            ) => input.iter().all(|(key, value)| {
+                                encoded.get(key).is_some_and(|encoded_value| {
+                                    preserves_complete_json_input(encoded_value, value)
+                                })
+                            }),
+                            (
+                                serde_json::Value::Array(encoded),
+                                serde_json::Value::Array(input),
+                            ) => {
+                                encoded.len() == input.len()
+                                    && encoded.iter().zip(input).all(|(encoded, input)| {
+                                        preserves_complete_json_input(encoded, input)
+                                    })
+                            }
+                            _ => encoded == input,
+                        }
+                    }
+                }
+            });
 
             return Ok(quote! {
                 #doc_comment
@@ -3561,6 +3592,7 @@ impl CodeGenerator {
                     where
                         D: serde::Deserializer<'de>,
                     {
+                        #preservation_helper
                         let input = <serde_json::Value as Deserialize>::deserialize(deserializer)?;
                         #matched_declaration
                         #(#deserialize_attempts)*
