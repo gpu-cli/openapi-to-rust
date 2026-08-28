@@ -120,6 +120,7 @@ impl SchemaType {
             | Self::Reference { .. }
             | Self::Array { .. }
             | Self::Tuple { .. }
+            | Self::Nullable { .. }
             | Self::Untyped { .. } => true,
             Self::Object { .. }
             | Self::StringEnum { .. }
@@ -177,6 +178,9 @@ fn collect_type_dependencies(
             targets.insert(target.clone());
         }
         SchemaType::Array { item_type } => collect_type_dependencies(item_type, targets, depth + 1),
+        SchemaType::Nullable { inner_type } => {
+            collect_type_dependencies(inner_type, targets, depth + 1)
+        }
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
                 collect_type_dependencies(element_type, targets, depth + 1);
@@ -194,7 +198,7 @@ fn collect_type_dependencies(
                 collect_type_dependencies(value_type, targets, depth + 1);
             }
         }
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for variant in variants {
                 targets.insert(variant.target.clone());
             }
@@ -251,6 +255,7 @@ fn normalize_untyped(schema_type: &mut SchemaType, depth: usize) {
             }
         }
         SchemaType::Array { item_type } => normalize_untyped(item_type, depth + 1),
+        SchemaType::Nullable { inner_type } => normalize_untyped(inner_type, depth + 1),
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
                 normalize_untyped(element_type, depth + 1);
@@ -355,6 +360,9 @@ fn collect_untyped(
                 collect_untyped(item_type, &element_context, findings, depth + 1);
             }
         }
+        SchemaType::Nullable { inner_type } => {
+            collect_untyped(inner_type, context, findings, depth + 1)
+        }
         SchemaType::Tuple { element_types } => {
             for (index, element_type) in element_types.iter().enumerate() {
                 collect_untyped(
@@ -367,7 +375,7 @@ fn collect_untyped(
         }
         // A union branch that mapped to an untyped Rust type is carried as a
         // variant target string, so it is recognized by name here.
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for (index, variant) in variants.iter().enumerate() {
                 if let Some(shape) = untyped_shape_of(&variant.target) {
                     findings.push(UntypedFinding {
@@ -467,6 +475,10 @@ pub enum UntypedReason {
     /// generated union carries a `serde_json::Value` variant. Whether that is
     /// faithful depends on the branch, which the analyzed type no longer says.
     UntypedUnionBranch,
+    /// A `false` schema: nothing validates against it, so there is no value to
+    /// give a type. Legal anywhere a schema is, and written to forbid a
+    /// property or close a tuple.
+    NeverMatches,
     /// Reached a fallback that has not been classified yet. Every one of these
     /// is a gap in this taxonomy, not in the generator.
     Unclassified,
@@ -481,6 +493,8 @@ impl UntypedReason {
             Self::AnySchema | Self::OpaqueObject | Self::UntypedAdditionalProperties => {
                 UntypedVerdict::Faithful
             }
+            // Nothing validates against `false`, so nothing is being lost.
+            Self::NeverMatches => UntypedVerdict::Faithful,
             // An array with no `items` says nothing about elements, and open
             // positional items permit extras of any type: both are the spec's
             // choice, not a dropped constraint.
@@ -607,15 +621,29 @@ pub enum SchemaType {
         /// halves survive; `None` for a plain object.
         variant: Option<SchemaRef>,
     },
-    /// Discriminated union (oneOf + discriminator)
+    /// Discriminated union (`oneOf`/`anyOf` + discriminator).
     DiscriminatedUnion {
         discriminator_field: String,
         variants: Vec<UnionVariant>,
+        /// `oneOf` requires a unique structural match; `anyOf` permits a
+        /// deterministic first match when the discriminator is absent or its
+        /// preferred branch does not fit.
+        exclusive: bool,
     },
-    /// Simple union (anyOf without discriminator)
-    Union { variants: Vec<SchemaRef> },
+    /// Simple union. Exclusive unions originate from `oneOf` and require
+    /// exactly one branch to preserve the complete input shape; non-exclusive
+    /// unions retain `anyOf`/multi-type first-match semantics.
+    Union {
+        variants: Vec<SchemaRef>,
+        exclusive: bool,
+    },
     /// Array type
     Array { item_type: Box<SchemaType> },
+    /// A nullable value in a container position. Object properties carry
+    /// nullability separately because their `Option<T>` also participates in
+    /// required-vs-missing serde behavior; array items, tuple positions, and
+    /// typed additional-property values need an inline wrapper instead.
+    Nullable { inner_type: Box<SchemaType> },
     /// Fixed-arity array — one schema per position, no extras — rendered as a
     /// Rust tuple. Only emitted when the spec proves the length (see
     /// `SchemaDetails::positional_items_are_exact`); an open `prefixItems`
@@ -648,8 +676,10 @@ pub enum SchemaType {
 /// value-type schema instead of degrading to `serde_json::Value`.
 #[derive(Debug, Clone)]
 pub enum ObjectAdditionalProperties {
-    /// `additionalProperties: false` or absent — extra keys are
-    /// rejected and no extra field is emitted.
+    /// No catch-all field is emitted. This is exact for
+    /// `additionalProperties: false`; for an omitted keyword it is the
+    /// generator's historical closed-model projection and is used only while
+    /// no required unknown member forces an open carrier.
     Forbidden,
     /// `additionalProperties: true` — extra keys captured as
     /// `BTreeMap<String, serde_json::Value>`.
@@ -674,6 +704,11 @@ pub struct PropertyInfo {
     pub description: Option<String>,
     pub default: Option<serde_json::Value>,
     pub serde_attrs: Vec<String>,
+    /// True when this field was synthesized from a `required` name that the
+    /// schema did not also declare in `properties`. Keeping that provenance
+    /// lets allOf merging prefer a real sibling declaration regardless of
+    /// branch order.
+    pub synthesized_required: bool,
     /// Q2.4: OpenAPI constraint annotations captured from the
     /// property schema. Surfaced by the generator as `/// Constraint:
     /// …` doc lines and/or `#[validate(...)]` attributes depending on
@@ -730,8 +765,14 @@ impl PropertyConstraints {
             _ => None,
         };
         Self {
-            minimum: details.minimum,
-            maximum: details.maximum,
+            minimum: details
+                .minimum
+                .as_ref()
+                .and_then(serde_json::Number::as_f64),
+            maximum: details
+                .maximum
+                .as_ref()
+                .and_then(serde_json::Number::as_f64),
             exclusive_minimum,
             exclusive_maximum,
             multiple_of: details.multiple_of,
@@ -749,7 +790,27 @@ impl PropertyConstraints {
 pub struct UnionVariant {
     pub rust_name: String,
     pub type_name: String,
+    /// Canonical discriminator value used when the payload does not already
+    /// carry one. This is always the first member of
+    /// `discriminator_values`.
     pub discriminator_value: String,
+    /// Every wire discriminator value accepted by this branch. JSON Schema
+    /// permits a discriminator property to use a multi-value enum, so a
+    /// branch is not necessarily identified by exactly one string.
+    pub discriminator_values: Vec<String>,
+    /// Values for which this branch is the preferred first dispatch target.
+    /// Overlapping branch constraints remain in `discriminator_values` so
+    /// deserialization can fall back structurally when the preferred branch
+    /// does not fit the rest of the payload.
+    pub preferred_discriminator_values: Vec<String>,
+    /// Whether the branch schema declares the discriminator property at all.
+    /// A mapped/tagless branch may legitimately omit it, in which case the
+    /// serializer must not invent a schema-name-derived wire field.
+    pub discriminator_field_declared: bool,
+    /// Whether the branch schema requires the discriminator property.
+    /// Missing-tag structural fallback is limited to branches where this is
+    /// false.
+    pub discriminator_field_required: bool,
     pub schema_ref: String,
 }
 
@@ -1219,36 +1280,43 @@ fn unwrap_annotation_allof(schema: &crate::openapi::Schema) -> &crate::openapi::
     let (Some(first), None) = (references.next(), references.next()) else {
         return schema;
     };
-    let others_annotation_only = all_of.iter().all(|member| {
-        if member.reference().is_some() {
-            return true;
-        }
-        serde_json::to_value(member)
-            .ok()
-            .and_then(|value| value.as_object().cloned())
-            .is_some_and(|object| {
-                object.keys().all(|key| {
-                    matches!(
-                        key.as_str(),
-                        "title"
-                            | "description"
-                            | "deprecated"
-                            | "readOnly"
-                            | "writeOnly"
-                            | "examples"
-                            | "example"
-                            | "externalDocs"
-                            | "xml"
-                            | "$comment"
-                    ) || key.starts_with("x-")
-                })
-            })
-    });
+    let others_annotation_only = all_of
+        .iter()
+        .all(|member| member.reference().is_some() || schema_is_annotation_only(member));
     if others_annotation_only {
         first
     } else {
         schema
     }
+}
+
+/// Whether a schema contributes annotations but no assertion to an
+/// intersection. OpenAPI's `nullable` only modifies an adjacent `type`, so a
+/// type-less nullable flag is neutral here. `default` and examples are JSON
+/// Schema annotations as well.
+fn schema_is_annotation_only(schema: &crate::openapi::Schema) -> bool {
+    serde_json::to_value(schema)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|object| {
+            object.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "title"
+                        | "description"
+                        | "deprecated"
+                        | "readOnly"
+                        | "writeOnly"
+                        | "examples"
+                        | "example"
+                        | "default"
+                        | "externalDocs"
+                        | "xml"
+                        | "$comment"
+                        | "nullable"
+                ) || key.starts_with("x-")
+            })
+        })
 }
 
 /// Load an extension file and parse it into the JSON representation used by
@@ -1491,9 +1559,170 @@ fn extract_schema_variants(obj: &Value) -> Option<Vec<Value>> {
     None
 }
 
+/// The source identity of a generated schema is distinct from the Rust-facing
+/// name eventually allocated to it. Component names are reserved before any
+/// traversal, while inline and deep-pointer identities retain enough
+/// provenance to reuse their own allocation without impersonating a component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum InlineUnionKind {
+    OneOf,
+    AnyOf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum SchemaIdentity {
+    Component(String),
+    Pointer(String),
+    InlineUnionBranch {
+        owner_context: String,
+        union_kind: InlineUnionKind,
+        original_index: usize,
+        discriminator: Option<String>,
+        fingerprint: String,
+    },
+    Inline {
+        context: String,
+        kind: &'static str,
+        preferred_name: String,
+        fingerprint: String,
+    },
+}
+
+#[derive(Debug, Default)]
+struct SchemaNameRegistry {
+    names_by_identity: BTreeMap<SchemaIdentity, String>,
+    identities_by_name: BTreeMap<String, SchemaIdentity>,
+}
+
+impl SchemaNameRegistry {
+    fn with_components(component_names: impl IntoIterator<Item = String>) -> Self {
+        let mut registry = Self::default();
+        for name in component_names {
+            let identity = SchemaIdentity::Component(name.clone());
+            registry
+                .names_by_identity
+                .insert(identity.clone(), name.clone());
+            registry.identities_by_name.insert(name, identity);
+        }
+        registry
+    }
+
+    fn component_name(&self, source_name: &str) -> Option<&str> {
+        self.names_by_identity
+            .get(&SchemaIdentity::Component(source_name.to_string()))
+            .map(String::as_str)
+    }
+
+    fn allocate(
+        &mut self,
+        identity: SchemaIdentity,
+        preferred_name: &str,
+        collision_name: &str,
+    ) -> String {
+        if let Some(existing) = self.names_by_identity.get(&identity) {
+            return existing.clone();
+        }
+
+        let allocated = if !self.identities_by_name.contains_key(preferred_name) {
+            preferred_name.to_string()
+        } else if !self.identities_by_name.contains_key(collision_name) {
+            collision_name.to_string()
+        } else {
+            let hash = stable_schema_identity_hash(&identity);
+            let hashed = format!("{collision_name}{hash:016X}");
+            if !self.identities_by_name.contains_key(&hashed) {
+                hashed
+            } else {
+                let mut suffix = 2;
+                loop {
+                    let candidate = format!("{hashed}{suffix}");
+                    if !self.identities_by_name.contains_key(&candidate) {
+                        break candidate;
+                    }
+                    suffix += 1;
+                }
+            }
+        };
+
+        self.names_by_identity
+            .insert(identity.clone(), allocated.clone());
+        self.identities_by_name.insert(allocated.clone(), identity);
+        allocated
+    }
+}
+
+/// Stable FNV-1a rather than `DefaultHasher`, whose output is deliberately not
+/// a cross-version contract. This suffix is only a final fallback after both a
+/// preferred and human-readable collision name are occupied.
+fn stable_schema_identity_hash(identity: &SchemaIdentity) -> u64 {
+    let bytes = format!("{identity:?}");
+    bytes
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+}
+
+#[cfg(test)]
+mod schema_name_registry_tests {
+    use super::{SchemaIdentity, SchemaNameRegistry};
+
+    #[test]
+    fn component_reservations_are_independent_of_input_traversal_order() {
+        let component_names = ["ModelApi".to_string(), "OutputFormatContainer".to_string()];
+        let mut forward = SchemaNameRegistry::with_components(component_names.clone());
+        let mut reverse = SchemaNameRegistry::with_components(component_names.into_iter().rev());
+        let inline = SchemaIdentity::Inline {
+            context: "Model".to_string(),
+            kind: "property-object",
+            preferred_name: "ModelApi".to_string(),
+            fingerprint: r#"{"type":"object"}"#.to_string(),
+        };
+
+        assert_eq!(
+            forward.allocate(inline.clone(), "ModelApi", "ModelApiInline"),
+            "ModelApiInline"
+        );
+        assert_eq!(
+            reverse.allocate(inline, "ModelApi", "ModelApiInline"),
+            "ModelApiInline"
+        );
+        assert_eq!(forward.component_name("ModelApi"), Some("ModelApi"));
+        assert_eq!(reverse.component_name("ModelApi"), Some("ModelApi"));
+        assert_eq!(
+            forward.component_name("OutputFormatContainer"),
+            Some("OutputFormatContainer")
+        );
+        assert_eq!(
+            reverse.component_name("OutputFormatContainer"),
+            Some("OutputFormatContainer")
+        );
+    }
+
+    #[test]
+    fn an_identity_reuses_its_exact_allocated_name() {
+        let mut registry = SchemaNameRegistry::with_components(["ModelApi".to_string()]);
+        let inline = SchemaIdentity::Inline {
+            context: "Model".to_string(),
+            kind: "property-object",
+            preferred_name: "ModelApi".to_string(),
+            fingerprint: r#"{"type":"object"}"#.to_string(),
+        };
+
+        let first = registry.allocate(inline.clone(), "ModelApi", "ModelApiInline");
+        let repeated = registry.allocate(inline, "Ignored", "IgnoredInline");
+
+        assert_eq!(first, "ModelApiInline");
+        assert_eq!(repeated, first);
+        assert_eq!(registry.component_name("ModelApi"), Some("ModelApi"));
+    }
+}
+
 pub struct SchemaAnalyzer {
     schemas: BTreeMap<String, Schema>,
     resolved_cache: BTreeMap<String, AnalyzedSchema>,
+    schema_names: SchemaNameRegistry,
     openapi_spec: Value,
     current_schema_name: Option<String>,
     component_parameters: BTreeMap<String, crate::openapi::Parameter>,
@@ -1540,6 +1769,116 @@ impl SchemaAnalyzer {
         }
     }
 
+    fn allocate_inline_schema_name(
+        &mut self,
+        preferred_name: &str,
+        collision_name: &str,
+        kind: &'static str,
+        schema: &Schema,
+    ) -> String {
+        let identity = SchemaIdentity::Inline {
+            context: self
+                .current_schema_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string()),
+            kind,
+            preferred_name: preferred_name.to_string(),
+            fingerprint: serde_json::to_string(schema).unwrap_or_else(|_| format!("{schema:?}")),
+        };
+        self.schema_names
+            .allocate(identity, preferred_name, collision_name)
+    }
+
+    /// Run nested analysis under the name of the schema that will own the
+    /// generated Rust item. Restoring the previous context even on error keeps
+    /// sibling paths independent and makes names encode the complete owning
+    /// path (`RootWrapperUser`, not a second `RootUser`).
+    fn with_schema_context<T>(
+        &mut self,
+        schema_name: &str,
+        analyze: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let previous = self.current_schema_name.replace(schema_name.to_string());
+        let result = analyze(self);
+        self.current_schema_name = previous;
+        result
+    }
+
+    fn add_allocated_object_schema(
+        &mut self,
+        object_type_name: String,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<SchemaType> {
+        let object_type = self.with_schema_context(&object_type_name, |analyzer| {
+            analyzer.analyze_object_schema(schema, dependencies)
+        })?;
+        self.resolved_cache.insert(
+            object_type_name.clone(),
+            AnalyzedSchema {
+                name: object_type_name.clone(),
+                original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                schema_type: object_type,
+                dependencies: dependencies.clone(),
+                nullable: false,
+                description: schema.details().description.clone(),
+                default: None,
+            },
+        );
+        dependencies.insert(object_type_name.clone());
+        Ok(SchemaType::Reference {
+            target: object_type_name,
+        })
+    }
+
+    fn allocate_inline_union_branch_name(
+        &mut self,
+        preferred_name: &str,
+        owner_context: &str,
+        union_kind: InlineUnionKind,
+        original_index: usize,
+        discriminator: Option<&str>,
+        schema: &Schema,
+    ) -> String {
+        let identity = SchemaIdentity::InlineUnionBranch {
+            owner_context: owner_context.to_string(),
+            union_kind,
+            original_index,
+            discriminator: discriminator.map(str::to_string),
+            fingerprint: serde_json::to_string(schema).unwrap_or_else(|_| format!("{schema:?}")),
+        };
+        self.schema_names
+            .allocate(identity, preferred_name, &format!("{preferred_name}Inline"))
+    }
+
+    fn allocate_pointer_schema_name(&mut self, pointer: &str, preferred_name: &str) -> String {
+        self.schema_names.allocate(
+            SchemaIdentity::Pointer(pointer.to_string()),
+            preferred_name,
+            &format!("{preferred_name}Pointer"),
+        )
+    }
+
+    fn allocate_synthetic_schema_name(
+        &mut self,
+        preferred_name: &str,
+        collision_name: &str,
+        kind: &'static str,
+        fingerprint: String,
+    ) -> String {
+        let identity = SchemaIdentity::Inline {
+            context: self
+                .current_schema_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string()),
+            kind,
+            preferred_name: preferred_name.to_string(),
+            fingerprint,
+        };
+        self.schema_names
+            .allocate(identity, preferred_name, collision_name)
+    }
+
     fn uses_aws_query_conventions(&self) -> bool {
         self.openapi_spec
             .pointer("/info/x-providerName")
@@ -1568,9 +1907,11 @@ impl SchemaAnalyzer {
             .and_then(|c| c.parameters.as_ref())
             .cloned()
             .unwrap_or_default();
+        let schema_names = SchemaNameRegistry::with_components(schemas.keys().cloned());
         Ok(Self {
             schemas,
             resolved_cache: BTreeMap::new(),
+            schema_names,
             openapi_spec,
             current_schema_name: None,
             component_parameters,
@@ -1903,23 +2244,50 @@ impl SchemaAnalyzer {
     /// openapi-generator-dpd) so we can downgrade those unions to
     /// `#[serde(untagged)]`.
     fn branch_resolves_to_object(&self, schema: &Schema) -> bool {
+        self.branch_resolves_to_object_inner(schema, &mut HashSet::new())
+    }
+
+    fn branch_resolves_to_object_inner(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+    ) -> bool {
         // Follow $ref one hop, then ask the same question of the target.
         if let Some(ref_str) = schema.reference() {
-            return match self
+            if !visited_refs.insert(ref_str.to_string()) {
+                return false;
+            }
+            let result = match self
                 .extract_schema_name(ref_str)
                 .and_then(|n| self.schemas.get(n))
             {
-                Some(target) => self.branch_resolves_to_object(target),
+                Some(target) => self.branch_resolves_to_object_inner(target, visited_refs),
                 None => false,
             };
+            visited_refs.remove(ref_str);
+            return result;
         }
-        // allOf compositions are object-shaped; same for anyOf/oneOf
-        // wrappers (those will reduce to objects or to further unions).
-        if matches!(
-            schema,
-            Schema::AllOf { .. } | Schema::AnyOf { .. } | Schema::OneOf { .. }
-        ) {
-            return true;
+        // An allOf wrapper around one scalar/array carrier and neutral
+        // annotation siblings remains that non-object carrier. Other allOf
+        // shapes are object-like only when at least one meaningful member is.
+        if let Schema::AllOf { all_of, .. } = schema {
+            if Self::single_non_object_allof_carrier(all_of).is_some() {
+                return false;
+            }
+            return all_of
+                .iter()
+                .filter(|member| !schema_is_annotation_only(member))
+                .any(|member| self.branch_resolves_to_object_inner(member, visited_refs));
+        }
+        // A nested anyOf/oneOf can carry an object discriminator only when
+        // every possible branch is itself object-shaped. Treating the wrapper
+        // as unconditionally object-like made scalar carrier unions (such as
+        // string-or-number aliases) enter object-only discriminator codegen.
+        if let Some(variants) = schema.union_variants() {
+            return !variants.is_empty()
+                && variants
+                    .iter()
+                    .all(|variant| self.branch_resolves_to_object_inner(variant, visited_refs));
         }
         if matches!(schema.schema_type(), Some(OpenApiSchemaType::Object)) {
             return true;
@@ -2002,6 +2370,54 @@ impl SchemaAnalyzer {
         false
     }
 
+    /// Resolve local component-reference chains when deciding field
+    /// nullability. A `$ref` node has no nullable details of its own, but its
+    /// target may be `anyOf: [T, null]`, `type: [T, null]`, or OpenAPI 3.0
+    /// `nullable: true`.
+    fn schema_or_reference_is_nullable(&self, schema: &Schema) -> bool {
+        let mut current = schema.clone();
+        let mut visited = HashSet::new();
+        loop {
+            if current.is_nullable_any() {
+                return true;
+            }
+            if let Schema::AllOf { all_of, .. } = &current
+                && let Some(carrier) = Self::single_non_object_allof_carrier(all_of)
+            {
+                current = carrier.clone();
+                continue;
+            }
+            let Some(reference) = current.reference() else {
+                return false;
+            };
+            if !visited.insert(reference.to_string()) {
+                return false;
+            }
+            let Some(target) = self.reference_target_schema(reference) else {
+                return false;
+            };
+            current = target;
+        }
+    }
+
+    /// Carry schema nullability into positions that do not have
+    /// [`PropertyInfo::nullable`] metadata of their own. This is deliberately
+    /// applied only by container analyzers: wrapping an ordinary object
+    /// property here would conflate a missing field with an explicit JSON
+    /// `null` and would double-wrap the generator's field-level `Option<T>`.
+    fn nullable_container_value(&self, schema: &Schema, schema_type: SchemaType) -> SchemaType {
+        if !self.schema_or_reference_is_nullable(schema)
+            || matches!(schema_type, SchemaType::Nullable { .. })
+            || matches!(schema.schema_type(), Some(OpenApiSchemaType::Null))
+        {
+            schema_type
+        } else {
+            SchemaType::Nullable {
+                inner_type: Box::new(schema_type),
+            }
+        }
+    }
+
     fn extract_type_mappings(&self, schema: &Schema) -> Result<Option<BTreeMap<String, String>>> {
         let variants = schema.union_variants().ok_or_else(|| {
             GeneratorError::InvalidSchema("No variants found for discriminated union".to_string())
@@ -2047,42 +2463,340 @@ impl SchemaAnalyzer {
         self.extract_discriminator_value_for_field(schema, "type")
     }
 
+    fn extract_discriminator_values_for_field(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+    ) -> Vec<String> {
+        self.extract_discriminator_value_domain_for_field(schema, field_name)
+            .unwrap_or_default()
+    }
+
+    fn extract_discriminator_value_domain_for_field(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+    ) -> Option<Vec<String>> {
+        let mut visited_refs = HashSet::new();
+        self.discriminator_value_domain(schema, field_name, &mut visited_refs)
+    }
+
+    /// Returns the string values admitted for `field_name`, or `None` when
+    /// the schema does not constrain that field. An empty domain means the
+    /// constraints are contradictory. JSON Schema composition matters here:
+    /// `allOf` intersects constraints, while `anyOf`/`oneOf` combine the
+    /// alternatives. Flattening all of them into one union allowed explicit
+    /// discriminator mappings to manufacture tags rejected by their payload.
+    fn discriminator_value_domain(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+        visited_refs: &mut HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return None;
+            }
+            let result = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+                .and_then(|target| {
+                    self.discriminator_value_domain(target, field_name, visited_refs)
+                });
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let own_domain = schema
+            .details()
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get(field_name))
+            .and_then(|property| self.string_constraint_domain(property, visited_refs));
+
+        let composition_domain = match schema {
+            Schema::AllOf { all_of, .. } => {
+                let mut domain = None;
+                for member in all_of {
+                    domain = Self::intersect_optional_domains(
+                        domain,
+                        self.discriminator_value_domain(member, field_name, visited_refs),
+                    );
+                }
+                domain
+            }
+            Schema::AnyOf { any_of, .. } => {
+                self.union_discriminator_domains(any_of, field_name, visited_refs)
+            }
+            Schema::OneOf { one_of, .. } => {
+                self.union_discriminator_domains(one_of, field_name, visited_refs)
+            }
+            Schema::Bool(false) => Some(Vec::new()),
+            _ => None,
+        };
+
+        Self::intersect_optional_domains(own_domain, composition_domain)
+    }
+
+    fn union_discriminator_domains(
+        &self,
+        schemas: &[Schema],
+        field_name: &str,
+        visited_refs: &mut HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if schemas.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut domain = Vec::new();
+        for schema in schemas {
+            let values = self.discriminator_value_domain(schema, field_name, visited_refs)?;
+            for value in values {
+                Self::push_unique_string(&mut domain, &value);
+            }
+        }
+        Some(domain)
+    }
+
+    fn string_constraint_domain(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+    ) -> Option<Vec<String>> {
+        let allow_vendor_default =
+            !self.has_standard_string_constraint(schema, &mut HashSet::new());
+        self.string_constraint_domain_inner(schema, visited_refs, allow_vendor_default)
+    }
+
+    fn string_constraint_domain_inner(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+        allow_vendor_default: bool,
+    ) -> Option<Vec<String>> {
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return None;
+            }
+            let result = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+                .and_then(|target| {
+                    self.string_constraint_domain_inner(target, visited_refs, allow_vendor_default)
+                });
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let details = schema.details();
+        let mut own_domain = None;
+        if let Some(value) = details.const_value.as_ref() {
+            own_domain = Self::intersect_optional_domains(
+                own_domain,
+                Some(value.as_str().into_iter().map(str::to_string).collect()),
+            );
+        }
+        if let Some(enum_values) = &details.enum_values {
+            own_domain = Self::intersect_optional_domains(
+                own_domain,
+                Some(
+                    enum_values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            );
+        }
+        if allow_vendor_default
+            && details
+                .extra
+                .get("x-stainless-const")
+                .and_then(Value::as_bool)
+                == Some(true)
+            && let Some(default) = details.default.as_ref().and_then(Value::as_str)
+        {
+            own_domain =
+                Self::intersect_optional_domains(own_domain, Some(vec![default.to_string()]));
+        }
+
+        let composition_domain = match schema {
+            Schema::AllOf { all_of, .. } => {
+                let mut domain = None;
+                for member in all_of {
+                    domain = Self::intersect_optional_domains(
+                        domain,
+                        self.string_constraint_domain_inner(
+                            member,
+                            visited_refs,
+                            allow_vendor_default,
+                        ),
+                    );
+                }
+                domain
+            }
+            Schema::AnyOf { any_of, .. } => {
+                self.union_string_constraint_domains(any_of, visited_refs, allow_vendor_default)
+            }
+            Schema::OneOf { one_of, .. } => {
+                self.union_string_constraint_domains(one_of, visited_refs, allow_vendor_default)
+            }
+            Schema::Bool(false) => Some(Vec::new()),
+            _ => None,
+        };
+
+        Self::intersect_optional_domains(own_domain, composition_domain)
+    }
+
+    fn union_string_constraint_domains(
+        &self,
+        schemas: &[Schema],
+        visited_refs: &mut HashSet<String>,
+        allow_vendor_default: bool,
+    ) -> Option<Vec<String>> {
+        if schemas.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut domain = Vec::new();
+        for schema in schemas {
+            let values =
+                self.string_constraint_domain_inner(schema, visited_refs, allow_vendor_default)?;
+            for value in values {
+                Self::push_unique_string(&mut domain, &value);
+            }
+        }
+        Some(domain)
+    }
+
+    fn has_standard_string_constraint(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+    ) -> bool {
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return false;
+            }
+            let result = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+                .is_some_and(|target| self.has_standard_string_constraint(target, visited_refs));
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let details = schema.details();
+        if details.const_value.is_some() || details.enum_values.is_some() {
+            return true;
+        }
+
+        match schema {
+            Schema::AllOf { all_of, .. } => all_of
+                .iter()
+                .any(|member| self.has_standard_string_constraint(member, visited_refs)),
+            Schema::AnyOf { any_of, .. } => any_of
+                .iter()
+                .any(|member| self.has_standard_string_constraint(member, visited_refs)),
+            Schema::OneOf { one_of, .. } => one_of
+                .iter()
+                .any(|member| self.has_standard_string_constraint(member, visited_refs)),
+            _ => false,
+        }
+    }
+
+    fn intersect_optional_domains(
+        left: Option<Vec<String>>,
+        right: Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        match (left, right) {
+            (None, other) | (other, None) => other,
+            (Some(left), Some(right)) => Some(
+                left.into_iter()
+                    .filter(|value| right.contains(value))
+                    .collect(),
+            ),
+        }
+    }
+
+    fn push_unique_string(values: &mut Vec<String>, value: &str) {
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.to_string());
+        }
+    }
+
+    fn discriminator_property_presence(&self, schema: &Schema, field_name: &str) -> (bool, bool) {
+        self.discriminator_property_presence_inner(schema, field_name, &mut HashSet::new(), 0)
+    }
+
+    fn discriminator_property_presence_inner(
+        &self,
+        schema: &Schema,
+        field_name: &str,
+        visited_refs: &mut HashSet<String>,
+        depth: usize,
+    ) -> (bool, bool) {
+        if depth > 64 {
+            return (false, false);
+        }
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return (false, false);
+            }
+            let result = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+                .map(|target| {
+                    self.discriminator_property_presence_inner(
+                        target,
+                        field_name,
+                        visited_refs,
+                        depth + 1,
+                    )
+                })
+                .unwrap_or((false, false));
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let details = schema.details();
+        let mut declared = details
+            .properties
+            .as_ref()
+            .is_some_and(|properties| properties.contains_key(field_name));
+        let mut required = details
+            .required
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|name| name == field_name));
+
+        let members = match schema {
+            Schema::AllOf { all_of, .. } => Some(all_of.as_slice()),
+            Schema::AnyOf { any_of, .. } => Some(any_of.as_slice()),
+            Schema::OneOf { one_of, .. } => Some(one_of.as_slice()),
+            _ => None,
+        };
+        if let Some(members) = members {
+            for member in members {
+                let (member_declared, member_required) = self
+                    .discriminator_property_presence_inner(
+                        member,
+                        field_name,
+                        visited_refs,
+                        depth + 1,
+                    );
+                declared |= member_declared;
+                required |= member_required;
+            }
+        }
+        (declared, required)
+    }
+
     fn extract_discriminator_value_for_field(
         &self,
         schema: &Schema,
         field_name: &str,
     ) -> Option<String> {
-        if let Some(properties) = &schema.details().properties {
-            if let Some(type_field) = properties.get(field_name) {
-                // Check for const value first (highest priority)
-                if let Some(const_value) = &type_field.details().const_value {
-                    if let Some(value) = const_value.as_str() {
-                        return Some(value.to_string());
-                    }
-                }
-                // Check for enum with single value
-                if let Some(enum_values) = &type_field.details().enum_values {
-                    if enum_values.len() == 1 {
-                        return enum_values[0].as_str().map(|s| s.to_string());
-                    }
-                }
-                // Check for const value in extra fields
-                if let Some(const_value) = type_field.details().extra.get("const") {
-                    return const_value.as_str().map(|s| s.to_string());
-                }
-                // Check for x-stainless-const with default value
-                if let Some(stainless_const) = type_field.details().extra.get("x-stainless-const") {
-                    if stainless_const.as_bool() == Some(true) {
-                        if let Some(default_value) = &type_field.details().default {
-                            if let Some(value) = default_value.as_str() {
-                                return Some(value.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
+        self.extract_discriminator_values_for_field(schema, field_name)
+            .into_iter()
+            .next()
     }
 
     fn get_any_reference<'a>(&self, schema: &'a Schema) -> Option<&'a str> {
@@ -2096,15 +2810,24 @@ impl SchemaAnalyzer {
 
         let parts: Vec<&str> = ref_str.split('/').collect();
 
-        // Standard 3.x pattern: #/components/schemas/{SchemaName}[/deeper/path]
-        if parts.len() >= 4 && parts[0] == "#" && parts[2] == "schemas" {
+        // Standard 3.x pattern: #/components/schemas/{SchemaName}. A longer
+        // pointer names a node *inside* the component and must be resolved at
+        // that exact JSON Pointer rather than being truncated to the root.
+        if parts.len() == 4 && parts[0] == "#" && parts[2] == "schemas" {
             return Some(parts[3]);
         }
 
         // Swagger 2.0 carry-over: some 3.x specs (Google) still use
         // `#/definitions/{SchemaName}`. Treat it as an alias.
-        if parts.len() >= 3 && parts[0] == "#" && parts[1] == "definitions" {
+        if parts.len() == 3 && parts[0] == "#" && parts[1] == "definitions" {
             return Some(parts[2]);
+        }
+
+        // Other local fragments are JSON Pointers, not component names. Let
+        // the exact-pointer resolver handle them before applying the legacy
+        // last-segment fallback used by non-pointer reference shapes.
+        if ref_str.starts_with("#/") {
+            return None;
         }
 
         // Last-segment fallback for other ref shapes — but only if the
@@ -2129,14 +2852,34 @@ impl SchemaAnalyzer {
         Some(last)
     }
 
+    /// Return the exact local schema named by a reference, whether the
+    /// reference targets a component root or a node deeper in the document.
+    fn reference_target_schema(&self, reference: &str) -> Option<Schema> {
+        if let Some(name) = self.extract_schema_name(reference) {
+            return self.schemas.get(name).cloned();
+        }
+        let pointer = reference.strip_prefix('#')?;
+        if !pointer.starts_with('/') {
+            return None;
+        }
+        Schema::deserialize(self.openapi_spec.pointer(pointer)?).ok()
+    }
+
     fn analyze_schema(&mut self, schema_name: &str) -> Result<AnalyzedSchema> {
-        // Check cache first
-        if let Some(cached) = self.resolved_cache.get(schema_name) {
+        // Component lookup is provenance-typed: an inline schema can never
+        // satisfy this cache request merely because it preferred the same
+        // emitted name.
+        let emitted_name = self
+            .schema_names
+            .component_name(schema_name)
+            .ok_or_else(|| GeneratorError::UnresolvedReference(schema_name.to_string()))?
+            .to_string();
+        if let Some(cached) = self.resolved_cache.get(&emitted_name) {
             return Ok(cached.clone());
         }
 
         // Set current schema name for context
-        self.current_schema_name = Some(schema_name.to_string());
+        self.current_schema_name = Some(emitted_name.clone());
 
         let schema = self
             .schemas
@@ -2146,9 +2889,9 @@ impl SchemaAnalyzer {
 
         // Prevent infinite recursion with placeholder
         self.resolved_cache.insert(
-            schema_name.to_string(),
+            emitted_name.clone(),
             AnalyzedSchema {
-                name: schema_name.to_string(),
+                name: emitted_name.clone(),
                 original: serde_json::to_value(&schema).unwrap_or(Value::Null),
                 schema_type: SchemaType::Reference {
                     target: "placeholder".to_string(),
@@ -2160,11 +2903,10 @@ impl SchemaAnalyzer {
             },
         );
 
-        let analyzed = self.analyze_schema_value(&schema, schema_name)?;
+        let analyzed = self.analyze_schema_value(&schema, &emitted_name)?;
 
         // Update cache with real result
-        self.resolved_cache
-            .insert(schema_name.to_string(), analyzed.clone());
+        self.resolved_cache.insert(emitted_name, analyzed.clone());
 
         Ok(analyzed)
     }
@@ -2176,11 +2918,23 @@ impl SchemaAnalyzer {
     ) -> Result<AnalyzedSchema> {
         let details = schema.details();
         let description = details.description.clone();
-        // Combine 3.0-style `nullable: true` with 3.1's `type: ["X", "null"]`.
-        let nullable = details.is_nullable() || schema.type_array_contains_null();
+        // Retain every OpenAPI nullability spelling on named schemas. Named
+        // Rust models are the non-null carrier; reference sites consult this
+        // bit to wrap the carrier in Option when the target also admits null.
+        let nullable = schema.is_nullable_any();
         let mut dependencies = HashSet::new();
 
         let schema_type = match schema {
+            // `true` admits every value; `false` admits none. Neither leaves
+            // anything to generate a type from.
+            Schema::Bool(accepts_anything) => self.untyped_value(
+                self.untyped_context(""),
+                if *accepts_anything {
+                    UntypedReason::AnySchema
+                } else {
+                    UntypedReason::NeverMatches
+                },
+            ),
             Schema::Reference { reference, .. } => {
                 // A ref that names no component schema may still address a node
                 // in this document — a parameter's schema, a response body, one
@@ -2246,7 +3000,10 @@ impl SchemaAnalyzer {
                             &mut dependencies,
                         )?);
                     }
-                    SchemaType::Union { variants }
+                    SchemaType::Union {
+                        variants,
+                        exclusive: false,
+                    }
                 } else {
                     self.analyze_single_typed_schema(
                         schema,
@@ -2317,12 +3074,14 @@ impl SchemaAnalyzer {
                         discriminator.as_ref(),
                         schema_name,
                         &mut dependencies,
+                        InlineUnionKind::OneOf,
+                        None,
                     )?
                 }
             }
             Schema::AllOf { all_of, .. } => {
                 // Handle allOf composition (schema inheritance)
-                self.analyze_allof_composition(all_of, &mut dependencies)?
+                self.analyze_allof_composition(schema, all_of, &mut dependencies)?
             }
             Schema::Untyped { .. } => {
                 // Try to infer type from structure
@@ -2393,14 +3152,15 @@ impl SchemaAnalyzer {
                 if let Some(values) = details.string_enum_values() {
                     SchemaType::StringEnum { values }
                 } else {
+                    let mapped = self.type_mapper.string_format(format);
                     SchemaType::Primitive {
-                        rust_type: self.type_mapper.string_format(format).rust_type,
-                        serde_with: None,
+                        rust_type: mapped.rust_type,
+                        serde_with: mapped.serde_with,
                     }
                 }
             }
             OpenApiSchemaType::Integer => SchemaType::Primitive {
-                rust_type: self.type_mapper.integer_format(format).rust_type,
+                rust_type: self.integer_rust_type(details),
                 serde_with: None,
             },
             OpenApiSchemaType::Number => SchemaType::Primitive {
@@ -2461,12 +3221,18 @@ impl SchemaAnalyzer {
                     // `{properties: {...}, anyOf: [{required: [a]}, {required: [b]}]}`.
                     if Self::union_only_constrains_requiredness(any_of) {
                         self.analyze_empty_union(prop_schema, dependencies)?
-                    } else if let Some(with_variants) = self.analyze_object_with_variants(
-                        prop_schema,
-                        any_of,
-                        &format!("{owner_name}{}", self.to_pascal_case(prop_name)),
-                        dependencies,
-                    )? {
+                    } else if let Some(with_variants) = {
+                        let variant_owner =
+                            format!("{owner_name}{}", self.to_pascal_case(prop_name));
+                        self.with_schema_context(&variant_owner, |analyzer| {
+                            analyzer.analyze_object_with_variants(
+                                prop_schema,
+                                any_of,
+                                &variant_owner,
+                                dependencies,
+                            )
+                        })?
+                    } {
                         with_variants
                     } else if self.should_use_dynamic_json(prop_schema) {
                         // This is a dynamic JSON pattern, use serde_json::Value directly
@@ -2499,28 +3265,13 @@ impl SchemaAnalyzer {
 
                         // Generate a name based on both the schema and property name
                         let prop_pascal = self.to_pascal_case(prop_name);
-                        let mut union_type_name = format!("{context_name}{prop_pascal}");
-
-                        // Avoid colliding with an existing component schema or
-                        // an inline name that's already in resolved_cache.
-                        if self.schemas.contains_key(&union_type_name)
-                            || self.resolved_cache.contains_key(&union_type_name)
-                        {
-                            let mut suffix = 2;
-                            loop {
-                                let candidate = format!("{union_type_name}Union{suffix}");
-                                if !self.schemas.contains_key(&candidate)
-                                    && !self.resolved_cache.contains_key(&candidate)
-                                {
-                                    union_type_name = candidate;
-                                    break;
-                                }
-                                suffix += 1;
-                                if suffix > 1000 {
-                                    break;
-                                }
-                            }
-                        }
+                        let preferred_union_name = format!("{context_name}{prop_pascal}");
+                        let union_type_name = self.allocate_inline_schema_name(
+                            &preferred_union_name,
+                            &format!("{preferred_union_name}Union2"),
+                            "property-anyof",
+                            prop_schema,
+                        );
 
                         // Analyze the union
                         let union_schema_type = self.analyze_anyof_union(
@@ -2592,6 +3343,7 @@ impl SchemaAnalyzer {
                                 description: prop_description,
                                 default: prop_default,
                                 serde_attrs: Vec::new(),
+                                synthesized_required: false,
                                 constraints: PropertyConstraints::from_schema_details(prop_details),
                             },
                         );
@@ -2604,26 +3356,13 @@ impl SchemaAnalyzer {
                         .clone()
                         .unwrap_or_else(|| "Unknown".to_string());
                     let prop_pascal = self.to_pascal_case(prop_name);
-                    let mut union_type_name = format!("{context_name}{prop_pascal}");
-                    // Same collision-suffix dance as the anyOf branch above.
-                    if self.schemas.contains_key(&union_type_name)
-                        || self.resolved_cache.contains_key(&union_type_name)
-                    {
-                        let mut suffix = 2;
-                        loop {
-                            let candidate = format!("{union_type_name}Union{suffix}");
-                            if !self.schemas.contains_key(&candidate)
-                                && !self.resolved_cache.contains_key(&candidate)
-                            {
-                                union_type_name = candidate;
-                                break;
-                            }
-                            suffix += 1;
-                            if suffix > 1000 {
-                                break;
-                            }
-                        }
-                    }
+                    let preferred_union_name = format!("{context_name}{prop_pascal}");
+                    let union_type_name = self.allocate_inline_schema_name(
+                        &preferred_union_name,
+                        &format!("{preferred_union_name}Union2"),
+                        "property-oneof",
+                        prop_schema,
+                    );
 
                     // Analyze the discriminated union
                     let union_schema_type = self.analyze_oneof_union(
@@ -2631,6 +3370,8 @@ impl SchemaAnalyzer {
                         discriminator.as_ref(),
                         &union_type_name,
                         dependencies,
+                        InlineUnionKind::OneOf,
+                        None,
                     )?;
 
                     // Store the union as a named schema
@@ -2670,7 +3411,7 @@ impl SchemaAnalyzer {
 
                 let prop_details = prop_schema.details();
                 // Every nullability form, via one helper — see is_nullable_any.
-                let prop_nullable = prop_schema.is_nullable_any();
+                let prop_nullable = self.schema_or_reference_is_nullable(prop_schema);
                 let prop_description = prop_details.description.clone();
                 let prop_default = prop_details.default.clone();
 
@@ -2682,6 +3423,7 @@ impl SchemaAnalyzer {
                         description: prop_description,
                         default: prop_default,
                         serde_attrs: Vec::new(),
+                        synthesized_required: false,
                         constraints: PropertyConstraints::from_schema_details(prop_details),
                     },
                 );
@@ -2703,26 +3445,88 @@ impl SchemaAnalyzer {
             .and_then(|s| s.additional_properties_typed)
             .unwrap_or(true);
 
-        let additional_properties = match &details.additional_properties {
-            Some(crate::openapi::AdditionalProperties::Boolean(true)) => {
-                ObjectAdditionalProperties::Untyped
-            }
-            Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
-                ObjectAdditionalProperties::Forbidden
-            }
-            Some(crate::openapi::AdditionalProperties::Schema(value_schema)) if typed_enabled => {
-                let analyzed =
-                    self.analyze_property_schema_with_context(value_schema, None, dependencies)?;
-                ObjectAdditionalProperties::Typed {
-                    value_type: Box::new(analyzed),
-                }
-            }
-            Some(crate::openapi::AdditionalProperties::Schema(_)) => {
-                // typed_enabled = false: degrade to the pre-Q2.3 behavior.
-                ObjectAdditionalProperties::Untyped
-            }
-            None => ObjectAdditionalProperties::Forbidden,
+        let untyped_required_property = || PropertyInfo {
+            schema_type: SchemaType::Untyped {
+                shape: UntypedShape::Value,
+                reason: UntypedReason::AnySchema,
+            },
+            nullable: false,
+            description: None,
+            default: None,
+            serde_attrs: Vec::new(),
+            synthesized_required: true,
+            constraints: PropertyConstraints::default(),
         };
+        let (mut additional_properties, required_additional_property, explicitly_forbidden) =
+            match &details.additional_properties {
+                Some(crate::openapi::AdditionalProperties::Boolean(true)) => (
+                    ObjectAdditionalProperties::Untyped,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+                Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
+                    (ObjectAdditionalProperties::Forbidden, None, true)
+                }
+                Some(crate::openapi::AdditionalProperties::Schema(value_schema))
+                    if typed_enabled =>
+                {
+                    let analyzed = self.analyze_property_schema_with_context(
+                        value_schema,
+                        Some("AdditionalProperty"),
+                        dependencies,
+                    )?;
+                    let nullable_value =
+                        self.nullable_container_value(value_schema, analyzed.clone());
+                    let value_details = value_schema.details();
+                    let required_property = PropertyInfo {
+                        schema_type: analyzed.clone(),
+                        nullable: self.schema_or_reference_is_nullable(value_schema),
+                        description: value_details.description.clone(),
+                        // A JSON Schema `default` is an annotation, not permission
+                        // to omit a name that `required` says must be present.
+                        default: None,
+                        serde_attrs: Vec::new(),
+                        synthesized_required: true,
+                        constraints: PropertyConstraints::from_schema_details(value_details),
+                    };
+                    (
+                        ObjectAdditionalProperties::Typed {
+                            value_type: Box::new(nullable_value),
+                        },
+                        Some(required_property),
+                        false,
+                    )
+                }
+                Some(crate::openapi::AdditionalProperties::Schema(_)) => (
+                    // typed_enabled = false: degrade both the catch-all map and
+                    // any required unknown member to serde_json::Value.
+                    ObjectAdditionalProperties::Untyped,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+                // JSON Schema and OpenAPI 3.0 define an omitted
+                // additionalProperties keyword as accepting any extra value.
+                // We retain the historical closed-model shape unless an
+                // undeclared required name proves that an open carrier is needed.
+                None if Self::object_shape_needs_additional_property_carrier(details) => (
+                    ObjectAdditionalProperties::Untyped,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+                None => (
+                    ObjectAdditionalProperties::Forbidden,
+                    Some(untyped_required_property()),
+                    false,
+                ),
+            };
+
+        self.finalize_required_object_members(
+            &mut property_info,
+            &required,
+            &mut additional_properties,
+            required_additional_property,
+            explicitly_forbidden,
+        )?;
 
         Ok(SchemaType::Object {
             properties: property_info,
@@ -2730,6 +3534,85 @@ impl SchemaAnalyzer {
             required,
             additional_properties,
         })
+    }
+
+    /// Decide when an omitted `additionalProperties` keyword still needs an
+    /// emitted catch-all map. JSON Schema leaves such objects open, but the
+    /// generator historically projected them as closed structs. Preserve the
+    /// open portion when dropping it can invalidate object-count constraints
+    /// or discard keys that the schema itself demonstrates in examples.
+    fn object_shape_needs_additional_property_carrier(
+        details: &crate::openapi::SchemaDetails,
+    ) -> bool {
+        if details.min_properties.is_some() || details.max_properties.is_some() {
+            return true;
+        }
+
+        let declared = details.properties.as_ref();
+        let has_undeclared_key = |value: &Value| {
+            value.as_object().is_some_and(|object| {
+                object
+                    .keys()
+                    .any(|key| declared.is_none_or(|properties| !properties.contains_key(key)))
+            })
+        };
+        details.example.as_ref().is_some_and(has_undeclared_key)
+            || details
+                .examples
+                .as_ref()
+                .is_some_and(|examples| examples.iter().any(has_undeclared_key))
+    }
+
+    /// Materialize names asserted by `required` but omitted from `properties`.
+    /// A flattened map preserves arbitrary extras, but it cannot express that a
+    /// particular wire key must exist, so each such name also needs a normal
+    /// required field in the generated struct.
+    fn finalize_required_object_members(
+        &self,
+        properties: &mut BTreeMap<String, PropertyInfo>,
+        required: &HashSet<String>,
+        additional_properties: &mut ObjectAdditionalProperties,
+        required_additional_property: Option<PropertyInfo>,
+        explicitly_forbidden: bool,
+    ) -> Result<()> {
+        let mut missing = required
+            .iter()
+            .filter(|name| !properties.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        if explicitly_forbidden {
+            let owner = self
+                .current_schema_name
+                .as_deref()
+                .unwrap_or("<inline object>");
+            return Err(GeneratorError::InvalidSchema(format!(
+                "object schema `{owner}` is unsatisfiable: required member(s) {} are not declared in properties while additionalProperties: false",
+                missing
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+
+        let required_additional_property = required_additional_property.ok_or_else(|| {
+            GeneratorError::InvalidSchema(
+                "undeclared required members have no additional-properties carrier".to_string(),
+            )
+        })?;
+        for name in missing {
+            properties.insert(name, required_additional_property.clone());
+        }
+
+        if matches!(additional_properties, ObjectAdditionalProperties::Forbidden) {
+            *additional_properties = ObjectAdditionalProperties::Untyped;
+        }
+        Ok(())
     }
 
     /// Build one union variant for a genuine `type: [X, Y, ...]` member.
@@ -2750,7 +3633,13 @@ impl SchemaAnalyzer {
     ) -> Result<SchemaRef> {
         match member_type {
             OpenApiSchemaType::Array => {
-                let array_type_name = format!("{union_type_name}Array");
+                let preferred_array_type_name = format!("{union_type_name}Array");
+                let array_type_name = self.allocate_inline_schema_name(
+                    &preferred_array_type_name,
+                    &format!("{preferred_array_type_name}Inline"),
+                    "typed-multi-array",
+                    schema,
+                );
                 let array_type =
                     self.analyze_array_schema(schema, &array_type_name, dependencies)?;
                 self.resolved_cache.insert(
@@ -2772,31 +3661,28 @@ impl SchemaAnalyzer {
                 })
             }
             OpenApiSchemaType::Object => {
-                let object_type_name = format!("{union_type_name}Object");
-                let object_type = self.analyze_object_schema(schema, dependencies)?;
-                self.resolved_cache.insert(
-                    object_type_name.clone(),
-                    AnalyzedSchema {
-                        name: object_type_name.clone(),
-                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                        schema_type: object_type,
-                        dependencies: dependencies.clone(),
-                        nullable: false,
-                        description: schema.details().description.clone(),
-                        default: None,
-                    },
+                let preferred_object_type_name = format!("{union_type_name}Object");
+                let object_type_name = self.allocate_inline_schema_name(
+                    &preferred_object_type_name,
+                    &format!("{preferred_object_type_name}Inline"),
+                    "typed-multi-object",
+                    schema,
                 );
-                dependencies.insert(object_type_name.clone());
+                let object_type = self.add_allocated_object_schema(
+                    object_type_name.clone(),
+                    schema,
+                    dependencies,
+                )?;
+                let SchemaType::Reference { target } = object_type else {
+                    unreachable!("allocated object schemas always return a reference");
+                };
                 Ok(SchemaRef {
-                    target: object_type_name,
+                    target,
                     nullable: false,
                 })
             }
             _ => Ok(SchemaRef {
-                target: self
-                    .type_mapper
-                    .map(member_type, schema.details())
-                    .rust_type,
+                target: self.openapi_type_to_rust_type(member_type, schema.details()),
                 nullable: false,
             }),
         }
@@ -2808,6 +3694,19 @@ impl SchemaAnalyzer {
         property_name: Option<&str>,
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // `true` admits every value; `false` admits none.
+        if let Schema::Bool(accepts_anything) = schema {
+            let reason = if *accepts_anything {
+                UntypedReason::AnySchema
+            } else {
+                UntypedReason::NeverMatches
+            };
+            return Ok(self.untyped_value(
+                self.untyped_context(property_name.unwrap_or_default()),
+                reason,
+            ));
+        }
+
         if let Some(ref_str) = self.get_any_reference(schema) {
             let target_opt = if ref_str == "#" {
                 Some(
@@ -2853,25 +3752,13 @@ impl SchemaAnalyzer {
             let prop_pascal = property_name
                 .map(|name| self.to_pascal_case(name))
                 .unwrap_or_default();
-            let mut union_type_name = format!("{context_name}{prop_pascal}");
-            if self.schemas.contains_key(&union_type_name)
-                || self.resolved_cache.contains_key(&union_type_name)
-            {
-                let mut suffix = 2;
-                loop {
-                    let candidate = format!("{union_type_name}Union{suffix}");
-                    if !self.schemas.contains_key(&candidate)
-                        && !self.resolved_cache.contains_key(&candidate)
-                    {
-                        union_type_name = candidate;
-                        break;
-                    }
-                    suffix += 1;
-                    if suffix > 1000 {
-                        break;
-                    }
-                }
-            }
+            let preferred_union_name = format!("{context_name}{prop_pascal}");
+            let union_type_name = self.allocate_inline_schema_name(
+                &preferred_union_name,
+                &format!("{preferred_union_name}Union2"),
+                "property-typed-multi",
+                schema,
+            );
 
             let details = schema.details();
             let mut variants = Vec::with_capacity(non_null_types.len());
@@ -2889,7 +3776,10 @@ impl SchemaAnalyzer {
                 AnalyzedSchema {
                     name: union_type_name.clone(),
                     original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                    schema_type: SchemaType::Union { variants },
+                    schema_type: SchemaType::Union {
+                        variants,
+                        exclusive: false,
+                    },
                     dependencies: HashSet::new(),
                     nullable: false,
                     description: details.description.clone(),
@@ -2990,7 +3880,7 @@ impl SchemaAnalyzer {
                             .untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
                     }
                     // Inline object in property - create a named schema for it
-                    let object_type_name = if let Some(prop_name) = property_name {
+                    let preferred_object_type_name = if let Some(prop_name) = property_name {
                         // Use property name for context
                         let prop_pascal = self.to_pascal_case(prop_name);
                         format!(
@@ -3005,30 +3895,18 @@ impl SchemaAnalyzer {
                             self.current_schema_name.as_deref().unwrap_or("Unknown")
                         )
                     };
+                    let object_type_name = self.allocate_inline_schema_name(
+                        &preferred_object_type_name,
+                        &format!("{preferred_object_type_name}Inline"),
+                        "property-object",
+                        schema,
+                    );
 
-                    // Analyze the object schema
-                    let object_type = self.analyze_object_schema(schema, dependencies)?;
-
-                    // Create an analyzed schema for the inline object
-                    let inline_schema = AnalyzedSchema {
-                        name: object_type_name.clone(),
-                        original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                        schema_type: object_type,
-                        dependencies: dependencies.clone(),
-                        nullable: false,
-                        description: schema.details().description.clone(),
-                        default: None,
-                    };
-
-                    // Add the inline object as a named schema
-                    self.resolved_cache
-                        .insert(object_type_name.clone(), inline_schema);
-                    dependencies.insert(object_type_name.clone());
-
-                    // Return a reference to the named schema
-                    return Ok(SchemaType::Reference {
-                        target: object_type_name,
-                    });
+                    return self.add_allocated_object_schema(
+                        object_type_name,
+                        schema,
+                        dependencies,
+                    );
                 }
                 // `type: null` admits exactly one value; Rust spells that
                 // `()`, which serde reads from and writes as null.
@@ -3059,7 +3937,17 @@ impl SchemaAnalyzer {
 
         // Handle allOf composition patterns
         if let Schema::AllOf { all_of, .. } = schema {
-            return self.analyze_allof_composition(all_of, dependencies);
+            if let Some(property_name) = property_name {
+                let owner = self
+                    .current_schema_name
+                    .clone()
+                    .unwrap_or_else(|| "Inline".to_string());
+                let composition_name = format!("{owner}{}", self.to_pascal_case(property_name));
+                return self.with_schema_context(&composition_name, |analyzer| {
+                    analyzer.analyze_allof_composition(schema, all_of, dependencies)
+                });
+            }
+            return self.analyze_allof_composition(schema, all_of, dependencies);
         }
 
         // Handle union patterns (anyOf/oneOf) that weren't caught earlier
@@ -3095,19 +3983,24 @@ impl SchemaAnalyzer {
                         ..
                     } = schema
                     {
+                        let union_name = self.allocate_inline_schema_name(
+                            &union_name,
+                            &format!("{union_name}Union2"),
+                            "fallback-property-oneof",
+                            schema,
+                        );
                         // This is a oneOf - analyze it properly with potential discriminator
                         let oneof_result = self.analyze_oneof_union(
                             one_of,
                             discriminator.as_ref(),
                             &union_name,
                             dependencies,
+                            InlineUnionKind::OneOf,
+                            None,
                         )?;
 
                         // If we got a union type (not discriminated), we need to store it as a named type
-                        if let SchemaType::Union {
-                            variants: _union_variants,
-                        } = &oneof_result
-                        {
+                        if let SchemaType::Union { .. } = &oneof_result {
                             // Store the union as a named type in resolved_cache
                             self.resolved_cache.insert(
                                 union_name.clone(),
@@ -3159,6 +4052,7 @@ impl SchemaAnalyzer {
                         }
                         return Ok(SchemaType::Union {
                             variants: union_variants,
+                            exclusive: false,
                         });
                     }
                 }
@@ -3175,7 +4069,25 @@ impl SchemaAnalyzer {
                         return Ok(self
                             .untyped_value(self.untyped_context(""), UntypedReason::OpaqueObject));
                     }
-                    return self.analyze_object_schema(schema, dependencies);
+                    let owner = self
+                        .current_schema_name
+                        .clone()
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let preferred_name = property_name.map_or_else(
+                        || format!("{owner}Object"),
+                        |property_name| format!("{owner}{}", self.to_pascal_case(property_name)),
+                    );
+                    let object_type_name = self.allocate_inline_schema_name(
+                        &preferred_name,
+                        &format!("{preferred_name}Inline"),
+                        "property-object",
+                        schema,
+                    );
+                    return self.add_allocated_object_schema(
+                        object_type_name,
+                        schema,
+                        dependencies,
+                    );
                 }
                 OpenApiSchemaType::Array => {
                     let context_name = if let Some(prop_name) = property_name {
@@ -3220,9 +4132,18 @@ impl SchemaAnalyzer {
 
     fn analyze_allof_composition(
         &mut self,
+        owner_schema: &Schema,
         all_of_schemas: &[Schema],
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        // A scalar/array carrier intersected only with annotation-only
+        // siblings keeps its wire type. This is deliberately narrower than
+        // "pick the first non-object": multiple carriers or assertion-bearing
+        // siblings are true intersections and must not be guessed at.
+        if let Some(carrier) = Self::single_non_object_allof_carrier(all_of_schemas) {
+            return self.analyze_property_schema_with_context(carrier, None, dependencies);
+        }
+
         // A reference plus annotation-only siblings is still a direct type
         // alias. AWS-style specs frequently encode property descriptions as
         // `allOf: [$ref, { description: ... }]`; recursively expanding a
@@ -3232,31 +4153,9 @@ impl SchemaAnalyzer {
             .filter_map(|schema| schema.reference())
             .filter_map(|reference| self.extract_schema_name(reference))
             .collect::<Vec<_>>();
-        let only_reference_and_annotations = all_of_schemas.iter().all(|schema| {
-            if schema.reference().is_some() {
-                return true;
-            }
-            serde_json::to_value(schema)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .is_some_and(|object| {
-                    object.keys().all(|key| {
-                        matches!(
-                            key.as_str(),
-                            "title"
-                                | "description"
-                                | "deprecated"
-                                | "readOnly"
-                                | "writeOnly"
-                                | "examples"
-                                | "example"
-                                | "externalDocs"
-                                | "xml"
-                                | "$comment"
-                        ) || key.starts_with("x-")
-                    })
-                })
-        });
+        let only_reference_and_annotations = all_of_schemas
+            .iter()
+            .all(|schema| schema.reference().is_some() || schema_is_annotation_only(schema));
         if referenced_targets.len() == 1 && only_reference_and_annotations {
             let target = referenced_targets[0];
             dependencies.insert(target.to_string());
@@ -3281,49 +4180,94 @@ impl SchemaAnalyzer {
         // AllOf represents schema composition - merge all schemas into one
         let mut merged_properties = BTreeMap::new();
         let mut merged_required = HashSet::new();
+        let mut merged_variant = None;
         let mut descriptions = Vec::new();
 
         // Save the current schema context to restore it when analyzing properties
         let current_context = self.current_schema_name.clone();
+        let owner_name = current_context.as_deref().unwrap_or("InlineComposition");
 
-        for schema in all_of_schemas {
+        // `properties` and `required` can be siblings of `allOf` on the owner
+        // itself. Seed them before walking members so a real declaration from
+        // either side wins over any synthesized required placeholder.
+        self.merge_schema_into_properties(
+            owner_schema,
+            &mut merged_properties,
+            &mut merged_required,
+            dependencies,
+        )?;
+
+        for (member_index, schema) in all_of_schemas.iter().enumerate() {
             match schema {
                 Schema::Reference { reference, .. } => {
-                    // Add dependency on referenced schema
-                    if let Some(target) = self.extract_schema_name(reference) {
-                        dependencies.insert(target.to_string());
+                    let (analyzed_type, analyzed_name, raw_target) =
+                        if let Some(target) = self.extract_schema_name(reference) {
+                            dependencies.insert(target.to_string());
+                            let analyzed_ref = self.analyze_schema(target)?;
+                            (
+                                Some(analyzed_ref.schema_type),
+                                Some(target.to_string()),
+                                self.schemas.get(target).cloned(),
+                            )
+                        } else {
+                            (
+                                self.resolve_pointer_schema(reference, dependencies)?,
+                                None,
+                                self.reference_target_schema(reference),
+                            )
+                        };
 
-                        // First ensure the referenced schema is analyzed
-                        let analyzed_ref = self.analyze_schema(target)?;
-
-                        // Now merge the analyzed schema's properties
-                        match &analyzed_ref.schema_type {
-                            SchemaType::Object {
-                                properties,
-                                required,
-                                ..
-                            } => {
-                                // Merge properties from the analyzed schema
-                                for (prop_name, prop_info) in properties {
-                                    merged_properties.insert(prop_name.clone(), prop_info.clone());
-                                }
-                                // Merge required fields
-                                for req in required {
-                                    merged_required.insert(req.clone());
-                                }
-                            }
-                            _ => {
-                                // If the referenced schema is not an object, fall back to raw merge
-                                if let Some(ref_schema) = self.schemas.get(target).cloned() {
-                                    self.merge_schema_into_properties(
-                                        &ref_schema,
-                                        &mut merged_properties,
-                                        &mut merged_required,
-                                        dependencies,
-                                    )?;
-                                }
-                            }
-                        }
+                    let merged = if let Some(analyzed_type) = analyzed_type {
+                        self.merge_analyzed_object_properties(
+                            &analyzed_type,
+                            analyzed_name.as_deref(),
+                            &mut merged_properties,
+                            &mut merged_required,
+                            &mut merged_variant,
+                            owner_name,
+                        )?
+                    } else {
+                        false
+                    };
+                    if !merged && let Some(raw_target) = raw_target {
+                        self.merge_schema_into_properties(
+                            &raw_target,
+                            &mut merged_properties,
+                            &mut merged_required,
+                            dependencies,
+                        )?;
+                    }
+                }
+                Schema::AnyOf { any_of, .. }
+                    if Self::union_only_constrains_requiredness(any_of) => {}
+                Schema::OneOf { one_of, .. }
+                    if Self::union_only_constrains_requiredness(one_of) => {}
+                Schema::AnyOf { .. } | Schema::OneOf { .. } => {
+                    let preferred_name = format!("{owner_name}AllOfVariant{}", member_index + 1);
+                    let variant_name =
+                        self.add_inline_schema(&preferred_name, schema, dependencies)?;
+                    dependencies.insert(variant_name.clone());
+                    let analyzed_type = self
+                        .resolved_cache
+                        .get(&variant_name)
+                        .map(|analyzed| analyzed.schema_type.clone())
+                        .ok_or_else(|| {
+                            GeneratorError::InvalidSchema(format!(
+                                "allOf union member `{variant_name}` was not analyzed"
+                            ))
+                        })?;
+                    if !self.merge_analyzed_object_properties(
+                        &analyzed_type,
+                        Some(&variant_name),
+                        &mut merged_properties,
+                        &mut merged_required,
+                        &mut merged_variant,
+                        owner_name,
+                    )? {
+                        return Ok(self.untyped_value(
+                            self.untyped_context(""),
+                            UntypedReason::UnrepresentableComposition,
+                        ));
                     }
                 }
                 Schema::Typed {
@@ -3364,36 +4308,208 @@ impl SchemaAnalyzer {
             }
         }
 
-        // If we successfully merged properties, return an object
-        if !merged_properties.is_empty() {
+        // If we successfully merged properties, reconcile required names only
+        // after every allOf sibling has contributed its declarations. Doing it
+        // per branch would turn a sibling-declared typed field into an opaque
+        // placeholder depending on branch order.
+        if !merged_properties.is_empty() || !merged_required.is_empty() || merged_variant.is_some()
+        {
+            let mut additional_properties = if merged_properties
+                .values()
+                .any(|property| property.synthesized_required)
+            {
+                ObjectAdditionalProperties::Untyped
+            } else {
+                ObjectAdditionalProperties::Forbidden
+            };
+            self.finalize_required_object_members(
+                &mut merged_properties,
+                &merged_required,
+                &mut additional_properties,
+                Some(PropertyInfo {
+                    schema_type: SchemaType::Untyped {
+                        shape: UntypedShape::Value,
+                        reason: UntypedReason::AnySchema,
+                    },
+                    nullable: false,
+                    description: None,
+                    default: None,
+                    serde_attrs: Vec::new(),
+                    synthesized_required: true,
+                    constraints: PropertyConstraints::default(),
+                }),
+                false,
+            )?;
             Ok(SchemaType::Object {
                 properties: merged_properties,
                 required: merged_required,
-                additional_properties: ObjectAdditionalProperties::Forbidden,
-                variant: None,
+                additional_properties,
+                variant: merged_variant,
             })
         } else {
-            // Fall back to composition if we couldn't merge
-            Ok(SchemaType::Composition {
-                schemas: all_of_schemas
-                    .iter()
-                    .filter_map(|s| {
-                        if let Some(ref_str) = s.reference() {
-                            if let Some(target) = self.extract_schema_name(ref_str) {
-                                dependencies.insert(target.to_string());
-                                Some(SchemaRef {
-                                    target: target.to_string(),
-                                    nullable: false,
-                                })
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
+            let schemas = all_of_schemas
+                .iter()
+                .filter_map(|schema| {
+                    let reference = schema.reference()?;
+                    let target = self.extract_schema_name(reference)?;
+                    dependencies.insert(target.to_string());
+                    Some(SchemaRef {
+                        target: target.to_string(),
+                        nullable: false,
                     })
-                    .collect(),
-            })
+                })
+                .collect::<Vec<_>>();
+            // An empty composition generated an empty struct, silently
+            // narrowing scalar/array intersections to `{}`. References to
+            // non-object carriers have the same problem. Keep representable
+            // object inheritance as Composition; otherwise retain the wire
+            // value opaquely instead of inventing an object shape.
+            let references_are_objects = all_of_schemas
+                .iter()
+                .filter(|schema| schema.reference().is_some())
+                .all(|schema| self.branch_resolves_to_object(schema));
+            if schemas.is_empty() || !references_are_objects {
+                Ok(self.untyped_value(
+                    self.untyped_context(""),
+                    UntypedReason::UnrepresentableComposition,
+                ))
+            } else {
+                Ok(SchemaType::Composition { schemas })
+            }
+        }
+    }
+
+    /// Return the one direct scalar/array carrier in an allOf whose remaining
+    /// members are annotation-only. References, objects, unions, boolean
+    /// schemas, and multiple assertion-bearing members are intentionally not
+    /// collapsed by this narrow recovery path.
+    fn single_non_object_allof_carrier(all_of_schemas: &[Schema]) -> Option<&Schema> {
+        let mut meaningful = all_of_schemas
+            .iter()
+            .filter(|schema| !schema_is_annotation_only(schema));
+        let carrier = meaningful.next()?;
+        if meaningful.next().is_some() {
+            return None;
+        }
+
+        match carrier {
+            Schema::Typed {
+                schema_type:
+                    OpenApiSchemaType::String
+                    | OpenApiSchemaType::Integer
+                    | OpenApiSchemaType::Number
+                    | OpenApiSchemaType::Boolean
+                    | OpenApiSchemaType::Array,
+                ..
+            } => Some(carrier),
+            Schema::TypedMulti { schema_types, .. } => {
+                let mut non_null = schema_types
+                    .iter()
+                    .filter(|schema_type| **schema_type != OpenApiSchemaType::Null);
+                let only = non_null.next()?;
+                (non_null.next().is_none()
+                    && matches!(
+                        only,
+                        OpenApiSchemaType::String
+                            | OpenApiSchemaType::Integer
+                            | OpenApiSchemaType::Number
+                            | OpenApiSchemaType::Boolean
+                            | OpenApiSchemaType::Array
+                    ))
+                .then_some(carrier)
+            }
+            _ => None,
+        }
+    }
+
+    /// Merge the object reached by an analyzed type, following aliases through
+    /// the analysis cache. Deep-pointer resolution hoists inline objects and
+    /// returns a reference to that cache entry, so allOf composition needs the
+    /// same alias-following behavior as a direct component reference.
+    fn merge_analyzed_object_properties(
+        &mut self,
+        schema_type: &SchemaType,
+        named_target: Option<&str>,
+        merged_properties: &mut BTreeMap<String, PropertyInfo>,
+        merged_required: &mut HashSet<String>,
+        merged_variant: &mut Option<SchemaRef>,
+        owner_name: &str,
+    ) -> Result<bool> {
+        let mut current = schema_type.clone();
+        let mut visited = HashSet::new();
+        let mut variant_target = named_target.map(str::to_string);
+        loop {
+            match current {
+                SchemaType::Object {
+                    properties,
+                    required,
+                    variant,
+                    ..
+                } => {
+                    for (name, property) in properties {
+                        let keep_declared_sibling =
+                            merged_properties.get(&name).is_some_and(|existing| {
+                                !existing.synthesized_required && property.synthesized_required
+                            });
+                        if !keep_declared_sibling {
+                            merged_properties.insert(name, property);
+                        }
+                    }
+                    merged_required.extend(required);
+                    if let Some(variant) = variant {
+                        Self::merge_allof_variant(merged_variant, variant, owner_name)?;
+                    }
+                    return Ok(true);
+                }
+                SchemaType::Reference { target } => {
+                    if !visited.insert(target.clone()) {
+                        return Ok(false);
+                    }
+                    if variant_target.is_none() {
+                        variant_target = Some(target.clone());
+                    }
+                    current = if let Some(analyzed) = self.resolved_cache.get(&target) {
+                        analyzed.schema_type.clone()
+                    } else if self.schemas.contains_key(&target) {
+                        self.analyze_schema(&target)?.schema_type
+                    } else {
+                        return Ok(false);
+                    };
+                }
+                SchemaType::Union { .. } | SchemaType::DiscriminatedUnion { .. } => {
+                    let Some(target) = variant_target else {
+                        return Ok(false);
+                    };
+                    Self::merge_allof_variant(
+                        merged_variant,
+                        SchemaRef {
+                            target,
+                            nullable: false,
+                        },
+                        owner_name,
+                    )?;
+                    return Ok(true);
+                }
+                _ => return Ok(false),
+            }
+        }
+    }
+
+    fn merge_allof_variant(
+        merged_variant: &mut Option<SchemaRef>,
+        candidate: SchemaRef,
+        owner_name: &str,
+    ) -> Result<()> {
+        match merged_variant {
+            Some(existing) if existing.target == candidate.target => Ok(()),
+            Some(existing) => Err(GeneratorError::InvalidSchema(format!(
+                "allOf object `{owner_name}` intersects multiple union members (`{}` and `{}`), which cannot be represented by one flattened variant",
+                existing.target, candidate.target
+            ))),
+            None => {
+                *merged_variant = Some(candidate);
+                Ok(())
+            }
         }
     }
 
@@ -3432,7 +4548,7 @@ impl SchemaAnalyzer {
                 // openapi-generator-bgo) and RunPod Pod.startedAt / Pod.template
                 // (3.1 type-array, openapi-generator-dsu) — the latter arrive
                 // as `null` from the live API for any pod that hasn't started.
-                let nullable = prop_schema.is_nullable_any();
+                let nullable = self.schema_or_reference_is_nullable(prop_schema);
                 merged_properties.insert(
                     prop_name.clone(),
                     PropertyInfo {
@@ -3441,6 +4557,7 @@ impl SchemaAnalyzer {
                         description: prop_details.description.clone(),
                         default: prop_details.default.clone(),
                         serde_attrs: Vec::new(),
+                        synthesized_required: false,
                         constraints: PropertyConstraints::from_schema_details(prop_details),
                     },
                 );
@@ -3463,7 +4580,14 @@ impl SchemaAnalyzer {
         discriminator: Option<&crate::openapi::Discriminator>,
         parent_name: &str,
         dependencies: &mut HashSet<String>,
+        union_kind: InlineUnionKind,
+        source_indices: Option<&[usize]>,
     ) -> Result<SchemaType> {
+        let default_indices = (0..one_of_schemas.len()).collect::<Vec<_>>();
+        let source_indices = source_indices
+            .filter(|indices| indices.len() == one_of_schemas.len())
+            .unwrap_or(&default_indices);
+
         // Branches may be pointers into other parts of the document.
         let expanded_branches;
         let one_of_schemas = match self.expand_pointer_branches(one_of_schemas) {
@@ -3473,6 +4597,30 @@ impl SchemaAnalyzer {
             }
             None => one_of_schemas,
         };
+
+        // A boolean branch either opens the union up or can never be taken.
+        let boolean_resolved;
+        let boolean_resolved_indices;
+        let one_of_schemas = match Self::resolve_boolean_branches(one_of_schemas) {
+            Ok(resolved) => {
+                boolean_resolved_indices = one_of_schemas
+                    .iter()
+                    .zip(source_indices.iter().copied())
+                    .filter_map(|(branch, index)| {
+                        (!matches!(branch, Schema::Bool(false))).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                boolean_resolved = resolved;
+                boolean_resolved.as_slice()
+            }
+            Err(()) => {
+                return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
+            }
+        };
+        let source_indices = boolean_resolved_indices.as_slice();
+        if one_of_schemas.is_empty() {
+            return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
+        }
 
         // A union of one is that one, and branches that differ only in
         // constraints share one Rust type. Both are checked before the shape
@@ -3506,10 +4654,23 @@ impl SchemaAnalyzer {
             }
         }
 
-        // If there's no discriminator, we should create an untagged union
-        if discriminator.is_none() {
+        // If there's no discriminator, create an untagged union. A nullable
+        // referenced branch must also be structural: JSON null has no object
+        // discriminator field for an internally tagged enum to inspect.
+        if discriminator.is_none()
+            || one_of_schemas
+                .iter()
+                .any(|schema| self.schema_or_reference_is_nullable(schema))
+        {
             // Handle untagged unions (oneOf without discriminator)
-            return self.analyze_untagged_oneof_union(one_of_schemas, parent_name, dependencies);
+            return self.analyze_untagged_oneof_union(
+                one_of_schemas,
+                parent_name,
+                dependencies,
+                union_kind,
+                source_indices,
+                None,
+            );
         }
 
         // Bug openapi-generator-dpd: if any branch resolves to a non-object
@@ -3521,7 +4682,14 @@ impl SchemaAnalyzer {
             .iter()
             .any(|s| !self.branch_resolves_to_object(s))
         {
-            return self.analyze_untagged_oneof_union(one_of_schemas, parent_name, dependencies);
+            return self.analyze_untagged_oneof_union(
+                one_of_schemas,
+                parent_name,
+                dependencies,
+                union_kind,
+                source_indices,
+                discriminator,
+            );
         }
 
         // This is a discriminated union
@@ -3534,10 +4702,32 @@ impl SchemaAnalyzer {
             .property_name
             .clone();
 
+        // A contradictory tag domain has no schema-valid discriminator value.
+        // Keep the payload structural instead of inventing and serializing a
+        // tag that the branch's own JSON Schema rejects.
+        if one_of_schemas.iter().any(|branch| {
+            self.extract_discriminator_value_domain_for_field(branch, &discriminator_field)
+                .is_some_and(|values| values.is_empty())
+        }) {
+            eprintln!(
+                "⚠️  discriminated union `{parent_name}` has a branch with contradictory `{discriminator_field}` constraints; using structural union fallback"
+            );
+            return self.analyze_untagged_oneof_union(
+                one_of_schemas,
+                parent_name,
+                dependencies,
+                union_kind,
+                source_indices,
+                discriminator,
+            );
+        }
+
         let mut variants = Vec::new();
         let mut used_variant_names = std::collections::HashSet::new();
 
-        for variant_schema in one_of_schemas {
+        for (variant_schema, original_index) in
+            one_of_schemas.iter().zip(source_indices.iter().copied())
+        {
             // Check if this is a direct reference, recursive reference, or an allOf wrapper with a reference
             let ref_info = if let Some(ref_str) = variant_schema.reference() {
                 Some((ref_str, false))
@@ -3575,43 +4765,56 @@ impl SchemaAnalyzer {
                 if !schema_name.is_empty() {
                     dependencies.insert(schema_name.clone());
 
-                    // Determine discriminator value with priority order:
-                    // 1. Explicit mapping in discriminator
-                    // 2. Extract from referenced schema
-                    // 3. Generate from schema name
-                    let discriminator_value = if let Some(disc) = discriminator {
-                        if let Some(mappings) = &disc.mapping {
-                            // Find the mapping key that points to this schema reference
-                            // Mapping format is: "discriminator_value" -> "#/components/schemas/SchemaName"
-                            mappings
-                                .iter()
-                                .find(|(_, target_ref)| {
-                                    // Check if this mapping target matches our reference
-                                    target_ref.as_str() == ref_str
-                                        || self
-                                            .extract_schema_name(target_ref)
-                                            .map(|s| s.to_string())
-                                            == Some(schema_name.clone())
-                                })
-                                .map(|(key, _)| key.clone())
-                                .unwrap_or_else(|| {
-                                    self.fallback_discriminator_value_for_field(
-                                        &schema_name,
-                                        &discriminator_field,
-                                    )
-                                })
-                        } else {
-                            self.fallback_discriminator_value_for_field(
-                                &schema_name,
-                                &discriminator_field,
-                            )
-                        }
-                    } else {
-                        self.fallback_discriminator_value_for_field(
-                            &schema_name,
+                    // Mapping keys are dispatch hints, not schema constraints.
+                    // When the target branch constrains the discriminator,
+                    // retain only mapping keys admitted by that target.
+                    let mut discriminator_values = Vec::new();
+                    let allowed_domain = self.schemas.get(&schema_name).and_then(|ref_schema| {
+                        self.extract_discriminator_value_domain_for_field(
+                            ref_schema,
                             &discriminator_field,
                         )
-                    };
+                    });
+                    if let Some(mappings) = discriminator.and_then(|disc| disc.mapping.as_ref()) {
+                        for (key, target_ref) in mappings {
+                            if target_ref == ref_str
+                                || self.extract_schema_name(target_ref)
+                                    == Some(schema_name.as_str())
+                            {
+                                if allowed_domain
+                                    .as_ref()
+                                    .is_some_and(|allowed| !allowed.contains(key))
+                                {
+                                    let allowed = allowed_domain
+                                        .as_ref()
+                                        .map(|values| values.join("`, `"))
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "⚠️  discriminator mapping conflict in union `{parent_name}`: key `{key}` targets `{schema_name}` but branch allows `{allowed}`; ignoring mapping key"
+                                    );
+                                } else {
+                                    Self::push_unique_string(&mut discriminator_values, key);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(allowed_domain) = allowed_domain {
+                        for value in allowed_domain {
+                            Self::push_unique_string(&mut discriminator_values, &value);
+                        }
+                    }
+                    if discriminator_values.is_empty() {
+                        discriminator_values
+                            .push(self.generate_discriminator_value_from_name(&schema_name));
+                    }
+                    let discriminator_value = discriminator_values[0].clone();
+                    let (discriminator_field_declared, discriminator_field_required) = self
+                        .schemas
+                        .get(&schema_name)
+                        .map(|schema| {
+                            self.discriminator_property_presence(schema, &discriminator_field)
+                        })
+                        .unwrap_or((false, false));
 
                     // Generate Rust-friendly variant name and ensure uniqueness
                     let base_name = self.to_rust_variant_name(&schema_name);
@@ -3625,46 +4828,57 @@ impl SchemaAnalyzer {
                         rust_name,
                         type_name: schema_name,
                         discriminator_value: final_discriminator_value,
+                        preferred_discriminator_values: discriminator_values.clone(),
+                        discriminator_values,
+                        discriminator_field_declared,
+                        discriminator_field_required,
                         schema_ref: ref_str.to_string(),
                     });
                 }
             } else {
                 // Handle inline schemas in oneOf
-                let variant_index = variants.len();
+                let variant_index = original_index;
                 let inline_type_name =
                     self.generate_inline_type_name(variant_schema, variant_index);
 
-                // Try to extract discriminator value from inline schema
-                let discriminator_value = if let Some(disc) = discriminator {
-                    if let Some(mappings) = &disc.mapping {
-                        // Look for mapping that points to this inline variant by index
-                        mappings
-                            .iter()
-                            .find(|(_, target_ref)| {
-                                target_ref.contains(&format!("variant_{variant_index}"))
-                            })
-                            .map(|(key, _)| key.clone())
-                            .unwrap_or_else(|| {
-                                self.extract_inline_discriminator_value(
-                                    variant_schema,
-                                    &discriminator_field,
-                                    variant_index,
-                                )
-                            })
-                    } else {
-                        self.extract_inline_discriminator_value(
-                            variant_schema,
-                            &discriminator_field,
-                            variant_index,
-                        )
+                // Inline branches follow the same multi-value rules as
+                // referenced branches.
+                let mut discriminator_values = Vec::new();
+                let allowed_domain = self.extract_discriminator_value_domain_for_field(
+                    variant_schema,
+                    &discriminator_field,
+                );
+                if let Some(mappings) = discriminator.and_then(|disc| disc.mapping.as_ref()) {
+                    for (key, target_ref) in mappings {
+                        if target_ref.contains(&format!("variant_{variant_index}")) {
+                            if allowed_domain
+                                .as_ref()
+                                .is_some_and(|allowed| !allowed.contains(key))
+                            {
+                                let allowed = allowed_domain
+                                    .as_ref()
+                                    .map(|values| values.join("`, `"))
+                                    .unwrap_or_default();
+                                eprintln!(
+                                    "⚠️  discriminator mapping conflict in union `{parent_name}`: key `{key}` targets `{inline_type_name}` but branch allows `{allowed}`; ignoring mapping key"
+                                );
+                            } else {
+                                Self::push_unique_string(&mut discriminator_values, key);
+                            }
+                        }
                     }
-                } else {
-                    self.extract_inline_discriminator_value(
-                        variant_schema,
-                        &discriminator_field,
-                        variant_index,
-                    )
-                };
+                }
+                if let Some(allowed_domain) = allowed_domain {
+                    for value in allowed_domain {
+                        Self::push_unique_string(&mut discriminator_values, &value);
+                    }
+                }
+                if discriminator_values.is_empty() {
+                    discriminator_values.push(format!("variant_{variant_index}"));
+                }
+                let discriminator_value = discriminator_values[0].clone();
+                let (discriminator_field_declared, discriminator_field_required) =
+                    self.discriminator_property_presence(variant_schema, &discriminator_field);
 
                 // Generate Rust-friendly variant name based on discriminator or fallback to generic
                 let base_name = if discriminator_value.starts_with("variant_") {
@@ -3679,24 +4893,41 @@ impl SchemaAnalyzer {
                 // Use the discriminator value as-is from the schema
                 let final_discriminator_value = discriminator_value;
 
+                // Store inline schema before recording the variant so a
+                // reserved component collision can return the actual name.
+                let inline_type_name = self.add_inline_union_branch_schema(
+                    &inline_type_name,
+                    variant_schema,
+                    dependencies,
+                    parent_name,
+                    union_kind,
+                    original_index,
+                    Some(&final_discriminator_value),
+                )?;
+
                 variants.push(UnionVariant {
                     rust_name,
                     type_name: inline_type_name.clone(),
                     discriminator_value: final_discriminator_value,
+                    preferred_discriminator_values: discriminator_values.clone(),
+                    discriminator_values,
+                    discriminator_field_declared,
+                    discriminator_field_required,
                     schema_ref: format!("inline_{variant_index}"),
                 });
-
-                // Store inline schema for later analysis and generation
-                self.add_inline_schema(&inline_type_name, variant_schema, dependencies)?;
             }
         }
+
+        self.disambiguate_shared_discriminator_values(&mut variants, discriminator);
 
         if variants.is_empty() {
             // If we couldn't create a discriminated union, fall back to an untagged union
             // This handles cases where oneOf contains references or inline schemas without proper discriminators
             let mut union_variants = Vec::new();
 
-            for (variant_index, variant_schema) in one_of_schemas.iter().enumerate() {
+            for (variant_schema, original_index) in
+                one_of_schemas.iter().zip(source_indices.iter().copied())
+            {
                 // First check if it's a reference or recursive reference
                 if let Some(ref_str) = variant_schema.reference() {
                     if let Some(schema_name) = self.extract_schema_name(ref_str) {
@@ -3723,11 +4954,16 @@ impl SchemaAnalyzer {
                         nullable: false,
                     });
                 } else {
+                    let branch_discriminator = self.inline_union_branch_discriminator_value(
+                        variant_schema,
+                        discriminator,
+                        original_index,
+                    );
                     // Handle inline schemas by creating type aliases or using primitive types directly
                     let inline_name = self.generate_context_aware_name(
                         parent_name,
                         "InlineVariant",
-                        variant_index,
+                        original_index,
                         Some(variant_schema),
                     );
                     let analyzed = self.analyze_schema_value(variant_schema, &inline_name)?;
@@ -3768,13 +5004,17 @@ impl SchemaAnalyzer {
                                     let inline_type_name = self.generate_context_aware_name(
                                         parent_name,
                                         "Variant",
-                                        variant_index,
+                                        original_index,
                                         None,
                                     );
-                                    self.add_inline_schema(
+                                    let inline_type_name = self.add_inline_union_branch_schema(
                                         &inline_type_name,
                                         variant_schema,
                                         dependencies,
+                                        parent_name,
+                                        union_kind,
+                                        original_index,
+                                        branch_discriminator.as_deref(),
                                     )?;
                                     union_variants.push(SchemaRef {
                                         target: inline_type_name,
@@ -3793,11 +5033,15 @@ impl SchemaAnalyzer {
                         // For other complex types, create an inline type
                         _ => {
                             let inline_type_name =
-                                format!("{}Variant{}", parent_name, variant_index + 1);
-                            self.add_inline_schema(
+                                format!("{}Variant{}", parent_name, original_index + 1);
+                            let inline_type_name = self.add_inline_union_branch_schema(
                                 &inline_type_name,
                                 variant_schema,
                                 dependencies,
+                                parent_name,
+                                union_kind,
+                                original_index,
+                                branch_discriminator.as_deref(),
                             )?;
                             union_variants.push(SchemaRef {
                                 target: inline_type_name,
@@ -3811,6 +5055,7 @@ impl SchemaAnalyzer {
             if !union_variants.is_empty() {
                 return Ok(SchemaType::Union {
                     variants: union_variants,
+                    exclusive: matches!(union_kind, InlineUnionKind::OneOf),
                 });
             }
 
@@ -3824,6 +5069,7 @@ impl SchemaAnalyzer {
         Ok(SchemaType::DiscriminatedUnion {
             discriminator_field,
             variants,
+            exclusive: matches!(union_kind, InlineUnionKind::OneOf),
         })
     }
 
@@ -3832,32 +5078,49 @@ impl SchemaAnalyzer {
         one_of_schemas: &[Schema],
         parent_name: &str,
         dependencies: &mut HashSet<String>,
+        union_kind: InlineUnionKind,
+        source_indices: &[usize],
+        discriminator: Option<&Discriminator>,
     ) -> Result<SchemaType> {
-        // Drop {"type": "null"} variants. They mean "may be null" and are surfaced
-        // as Option<T> at the property level — including them here produces a junk
-        // `SerdeJsonValue(serde_json::Value)` variant.
-        let filtered: Vec<&Schema> = one_of_schemas
+        // Drop null-only variants. They mean "may be null" and are surfaced as
+        // Option<T> at the property level — including them here produces a junk
+        // `SerdeJsonValue(serde_json::Value)` variant. Recognize the equivalent
+        // `type`, `const`, and `enum` spellings.
+        let filtered: Vec<(usize, &Schema)> = one_of_schemas
             .iter()
-            .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+            .zip(source_indices.iter().copied())
+            .filter_map(|(schema, original_index)| {
+                (!schema.is_explicit_null_only()).then_some((original_index, schema))
+            })
             .collect();
 
         // If filtering leaves a single variant, return its analyzed type directly.
         if filtered.len() == 1 {
             return self
-                .analyze_schema_value(filtered[0], parent_name)
+                .analyze_schema_value(filtered[0].1, parent_name)
                 .map(|a| a.schema_type);
         }
 
+        // Exact, unique branch selection is appropriate for object-only
+        // oneOf unions. Mixed scalar/object and unconstrained branches need
+        // normal untagged Serde semantics: a `serde_json::Value` alternative,
+        // for example, intentionally accepts shapes that a narrower branch
+        // can also hydrate.
+        let exclusive_object_union = matches!(union_kind, InlineUnionKind::OneOf)
+            && filtered
+                .iter()
+                .all(|(_, schema)| self.branch_resolves_to_object(schema));
+
         let mut union_variants = Vec::new();
 
-        for (variant_index, variant_schema) in filtered.iter().copied().enumerate() {
+        for (original_index, variant_schema) in filtered {
             // First check if it's a reference or recursive reference
             if let Some(ref_str) = variant_schema.reference() {
                 if let Some(schema_name) = self.extract_schema_name(ref_str) {
                     dependencies.insert(schema_name.to_string());
                     union_variants.push(SchemaRef {
                         target: schema_name.to_string(),
-                        nullable: false,
+                        nullable: self.schema_or_reference_is_nullable(variant_schema),
                     });
                 }
             } else if let Some(recursive_ref) = variant_schema.recursive_reference() {
@@ -3877,11 +5140,16 @@ impl SchemaAnalyzer {
                     nullable: false,
                 });
             } else {
+                let branch_discriminator = self.inline_union_branch_discriminator_value(
+                    variant_schema,
+                    discriminator,
+                    original_index,
+                );
                 // Handle inline schemas by creating type aliases or using primitive types directly
                 let inline_name = self.generate_context_aware_name(
                     parent_name,
                     "InlineVariant",
-                    variant_index,
+                    original_index,
                     Some(variant_schema),
                 );
                 let analyzed = self.analyze_schema_value(variant_schema, &inline_name)?;
@@ -3941,14 +5209,19 @@ impl SchemaAnalyzer {
                                         let inline_type_name = self.generate_context_aware_name(
                                             parent_name,
                                             "Variant",
-                                            variant_index,
+                                            original_index,
                                             None,
                                         );
-                                        self.add_inline_schema(
-                                            &inline_type_name,
-                                            variant_schema,
-                                            dependencies,
-                                        )?;
+                                        let inline_type_name = self
+                                            .add_inline_union_branch_schema(
+                                                &inline_type_name,
+                                                variant_schema,
+                                                dependencies,
+                                                parent_name,
+                                                union_kind,
+                                                original_index,
+                                                branch_discriminator.as_deref(),
+                                            )?;
                                         union_variants.push(SchemaRef {
                                             target: inline_type_name,
                                             nullable: false,
@@ -3961,13 +5234,17 @@ impl SchemaAnalyzer {
                                 let inline_type_name = self.generate_context_aware_name(
                                     parent_name,
                                     "Variant",
-                                    variant_index,
+                                    original_index,
                                     None,
                                 );
-                                self.add_inline_schema(
+                                let inline_type_name = self.add_inline_union_branch_schema(
                                     &inline_type_name,
                                     variant_schema,
                                     dependencies,
+                                    parent_name,
+                                    union_kind,
+                                    original_index,
+                                    branch_discriminator.as_deref(),
                                 )?;
                                 union_variants.push(SchemaRef {
                                     target: inline_type_name,
@@ -3988,10 +5265,18 @@ impl SchemaAnalyzer {
                         let inline_type_name = self.generate_context_aware_name(
                             parent_name,
                             "Variant",
-                            variant_index,
+                            original_index,
                             None,
                         );
-                        self.add_inline_schema(&inline_type_name, variant_schema, dependencies)?;
+                        let inline_type_name = self.add_inline_union_branch_schema(
+                            &inline_type_name,
+                            variant_schema,
+                            dependencies,
+                            parent_name,
+                            union_kind,
+                            original_index,
+                            branch_discriminator.as_deref(),
+                        )?;
                         union_variants.push(SchemaRef {
                             target: inline_type_name,
                             nullable: false,
@@ -4004,6 +5289,7 @@ impl SchemaAnalyzer {
         if !union_variants.is_empty() {
             return Ok(SchemaType::Union {
                 variants: union_variants,
+                exclusive: exclusive_object_union,
             });
         }
 
@@ -4019,7 +5305,44 @@ impl SchemaAnalyzer {
         type_name: &str,
         schema: &Schema,
         dependencies: &mut HashSet<String>,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        let allocated_name = self.allocate_inline_schema_name(
+            type_name,
+            &format!("{type_name}Inline"),
+            "inline-schema",
+            schema,
+        );
+        self.add_allocated_inline_schema(allocated_name, schema, dependencies)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_inline_union_branch_schema(
+        &mut self,
+        type_name: &str,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+        owner_context: &str,
+        union_kind: InlineUnionKind,
+        original_index: usize,
+        discriminator: Option<&str>,
+    ) -> Result<String> {
+        let allocated_name = self.allocate_inline_union_branch_name(
+            type_name,
+            owner_context,
+            union_kind,
+            original_index,
+            discriminator,
+            schema,
+        );
+        self.add_allocated_inline_schema(allocated_name, schema, dependencies)
+    }
+
+    fn add_allocated_inline_schema(
+        &mut self,
+        allocated_name: String,
+        schema: &Schema,
+        dependencies: &mut HashSet<String>,
+    ) -> Result<String> {
         // For primitive types, we need to ensure they are stored as type aliases
         if let Some(schema_type) = schema.schema_type() {
             match schema_type {
@@ -4032,9 +5355,9 @@ impl SchemaAnalyzer {
 
                     // Store as a type alias
                     self.resolved_cache.insert(
-                        type_name.to_string(),
+                        allocated_name.clone(),
                         AnalyzedSchema {
-                            name: type_name.to_string(),
+                            name: allocated_name.clone(),
                             original: serde_json::to_value(schema).unwrap_or(Value::Null),
                             schema_type: SchemaType::Primitive {
                                 rust_type,
@@ -4046,7 +5369,7 @@ impl SchemaAnalyzer {
                             default: None,
                         },
                     );
-                    return Ok(());
+                    return Ok(allocated_name);
                 }
                 _ => {}
             }
@@ -4055,22 +5378,48 @@ impl SchemaAnalyzer {
         // For non-primitive types, analyze the inline schema and add it to our collection
         // Set current_schema_name so nested inline properties (enums, unions, objects)
         // get named with the correct parent context instead of inheriting a stale name
-        let previous_schema_name = self.current_schema_name.take();
-        self.current_schema_name = Some(type_name.to_string());
-        let analyzed = self.analyze_schema_value(schema, type_name)?;
-        self.current_schema_name = previous_schema_name;
+        let analyzed = self.with_schema_context(&allocated_name, |analyzer| {
+            analyzer.analyze_schema_value(schema, &allocated_name)
+        })?;
 
         // Add to resolved cache so it can be generated
-        self.resolved_cache.insert(type_name.to_string(), analyzed);
+        self.resolved_cache.insert(allocated_name.clone(), analyzed);
 
         // Add dependencies
-        if let Some(cached) = self.resolved_cache.get(type_name) {
+        if let Some(cached) = self.resolved_cache.get(&allocated_name) {
             for dep in &cached.dependencies {
                 dependencies.insert(dep.clone());
             }
         }
 
-        Ok(())
+        Ok(allocated_name)
+    }
+
+    fn inline_union_branch_discriminator_value(
+        &self,
+        schema: &Schema,
+        discriminator: Option<&Discriminator>,
+        original_index: usize,
+    ) -> Option<String> {
+        let discriminator = discriminator?;
+        discriminator
+            .mapping
+            .as_ref()
+            .and_then(|mappings| {
+                mappings
+                    .iter()
+                    .find(|(_, target_ref)| {
+                        target_ref.contains(&format!("variant_{original_index}"))
+                    })
+                    .map(|(key, _)| key.clone())
+            })
+            .or_else(|| {
+                Some(self.extract_inline_discriminator_value(
+                    schema,
+                    &discriminator.property_name,
+                    original_index,
+                ))
+            })
     }
 
     fn extract_inline_discriminator_value(
@@ -4363,7 +5712,11 @@ impl SchemaAnalyzer {
         // config this produces bit-identical output to the pre-refactor
         // match; later Q2.* issues add format-aware branches inside
         // TypeMapper without touching this function.
-        self.type_mapper.map(openapi_type, details).rust_type
+        if openapi_type == OpenApiSchemaType::Integer {
+            self.integer_rust_type(details)
+        } else {
+            self.type_mapper.map(openapi_type, details).rust_type
+        }
     }
 
     #[allow(dead_code)]
@@ -4387,6 +5740,112 @@ impl SchemaAnalyzer {
 
         // Fall back to generating from name
         self.generate_discriminator_value_from_name(schema_name)
+    }
+
+    fn disambiguate_shared_discriminator_values(
+        &self,
+        variants: &mut [UnionVariant],
+        discriminator: Option<&Discriminator>,
+    ) {
+        let mut owners_by_value: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, variant) in variants.iter().enumerate() {
+            for value in &variant.discriminator_values {
+                owners_by_value
+                    .entry(value.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+
+        let mut removals: Vec<(usize, String)> = Vec::new();
+        for (value, candidate_owners) in owners_by_value {
+            if candidate_owners.len() < 2 {
+                continue;
+            }
+
+            let explicitly_mapped_owners: Vec<usize> = discriminator
+                .and_then(|disc| disc.mapping.as_ref())
+                .and_then(|mappings| mappings.get(&value))
+                .map(|target_ref| {
+                    candidate_owners
+                        .iter()
+                        .copied()
+                        .filter(|index| {
+                            let variant = &variants[*index];
+                            target_ref == &variant.schema_ref
+                                || self.extract_schema_name(target_ref)
+                                    == Some(variant.type_name.as_str())
+                                || (variant.schema_ref.starts_with("inline_")
+                                    && target_ref.contains(&variant.schema_ref))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let winner = if explicitly_mapped_owners.len() == 1 {
+                explicitly_mapped_owners.first().copied()
+            } else {
+                let mut scored: Vec<(usize, usize)> = candidate_owners
+                    .iter()
+                    .map(|index| {
+                        (
+                            *index,
+                            Self::discriminator_name_affinity(&variants[*index].type_name, &value),
+                        )
+                    })
+                    .collect();
+                scored.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+                match scored.as_slice() {
+                    [(index, score), rest @ ..]
+                        if *score > 0 && rest.first().is_none_or(|(_, next)| score > next) =>
+                    {
+                        Some(*index)
+                    }
+                    _ => None,
+                }
+            };
+
+            if let Some(winner) = winner {
+                for index in candidate_owners {
+                    if index != winner && variants[index].preferred_discriminator_values.len() > 1 {
+                        removals.push((index, value.clone()));
+                    }
+                }
+            }
+        }
+
+        for (index, value) in removals {
+            variants[index]
+                .preferred_discriminator_values
+                .retain(|candidate| candidate != &value);
+        }
+        for variant in variants {
+            if let Some(canonical) = variant.preferred_discriminator_values.first() {
+                variant.discriminator_value.clone_from(canonical);
+            }
+        }
+    }
+
+    fn discriminator_name_affinity(schema_name: &str, value: &str) -> usize {
+        let schema_compact: String = schema_name
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let value_compact: String = value
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let exact_bonus = usize::from(
+            !value_compact.is_empty() && schema_compact.contains(value_compact.as_str()),
+        ) * 10;
+        let token_matches = value
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .filter(|token| schema_compact.contains(&token.to_ascii_lowercase()))
+            .count();
+        exact_bonus + token_matches
     }
 
     fn generate_discriminator_value_from_name(&self, schema_name: &str) -> String {
@@ -4478,59 +5937,14 @@ impl SchemaAnalyzer {
         primary_name: String,
         dependencies: &mut HashSet<String>,
     ) -> SchemaType {
-        fn matches_values(existing: &AnalyzedSchema, values: &[String]) -> bool {
-            matches!(
-                &existing.schema_type,
-                SchemaType::StringEnum { values: existing_values }
-                    if existing_values == values
-            )
-        }
-
-        let mut enum_type_name = primary_name.clone();
-        let should_insert = match self.resolved_cache.get(&enum_type_name) {
-            None => true,
-            Some(existing) if matches_values(existing, &enum_values) => false,
-            Some(_) => {
-                // Collision with different values — try a
-                // value-suffixed name first.
-                let suffix = enum_values
-                    .first()
-                    .map(|v| self.to_pascal_case(v))
-                    .unwrap_or_else(|| "Variant".to_string());
-                let candidate = format!("{primary_name}{suffix}");
-
-                let resolved = match self.resolved_cache.get(&candidate) {
-                    None => Some((candidate.clone(), true)),
-                    Some(existing) if matches_values(existing, &enum_values) => {
-                        Some((candidate.clone(), false))
-                    }
-                    Some(_) => {
-                        // Walk a numeric suffix until we find
-                        // a slot that's free or matches.
-                        let mut found = None;
-                        for n in 2..1000 {
-                            let numbered = format!("{candidate}_{n}");
-                            match self.resolved_cache.get(&numbered) {
-                                None => {
-                                    found = Some((numbered, true));
-                                    break;
-                                }
-                                Some(existing) if matches_values(existing, &enum_values) => {
-                                    found = Some((numbered, false));
-                                    break;
-                                }
-                                Some(_) => continue,
-                            }
-                        }
-                        found
-                    }
-                };
-
-                let (resolved_name, insert) = resolved.unwrap_or((candidate, true));
-                enum_type_name = resolved_name;
-                insert
-            }
-        };
+        let suffix = enum_values
+            .first()
+            .map(|value| self.to_pascal_case(value))
+            .unwrap_or_else(|| "Variant".to_string());
+        let collision_name = format!("{primary_name}{suffix}");
+        let enum_type_name =
+            self.allocate_inline_schema_name(&primary_name, &collision_name, "string-enum", schema);
+        let should_insert = !self.resolved_cache.contains_key(&enum_type_name);
 
         // Store the enum as a named schema if this is the
         // first time we've seen this exact (name, values) pair.
@@ -4744,7 +6158,13 @@ impl SchemaAnalyzer {
             return Ok(None);
         };
 
-        let variant_name = self.unique_hoisted_name(schema_name, "Variant");
+        let preferred_variant_name = format!("{schema_name}Variant");
+        let variant_name = self.allocate_inline_schema_name(
+            &preferred_variant_name,
+            &format!("{preferred_variant_name}Inline"),
+            "object-variant",
+            schema,
+        );
         let variant_type = self.analyze_anyof_union(
             branches,
             schema.discriminator(),
@@ -4787,6 +6207,28 @@ impl SchemaAnalyzer {
         }))
     }
 
+    /// Resolve boolean branches in a union.
+    ///
+    /// `true` accepts every value, so a union containing it admits everything
+    /// and has no narrower type. `false` accepts none, so such a branch can
+    /// never be taken and is dropped — `oneOf: [A, false]` is `A`.
+    ///
+    /// Returns `Err(())` when the union is unconstrained.
+    #[allow(clippy::result_unit_err)]
+    fn resolve_boolean_branches(branches: &[Schema]) -> std::result::Result<Vec<Schema>, ()> {
+        if branches
+            .iter()
+            .any(|branch| matches!(branch, Schema::Bool(true)))
+        {
+            return Err(());
+        }
+        Ok(branches
+            .iter()
+            .filter(|branch| !matches!(branch, Schema::Bool(false)))
+            .cloned()
+            .collect())
+    }
+
     /// Whether a union's branches constrain only which properties are
     /// required.
     ///
@@ -4797,18 +6239,63 @@ impl SchemaAnalyzer {
     /// with both fields optional — rather than an unrepresentable union.
     fn union_only_constrains_requiredness(branches: &[Schema]) -> bool {
         !branches.is_empty()
-            && branches.iter().all(|branch| {
-                let details = branch.details();
-                branch.schema_type().is_none()
-                    && branch.reference().is_none()
-                    && branch.union_variants().is_none()
-                    && details.properties.is_none()
-                    && details.enum_values.is_none()
-                    && details.const_value.is_none()
-                    && details.items.is_none()
-                    && details.additional_properties.is_none()
-                    && details.required.is_some()
-            })
+            && branches
+                .iter()
+                .all(Self::schema_only_constrains_requiredness)
+    }
+
+    /// Requiredness formulas can nest through `anyOf`/`oneOf` and `not`, as
+    /// in protobuf-generated "at most one field" schemas. They constrain
+    /// presence but add no payload shape for a Rust field to carry.
+    fn schema_only_constrains_requiredness(schema: &Schema) -> bool {
+        let keys_are_requiredness_or_annotations = serde_json::to_value(schema)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .is_some_and(|object| {
+                object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "required"
+                            | "not"
+                            | "anyOf"
+                            | "oneOf"
+                            | "title"
+                            | "description"
+                            | "deprecated"
+                            | "readOnly"
+                            | "writeOnly"
+                            | "examples"
+                            | "example"
+                            | "default"
+                            | "externalDocs"
+                            | "xml"
+                            | "$comment"
+                    ) || key.starts_with("x-")
+                })
+            });
+        if !keys_are_requiredness_or_annotations {
+            return false;
+        }
+
+        match schema {
+            Schema::AnyOf { any_of, .. } => {
+                !any_of.is_empty() && any_of.iter().all(Self::schema_only_constrains_requiredness)
+            }
+            Schema::OneOf { one_of, .. } => {
+                !one_of.is_empty() && one_of.iter().all(Self::schema_only_constrains_requiredness)
+            }
+            other => {
+                let details = other.details();
+                details
+                    .required
+                    .as_ref()
+                    .is_some_and(|required| !required.is_empty())
+                    || details
+                        .not
+                        .as_deref()
+                        .is_some_and(Self::schema_only_constrains_requiredness)
+            }
+        }
     }
 
     /// Analyze a union whose branch list is empty.
@@ -4881,10 +6368,11 @@ impl SchemaAnalyzer {
         if pointer.is_empty() || !pointer.starts_with('/') {
             return Ok(None);
         }
-        let name = pointer_type_name(pointer);
-        if name.is_empty() {
+        let preferred_name = pointer_type_name(pointer);
+        if preferred_name.is_empty() {
             return Ok(None);
         }
+        let name = self.allocate_pointer_schema_name(pointer, &preferred_name);
         // Already resolved once, or currently being resolved further up the
         // stack: reference the name rather than expanding it again.
         if self.resolved_cache.contains_key(&name) || !self.resolving_pointers.insert(name.clone())
@@ -4902,15 +6390,24 @@ impl SchemaAnalyzer {
             return Ok(None);
         };
 
-        let analyzed = self.analyze_property_schema_with_context(&schema, None, dependencies);
+        // Analyze the target as the named schema represented by the pointer.
+        // Property analysis invents names from the caller's current context
+        // (`ActionObject`, `HolderItem`), which makes two uses of the same
+        // pointer diverge and can overwrite recursive targets.
+        let saved_context = self.current_schema_name.clone();
+        self.current_schema_name = Some(name.clone());
+        let analyzed = self.analyze_schema_value(&schema, &name);
+        self.current_schema_name = saved_context;
         self.resolving_pointers.remove(&name);
         let analyzed = analyzed?;
-        Ok(Some(self.hoist_inline_property_type(
-            &name,
-            "",
-            analyzed,
-            dependencies,
-        )))
+        dependencies.extend(analyzed.dependencies.iter().cloned());
+        if analyzed.schema_type.renders_inline() {
+            return Ok(Some(analyzed.schema_type));
+        }
+
+        self.resolved_cache.insert(name.clone(), analyzed);
+        dependencies.insert(name.clone());
+        Ok(Some(SchemaType::Reference { target: name }))
     }
 
     /// Give a property type a name when it needs one.
@@ -4932,7 +6429,15 @@ impl SchemaAnalyzer {
             return schema_type;
         }
 
-        let hoisted_name = self.unique_hoisted_name(schema_name, property_name);
+        use heck::ToPascalCase;
+
+        let preferred_name = format!("{schema_name}{}", property_name.to_pascal_case());
+        let hoisted_name = self.allocate_synthetic_schema_name(
+            &preferred_name,
+            &format!("{preferred_name}Inline"),
+            "hoisted-property",
+            format!("{schema_type:?}"),
+        );
         let hoisted_dependencies = schema_type_dependencies(&schema_type);
         self.resolved_cache.insert(
             hoisted_name.clone(),
@@ -4949,28 +6454,6 @@ impl SchemaAnalyzer {
         dependencies.insert(hoisted_name.clone());
         SchemaType::Reference {
             target: hoisted_name,
-        }
-    }
-
-    /// A generated name for a hoisted property type that no other schema has
-    /// claimed. Collisions are resolved by suffix rather than by overwriting,
-    /// which would silently retype an unrelated schema.
-    fn unique_hoisted_name(&self, schema_name: &str, property_name: &str) -> String {
-        use heck::ToPascalCase;
-
-        let base = format!("{schema_name}{}", property_name.to_pascal_case());
-        if !self.schemas.contains_key(&base) && !self.resolved_cache.contains_key(&base) {
-            return base;
-        }
-        let mut suffix = 2;
-        loop {
-            let candidate = format!("{base}{suffix}");
-            if !self.schemas.contains_key(&candidate)
-                && !self.resolved_cache.contains_key(&candidate)
-            {
-                return candidate;
-            }
-            suffix += 1;
         }
     }
 
@@ -5046,14 +6529,24 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
         let item_type = match items_schema {
+            Schema::Bool(accepts_anything) => self.untyped_value(
+                self.untyped_context(""),
+                if *accepts_anything {
+                    UntypedReason::AnySchema
+                } else {
+                    UntypedReason::NeverMatches
+                },
+            ),
             Schema::Reference { reference, .. } => {
                 // Array of referenced types
-                let target = self
-                    .extract_schema_name(reference)
-                    .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
-                    .to_string();
-                dependencies.insert(target.clone());
-                SchemaType::Reference { target }
+                if let Some(target) = self.extract_schema_name(reference) {
+                    let target = target.to_string();
+                    dependencies.insert(target.clone());
+                    SchemaType::Reference { target }
+                } else {
+                    self.resolve_pointer_schema(reference, dependencies)?
+                        .ok_or_else(|| GeneratorError::UnresolvedReference(reference.to_string()))?
+                }
             }
             Schema::RecursiveRef { recursive_ref, .. } => {
                 // Array of recursive references
@@ -5111,31 +6604,19 @@ impl SchemaAnalyzer {
                     },
                     OpenApiSchemaType::Object => {
                         // Inline object in array - create a named schema for it
-                        let object_type_name = inline_name.to_string();
+                        let preferred_object_type_name = inline_name.to_string();
+                        let object_type_name = self.allocate_inline_schema_name(
+                            &preferred_object_type_name,
+                            &format!("{preferred_object_type_name}Inline"),
+                            "array-item-object",
+                            items_schema,
+                        );
 
-                        // Analyze the object schema
-                        let object_type = self.analyze_object_schema(items_schema, dependencies)?;
-
-                        // Create an analyzed schema for the inline object
-                        let inline_schema = AnalyzedSchema {
-                            name: object_type_name.clone(),
-                            original: serde_json::to_value(items_schema).unwrap_or(Value::Null),
-                            schema_type: object_type,
-                            dependencies: dependencies.clone(),
-                            nullable: false,
-                            description: items_schema.details().description.clone(),
-                            default: None,
-                        };
-
-                        // Add the inline object as a named schema
-                        self.resolved_cache
-                            .insert(object_type_name.clone(), inline_schema);
-                        dependencies.insert(object_type_name.clone());
-
-                        // Return a reference to the named schema
-                        SchemaType::Reference {
-                            target: object_type_name,
-                        }
+                        self.add_allocated_object_schema(
+                            object_type_name,
+                            items_schema,
+                            dependencies,
+                        )?
                     }
                     OpenApiSchemaType::Array => {
                         // Array of arrays - recursively analyze
@@ -5156,7 +6637,13 @@ impl SchemaAnalyzer {
                     SchemaType::DiscriminatedUnion { .. } | SchemaType::Union { .. } => {
                         // Generate a unique name for the union schema based on the parent context
                         // Use the parent context directly to maintain consistent naming
-                        let union_name = format!("{inline_name}Union");
+                        let preferred_union_name = format!("{inline_name}Union");
+                        let union_name = self.allocate_inline_schema_name(
+                            &preferred_union_name,
+                            &format!("{preferred_union_name}Inline"),
+                            "array-item-union",
+                            items_schema,
+                        );
 
                         // Create a new analyzed schema with the correct name
                         let mut union_schema = analyzed;
@@ -5180,32 +6667,19 @@ impl SchemaAnalyzer {
                     match inferred {
                         OpenApiSchemaType::Object => {
                             // Inline object in array - create a named schema for it
-                            let object_type_name = inline_name.to_string();
+                            let preferred_object_type_name = inline_name.to_string();
+                            let object_type_name = self.allocate_inline_schema_name(
+                                &preferred_object_type_name,
+                                &format!("{preferred_object_type_name}Inline"),
+                                "array-item-object",
+                                items_schema,
+                            );
 
-                            // Analyze the object schema
-                            let object_type =
-                                self.analyze_object_schema(items_schema, dependencies)?;
-
-                            // Create an analyzed schema for the inline object
-                            let inline_schema = AnalyzedSchema {
-                                name: object_type_name.clone(),
-                                original: serde_json::to_value(items_schema).unwrap_or(Value::Null),
-                                schema_type: object_type,
-                                dependencies: dependencies.clone(),
-                                nullable: false,
-                                description: items_schema.details().description.clone(),
-                                default: None,
-                            };
-
-                            // Add the inline object as a named schema
-                            self.resolved_cache
-                                .insert(object_type_name.clone(), inline_schema);
-                            dependencies.insert(object_type_name.clone());
-
-                            // Return a reference to the named schema
-                            SchemaType::Reference {
-                                target: object_type_name,
-                            }
+                            self.add_allocated_object_schema(
+                                object_type_name,
+                                items_schema,
+                                dependencies,
+                            )?
                         }
                         OpenApiSchemaType::String => {
                             // Typeless (OpenAPI 3.1) enum in array items —
@@ -5261,7 +6735,7 @@ impl SchemaAnalyzer {
             _ => self.analyze_property_schema_with_context(items_schema, None, dependencies)?,
         };
 
-        Ok(item_type)
+        Ok(self.nullable_container_value(items_schema, item_type))
     }
 
     fn get_number_rust_type(
@@ -5274,9 +6748,154 @@ impl SchemaAnalyzer {
         // (callers in 2025-era code path `Integer | Number` here).
         let format = details.format.as_deref();
         match schema_type {
-            OpenApiSchemaType::Integer => self.type_mapper.integer_format(format).rust_type,
+            OpenApiSchemaType::Integer => self.integer_rust_type(details),
             OpenApiSchemaType::Number => self.type_mapper.number_format(format).rust_type,
             _ => self.type_mapper.dynamic_json().rust_type,
+        }
+    }
+
+    /// Select the narrow configured integer carrier unless the schema itself
+    /// proves that a wider, still exactly serializable value is valid. JSON
+    /// Schema's `format` is an annotation, so a contradictory `format: int64`
+    /// plus a maximum above i64 must follow the numeric bounds rather than
+    /// rejecting source-valid wire values at hydration time.
+    fn integer_rust_type(&self, details: &crate::openapi::SchemaDetails) -> String {
+        fn integer_value(number: &serde_json::Number) -> Option<i128> {
+            number
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| number.as_u64().map(i128::from))
+                .or_else(|| {
+                    number.as_f64().and_then(|value| {
+                        (value.fract() == 0.0
+                            && value >= i128::MIN as f64
+                            && value <= i128::MAX as f64)
+                            .then_some(value as i128)
+                    })
+                })
+        }
+
+        fn below(number: &serde_json::Number, boundary: i128) -> bool {
+            integer_value(number).is_some_and(|value| value < boundary)
+        }
+
+        fn above(number: &serde_json::Number, boundary: i128) -> bool {
+            integer_value(number).is_some_and(|value| value > boundary)
+        }
+
+        let explicitly_nonnegative = details
+            .minimum
+            .as_ref()
+            .and_then(integer_value)
+            .is_some_and(|value| value >= 0)
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value >= 0.0
+            );
+
+        let annotated_numbers = details
+            .const_value
+            .iter()
+            .chain(details.default.iter())
+            .chain(details.example.iter())
+            .chain(details.enum_values.iter().flatten())
+            .chain(details.examples.iter().flatten())
+            .filter_map(Value::as_number)
+            .collect::<Vec<_>>();
+        let below_i32 = details
+            .minimum
+            .as_ref()
+            .is_some_and(|number| below(number, i128::from(i32::MIN)))
+            || annotated_numbers
+                .iter()
+                .any(|number| below(number, i128::from(i32::MIN)))
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value < i32::MIN as f64
+            );
+        let above_i32 = details
+            .maximum
+            .as_ref()
+            .is_some_and(|number| above(number, i128::from(i32::MAX)))
+            || annotated_numbers
+                .iter()
+                .any(|number| above(number, i128::from(i32::MAX)))
+            || matches!(
+                details.exclusive_maximum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value > i32::MAX as f64
+            );
+        let below_i64 = details
+            .minimum
+            .as_ref()
+            .is_some_and(|number| below(number, i128::from(i64::MIN)))
+            || annotated_numbers
+                .iter()
+                .any(|number| below(number, i128::from(i64::MIN)))
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value < i64::MIN as f64
+            );
+        let above_i64 = details
+            .maximum
+            .as_ref()
+            .is_some_and(|number| above(number, i128::from(i64::MAX)))
+            || annotated_numbers
+                .iter()
+                .any(|number| above(number, i128::from(i64::MAX)))
+            || matches!(
+                details.exclusive_maximum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value >= 9_223_372_036_854_775_808.0
+            );
+        let below_zero = details
+            .minimum
+            .as_ref()
+            .and_then(integer_value)
+            .is_some_and(|value| value < 0)
+            || annotated_numbers
+                .iter()
+                .filter_map(|number| integer_value(number))
+                .any(|value| value < 0)
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value < 0.0
+            );
+        let above_u32 = details
+            .maximum
+            .as_ref()
+            .is_some_and(|number| above(number, i128::from(u32::MAX)))
+            || annotated_numbers
+                .iter()
+                .any(|number| above(number, i128::from(u32::MAX)))
+            || matches!(
+                details.exclusive_maximum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value > u32::MAX as f64
+            );
+
+        let configured = self
+            .type_mapper
+            .integer_format(details.format.as_deref())
+            .rust_type;
+        match configured.as_str() {
+            "i32" if below_i32 || above_i32 => {
+                if below_i64 || above_i64 {
+                    "i128".to_string()
+                } else {
+                    "i64".to_string()
+                }
+            }
+            "i64" if below_i64 => "i128".to_string(),
+            "i64" if above_i64 && explicitly_nonnegative => "u64".to_string(),
+            "i64" if above_i64 => "i128".to_string(),
+            "u32" if below_zero => {
+                if below_i64 || above_i64 {
+                    "i128".to_string()
+                } else {
+                    "i64".to_string()
+                }
+            }
+            "u32" if above_u32 => "u64".to_string(),
+            "u64" if below_zero => "i128".to_string(),
+            configured => configured.to_string(),
         }
     }
 
@@ -5287,6 +6906,8 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
         context_name: &str,
     ) -> Result<SchemaType> {
+        let original_indices = (0..any_of_schemas.len()).collect::<Vec<_>>();
+
         // Branches may be pointers into other parts of the document.
         let expanded_branches;
         let any_of_schemas = match self.expand_pointer_branches(any_of_schemas) {
@@ -5297,19 +6918,50 @@ impl SchemaAnalyzer {
             None => any_of_schemas,
         };
 
-        // Drop {"type": "null"} variants. Nullability is surfaced as Option<T>
-        // at the property level via is_nullable_pattern(); leaving the null
-        // variant in here would produce a phantom `()` or `serde_json::Value`
-        // type alias that the generator can't render.
+        // A boolean branch either opens the union up or can never be taken.
+        let boolean_resolved;
+        let boolean_resolved_indices;
+        let any_of_schemas = match Self::resolve_boolean_branches(any_of_schemas) {
+            Ok(resolved) => {
+                boolean_resolved_indices = any_of_schemas
+                    .iter()
+                    .zip(original_indices.iter().copied())
+                    .filter_map(|(branch, index)| {
+                        (!matches!(branch, Schema::Bool(false))).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                boolean_resolved = resolved;
+                boolean_resolved.as_slice()
+            }
+            Err(()) => {
+                return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
+            }
+        };
+        let source_indices = boolean_resolved_indices.as_slice();
+        if any_of_schemas.is_empty() {
+            return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::NeverMatches));
+        }
+
+        // Drop null-only variants. Nullability is surfaced as Option<T> at the
+        // property level via is_nullable_any(); leaving the null variant in
+        // here would produce a phantom `()` or `serde_json::Value` type alias
+        // that the generator can't render. Recognize the equivalent `type`,
+        // `const`, and `enum` spellings.
         let filtered_owned: Vec<Schema>;
-        let any_of_schemas: &[Schema] = if any_of_schemas
+        let filtered_indices: Vec<usize>;
+        let (any_of_schemas, source_indices): (&[Schema], &[usize]) = if any_of_schemas
             .iter()
-            .any(|s| matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+            .any(Schema::is_explicit_null_only)
         {
             filtered_owned = any_of_schemas
                 .iter()
-                .filter(|s| !matches!(s.schema_type(), Some(OpenApiSchemaType::Null)))
+                .filter(|s| !s.is_explicit_null_only())
                 .cloned()
+                .collect();
+            filtered_indices = any_of_schemas
+                .iter()
+                .zip(source_indices.iter().copied())
+                .filter_map(|(schema, index)| (!schema.is_explicit_null_only()).then_some(index))
                 .collect();
             if filtered_owned.is_empty() {
                 return Ok(self.untyped_value(self.untyped_context(""), UntypedReason::AnySchema));
@@ -5319,9 +6971,9 @@ impl SchemaAnalyzer {
                     .analyze_schema_value(&filtered_owned[0], context_name)
                     .map(|a| a.schema_type);
             }
-            &filtered_owned
+            (&filtered_owned, &filtered_indices)
         } else {
-            any_of_schemas
+            (any_of_schemas, source_indices)
         };
 
         // A union of one is that one: gcore writes `anyOf: [{allOf: [...]}]`
@@ -5365,6 +7017,8 @@ impl SchemaAnalyzer {
                     Some(disc),
                     context_name,
                     dependencies,
+                    InlineUnionKind::AnyOf,
+                    Some(source_indices),
                 );
             }
 
@@ -5380,52 +7034,67 @@ impl SchemaAnalyzer {
                     }),
                     context_name,
                     dependencies,
+                    InlineUnionKind::AnyOf,
+                    Some(source_indices),
                 );
             }
 
             // Create an untagged union for flexible matching
             let mut variants = Vec::new();
 
-            for schema in any_of_schemas {
+            for (schema, original_index) in
+                any_of_schemas.iter().zip(source_indices.iter().copied())
+            {
                 if let Some(ref_str) = schema.reference() {
                     if let Some(target) = self.extract_schema_name(ref_str) {
                         dependencies.insert(target.to_string());
                         variants.push(SchemaRef {
                             target: target.to_string(),
-                            nullable: false,
+                            nullable: self.schema_or_reference_is_nullable(schema),
                         });
                     }
                 } else if matches!(schema.schema_type(), Some(OpenApiSchemaType::Object))
                     || schema.inferred_type() == Some(OpenApiSchemaType::Object)
                 {
                     // Generate inline object type for anyOf union
-                    let inline_index = variants.len();
-                    let inline_type_name = self.generate_inline_type_name(schema, inline_index);
+                    let inline_type_name = self.generate_inline_type_name(schema, original_index);
 
                     // Store inline schema for later analysis and generation
-                    self.add_inline_schema(&inline_type_name, schema, dependencies)?;
+                    let inline_type_name = self.add_inline_union_branch_schema(
+                        &inline_type_name,
+                        schema,
+                        dependencies,
+                        context_name,
+                        InlineUnionKind::AnyOf,
+                        original_index,
+                        None,
+                    )?;
 
                     variants.push(SchemaRef {
                         target: inline_type_name,
                         nullable: false,
                     });
                 } else if matches!(schema.schema_type(), Some(OpenApiSchemaType::Array)) {
-                    // Handle array types in unions by creating a type alias
-                    let array_type =
-                        self.analyze_array_schema(schema, context_name, dependencies)?;
-
                     // Create a unique name for this array type in the union
-                    let array_type_name = if let Some(items_schema) = schema.details().item_schema()
-                    {
-                        if let Some(ref_str) = items_schema.reference() {
-                            if let Some(item_type_name) = self.extract_schema_name(ref_str) {
-                                dependencies.insert(item_type_name.to_string());
-                                format!("{item_type_name}Array")
+                    let preferred_array_type_name =
+                        if let Some(items_schema) = schema.details().item_schema() {
+                            if let Some(ref_str) = items_schema.reference() {
+                                if let Some(item_type_name) = self.extract_schema_name(ref_str) {
+                                    dependencies.insert(item_type_name.to_string());
+                                    format!("{item_type_name}Array")
+                                } else {
+                                    self.generate_context_aware_name(
+                                        context_name,
+                                        "Array",
+                                        original_index,
+                                        Some(schema),
+                                    )
+                                }
                             } else {
                                 self.generate_context_aware_name(
                                     context_name,
                                     "Array",
-                                    variants.len(),
+                                    original_index,
                                     Some(schema),
                                 )
                             }
@@ -5433,18 +7102,21 @@ impl SchemaAnalyzer {
                             self.generate_context_aware_name(
                                 context_name,
                                 "Array",
-                                variants.len(),
+                                original_index,
                                 Some(schema),
                             )
-                        }
-                    } else {
-                        self.generate_context_aware_name(
-                            context_name,
-                            "Array",
-                            variants.len(),
-                            Some(schema),
-                        )
-                    };
+                        };
+                    let array_type_name = self.allocate_inline_union_branch_name(
+                        &preferred_array_type_name,
+                        context_name,
+                        InlineUnionKind::AnyOf,
+                        original_index,
+                        None,
+                        schema,
+                    );
+                    // Handle array types in unions by creating a type alias.
+                    let array_type =
+                        self.analyze_array_schema(schema, context_name, dependencies)?;
 
                     // Store the array as a type alias
                     self.resolved_cache.insert(
@@ -5483,44 +7155,51 @@ impl SchemaAnalyzer {
                         .unwrap_or(true);
 
                     if primitive_unions {
-                        let mapped = self.type_mapper.map(schema_type.clone(), schema.details());
                         variants.push(SchemaRef {
-                            target: mapped.rust_type,
+                            target: self
+                                .openapi_type_to_rust_type(schema_type.clone(), schema.details()),
                             nullable: false,
                         });
                     } else {
-                        let inline_index = variants.len();
-                        let inline_type_name = match schema_type {
+                        let preferred_inline_type_name = match schema_type {
                             OpenApiSchemaType::String => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}String")
                                 } else {
-                                    format!("{context_name}StringVariant{inline_index}")
+                                    format!("{context_name}StringVariant{original_index}")
                                 }
                             }
                             OpenApiSchemaType::Number => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}Number")
                                 } else {
-                                    format!("{context_name}NumberVariant{inline_index}")
+                                    format!("{context_name}NumberVariant{original_index}")
                                 }
                             }
                             OpenApiSchemaType::Integer => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}Integer")
                                 } else {
-                                    format!("{context_name}IntegerVariant{inline_index}")
+                                    format!("{context_name}IntegerVariant{original_index}")
                                 }
                             }
                             OpenApiSchemaType::Boolean => {
-                                if inline_index == 0 {
+                                if original_index == 0 {
                                     format!("{context_name}Boolean")
                                 } else {
-                                    format!("{context_name}BooleanVariant{inline_index}")
+                                    format!("{context_name}BooleanVariant{original_index}")
                                 }
                             }
-                            _ => format!("{context_name}Variant{inline_index}"),
+                            _ => format!("{context_name}Variant{original_index}"),
                         };
+                        let inline_type_name = self.allocate_inline_union_branch_name(
+                            &preferred_inline_type_name,
+                            context_name,
+                            InlineUnionKind::AnyOf,
+                            original_index,
+                            None,
+                            schema,
+                        );
 
                         let rust_type =
                             self.openapi_type_to_rust_type(schema_type.clone(), schema.details());
@@ -5548,11 +7227,42 @@ impl SchemaAnalyzer {
                             nullable: false,
                         });
                     }
+                } else {
+                    // A composition can itself be one branch of an outer
+                    // union, for example `anyOf: [{ oneOf: [...],
+                    // discriminator: ... }, { type: string }]`. It has no
+                    // direct `type`, so the arms above used to silently drop
+                    // it and leave the generated Rust union unable to hydrate
+                    // schema-valid object input. Hoist the branch and let the
+                    // normal analyzer preserve its nested composition.
+                    let inline_type_name = self.generate_context_aware_name(
+                        context_name,
+                        "InlineVariant",
+                        original_index,
+                        Some(schema),
+                    );
+                    let inline_type_name = self.add_inline_union_branch_schema(
+                        &inline_type_name,
+                        schema,
+                        dependencies,
+                        context_name,
+                        InlineUnionKind::AnyOf,
+                        original_index,
+                        None,
+                    )?;
+                    dependencies.insert(inline_type_name.clone());
+                    variants.push(SchemaRef {
+                        target: inline_type_name,
+                        nullable: false,
+                    });
                 }
             }
 
             if !variants.is_empty() {
-                return Ok(SchemaType::Union { variants });
+                return Ok(SchemaType::Union {
+                    variants,
+                    exclusive: false,
+                });
             }
         }
 
@@ -5667,8 +7377,10 @@ impl SchemaAnalyzer {
 
         let details = schema.details();
 
-        // If it has explicit additionalProperties, it should remain as a typed object
-        // that will be generated as BTreeMap<String, serde_json::Value> or similar
+        // An explicit additionalProperties policy is structural even when no
+        // named properties exist. `true`/a schema needs a map carrier, while
+        // `false` is a closed empty object (GitHub's `empty-object`) and must
+        // not become `serde_json::Value`, which would match every oneOf branch.
         if self.has_explicit_additional_properties(schema) {
             return false;
         }
@@ -5686,7 +7398,7 @@ impl SchemaAnalyzer {
             let has_structural_constraints = details
                 .required
                 .as_ref()
-                .map(|req| req.iter().any(|r| r != "type"))
+                .map(|req| !req.is_empty())
                 .unwrap_or(false)
                 || details.pattern_properties.is_some()
                 || details.property_names.is_some()
@@ -5704,16 +7416,10 @@ impl SchemaAnalyzer {
         false
     }
 
-    /// Check if this is an object that explicitly allows arbitrary additional properties
+    /// Check whether the object declares any explicit additional-properties policy.
     fn has_explicit_additional_properties(&self, schema: &Schema) -> bool {
         let details = schema.details();
-
-        // Check if additionalProperties is explicitly set to true or a schema
-        matches!(
-            &details.additional_properties,
-            Some(crate::openapi::AdditionalProperties::Boolean(true))
-                | Some(crate::openapi::AdditionalProperties::Schema(_))
-        )
+        details.additional_properties.is_some()
     }
 
     /// Analyze OpenAPI operations to extract request/response schemas
@@ -6094,7 +7800,8 @@ impl SchemaAnalyzer {
 
                         // Use the existing inline schema infrastructure
                         let mut deps = HashSet::new();
-                        self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
+                        let synthetic_name =
+                            self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
 
                         op_info
                             .response_schemas
@@ -6490,8 +8197,7 @@ impl SchemaAnalyzer {
             self.generate_inline_response_type_name(operation_id, "")
         };
         let mut deps = HashSet::new();
-        self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
-        Ok(synthetic_name)
+        self.add_inline_schema(&synthetic_name, schema, &mut deps)
     }
 
     /// Resolve a parameter reference ($ref) to the actual parameter definition.
@@ -6683,7 +8389,7 @@ impl SchemaAnalyzer {
                 let param_pascal = name.to_pascal_case();
                 let synthetic_name = format!("{op_pascal}{param_pascal}");
                 let mut deps = HashSet::new();
-                self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
+                let synthetic_name = self.add_inline_schema(&synthetic_name, schema, &mut deps)?;
                 schema_ref = Some(synthetic_name.clone());
                 query_serialization = if form_exploded && self.uses_aws_query_conventions() {
                     match self.referenced_array_struct_item_type(&synthetic_name, 1) {
@@ -6725,9 +8431,7 @@ impl SchemaAnalyzer {
                 let format = schema.details().format.clone();
                 rust_type = match schema_type {
                     crate::openapi::SchemaType::Boolean => "bool".to_string(),
-                    crate::openapi::SchemaType::Integer => {
-                        self.type_mapper.integer_format(format.as_deref()).rust_type
-                    }
+                    crate::openapi::SchemaType::Integer => self.integer_rust_type(schema.details()),
                     crate::openapi::SchemaType::Number => {
                         self.type_mapper.number_format(format.as_deref()).rust_type
                     }
@@ -6853,9 +8557,7 @@ impl SchemaAnalyzer {
         let format = unwrapped.details().format.clone();
         let scalar = match unwrapped.schema_type()? {
             crate::openapi::SchemaType::String => "String".to_string(),
-            crate::openapi::SchemaType::Integer => {
-                self.type_mapper.integer_format(format.as_deref()).rust_type
-            }
+            crate::openapi::SchemaType::Integer => self.integer_rust_type(unwrapped.details()),
             crate::openapi::SchemaType::Number => {
                 self.type_mapper.number_format(format.as_deref()).rust_type
             }
@@ -7414,12 +9116,12 @@ fn json_pointer(path: &serde_path_to_error::Path) -> String {
     pointer
 }
 
-fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
+pub(crate) fn component_schema_name_aliases(openapi_spec: &Value) -> BTreeMap<String, String> {
     let Some(schemas) = openapi_spec
-        .pointer_mut("/components/schemas")
-        .and_then(Value::as_object_mut)
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
     else {
-        return;
+        return BTreeMap::new();
     };
 
     let mut names_by_rust_name = BTreeMap::<String, Vec<String>>::new();
@@ -7433,7 +9135,7 @@ fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
     // Reserve every identifier already represented by the document so a
     // suffix never steals another component's canonical Rust name.
     let mut claimed_rust_names = names_by_rust_name.keys().cloned().collect::<HashSet<_>>();
-    let mut aliases = BTreeMap::<String, String>::new();
+    let mut aliases = BTreeMap::new();
 
     for (rust_name, mut names) in names_by_rust_name {
         if names.len() < 2 {
@@ -7453,16 +9155,32 @@ fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
                 suffix += 1;
             };
 
-            eprintln!(
-                "⚠️  schema `{source_name}` maps to the existing Rust type `{rust_name}` — disambiguated to `{replacement}`"
-            );
             aliases.insert(source_name, replacement);
         }
     }
 
+    aliases
+}
+
+fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
+    let aliases = component_schema_name_aliases(openapi_spec);
     if aliases.is_empty() {
         return;
     }
+
+    for (source_name, replacement) in &aliases {
+        let rust_name = crate::generator::rust_type_name(source_name);
+        eprintln!(
+            "⚠️  schema `{source_name}` maps to the existing Rust type `{rust_name}` — disambiguated to `{replacement}`"
+        );
+    }
+
+    let Some(schemas) = openapi_spec
+        .pointer_mut("/components/schemas")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
 
     let original_schemas = std::mem::take(schemas);
     for (name, schema) in original_schemas {
@@ -7633,12 +9351,13 @@ fn rewrite_schema_type_names(schema_type: &mut SchemaType, aliases: &BTreeMap<St
                 variant.schema_ref = renamed_schema_name(&variant.schema_ref, aliases);
             }
         }
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for variant in variants {
                 variant.target = renamed_schema_name(&variant.target, aliases);
             }
         }
         SchemaType::Array { item_type } => rewrite_schema_type_names(item_type, aliases),
+        SchemaType::Nullable { inner_type } => rewrite_schema_type_names(inner_type, aliases),
         SchemaType::Untyped { .. } => {}
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {

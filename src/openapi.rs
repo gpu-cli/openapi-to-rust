@@ -191,6 +191,11 @@ pub enum Schema {
         #[serde(flatten)]
         details: SchemaDetails,
     },
+    /// JSON Schema 2020-12 boolean schema. `true` accepts every value and
+    /// `false` accepts none, and both are legal anywhere a schema is — a
+    /// property, a `$defs` entry, a `oneOf` branch, `not`. Specs write
+    /// `properties: {extra: true}` to say "this key exists, any value".
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -255,14 +260,24 @@ pub struct SchemaDetails {
 
     // Number-specific
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<f64>,
+    pub minimum: Option<serde_json::Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<f64>,
+    pub maximum: Option<serde_json::Number>,
 
     // Validation
-    #[serde(rename = "minLength", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minLength",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_length: Option<u64>,
-    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxLength",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_length: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
@@ -275,15 +290,35 @@ pub struct SchemaDetails {
     pub exclusive_maximum: Option<ExclusiveBound>,
     #[serde(rename = "multipleOf", skip_serializing_if = "Option::is_none")]
     pub multiple_of: Option<f64>,
-    #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minItems",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_items: Option<u64>,
-    #[serde(rename = "maxItems", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxItems",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_items: Option<u64>,
     #[serde(rename = "uniqueItems", skip_serializing_if = "Option::is_none")]
     pub unique_items: Option<bool>,
-    #[serde(rename = "minProperties", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minProperties",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_properties: Option<u64>,
-    #[serde(rename = "maxProperties", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxProperties",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_properties: Option<u64>,
 
     // JSON Schema 2020-12 array keywords (J4, J8).
@@ -291,9 +326,19 @@ pub struct SchemaDetails {
     pub prefix_items: Option<Vec<Schema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contains: Option<Box<Schema>>,
-    #[serde(rename = "minContains", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "minContains",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min_contains: Option<u64>,
-    #[serde(rename = "maxContains", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxContains",
+        default,
+        deserialize_with = "deserialize_count",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max_contains: Option<u64>,
 
     // JSON Schema 2020-12 object keywords (J5, J6, J7).
@@ -358,6 +403,44 @@ pub struct SchemaDetails {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// Deserialize a non-negative integer keyword that a spec may have written as a
+/// decimal.
+///
+/// JSON Schema requires these to be non-negative integers but says nothing
+/// about their JSON spelling, so `maxItems: 2.0` is valid and appears in the
+/// 2020-12 test suite. Reading them as `u64` alone rejected the whole document.
+fn deserialize_count<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    match &value {
+        Value::Null => Ok(None),
+        Value::Number(number) => {
+            if let Some(count) = number.as_u64() {
+                return Ok(Some(count));
+            }
+            // A float with no fractional part is the same count written
+            // differently; anything else is not a count at all.
+            match number.as_f64() {
+                Some(float) if float.fract() == 0.0 && float >= 0.0 && float <= u64::MAX as f64 => {
+                    Ok(Some(float as u64))
+                }
+                _ => Err(D::Error::custom(format!(
+                    "expected a non-negative integer, found {number}"
+                ))),
+            }
+        }
+        other => Err(D::Error::custom(format!(
+            "expected a non-negative integer, found {other}"
+        ))),
+    }
+}
+
 fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -390,10 +473,6 @@ pub enum Items {
     Single(Box<Schema>),
     /// Draft-04 tuple form: one schema per position.
     Positional(Vec<Schema>),
-    /// 2020-12 boolean schema. `items: false` is the canonical way to close a
-    /// tuple — no elements beyond `prefixItems` — and `items: true` is the
-    /// no-op "anything goes" schema.
-    Bool(bool),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -762,9 +841,24 @@ impl Schema {
     /// (openapi-generator-dsu) — which silently generated non-`Option` fields
     /// for values the API really does send as `null`.
     pub fn is_nullable_any(&self) -> bool {
-        self.details().is_nullable()
+        self.reference_siblings_are_nullable()
+            || self.details().is_nullable()
             || self.type_array_contains_null()
-            || self.is_nullable_pattern()
+            || self.has_explicit_null_variant()
+    }
+
+    /// Reference nodes retain siblings in `extra` because OpenAPI 3.0-era
+    /// documents commonly attach `nullable: true` directly beside `$ref`.
+    /// `details()` intentionally returns an empty value for references, so
+    /// nullability must read that retained annotation explicitly.
+    fn reference_siblings_are_nullable(&self) -> bool {
+        let extra = match self {
+            Schema::Reference { extra, .. }
+            | Schema::RecursiveRef { extra, .. }
+            | Schema::DynamicRef { extra, .. } => extra,
+            _ => return false,
+        };
+        extra.get("nullable").and_then(Value::as_bool) == Some(true)
     }
 
     /// Get schema details
@@ -773,9 +867,12 @@ impl Schema {
         match self {
             Schema::Typed { details, .. } => details,
             Schema::TypedMulti { details, .. } => details,
-            Schema::Reference { .. } | Schema::RecursiveRef { .. } | Schema::DynamicRef { .. } => {
-                &EMPTY_DETAILS
-            }
+            // Neither a reference nor a boolean schema carries details of its
+            // own: one points elsewhere, the other accepts or rejects outright.
+            Schema::Reference { .. }
+            | Schema::RecursiveRef { .. }
+            | Schema::DynamicRef { .. }
+            | Schema::Bool(_) => &EMPTY_DETAILS,
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
             Schema::AllOf { details, .. } => details,
@@ -796,6 +893,9 @@ impl Schema {
             }
             Schema::DynamicRef { .. } => {
                 panic!("Cannot get mutable details for dynamic reference schema")
+            }
+            Schema::Bool(_) => {
+                panic!("Cannot get mutable details for a boolean schema")
             }
             Schema::OneOf { details, .. } => details,
             Schema::AnyOf { details, .. } => details,
@@ -857,6 +957,15 @@ impl Schema {
         self.non_null_variant().is_some()
     }
 
+    /// Whether an `anyOf` or `oneOf` contains a branch that admits only JSON
+    /// `null`. Unlike [`Self::is_nullable_pattern`], this does not require the
+    /// union to collapse to one non-null branch, so it also preserves
+    /// nullability for unions such as `[string, integer, null]`.
+    pub fn has_explicit_null_variant(&self) -> bool {
+        self.union_variants()
+            .is_some_and(|variants| variants.iter().any(Self::is_explicit_null_only))
+    }
+
     /// The one meaningful branch of a two-branch union whose other branch
     /// exists only to admit `null`.
     pub fn non_null_variant(&self) -> Option<&Schema> {
@@ -869,8 +978,8 @@ impl Schema {
             return None;
         };
         match (
-            Self::is_null_marker_beside(first, second),
-            Self::is_null_marker_beside(second, first),
+            first.is_explicit_null_only(),
+            second.is_explicit_null_only(),
         ) {
             (true, false) => Some(second),
             (false, true) => Some(first),
@@ -879,54 +988,29 @@ impl Schema {
         }
     }
 
-    /// Whether `candidate` exists only to admit `null` alongside `sibling`.
+    /// Whether this branch explicitly admits no JSON value other than `null`.
     ///
-    /// 3.1 spells that `type: "null"`, which says so on its own. Tooling that
-    /// predates it spells it as an empty object carrying `nullable: true`, and
-    /// that spelling is ambiguous: read literally,
-    /// `anyOf: [X, {type: object, nullable: true}]` is "X, any object, or
-    /// null".
-    ///
-    /// The empty-object spelling is read as a null marker only beside a
-    /// `$ref`, which is the shape
-    /// OData emits for every navigation property and where the intent is not
-    /// in doubt. Beside a scalar the literal reading wins — the corpus has 33
-    /// `anyOf: [{type: string, nullable: true}, {type: object, nullable: true}]`
-    /// fields, and typing those as `Option<String>` would fail to deserialize
-    /// the objects the schema plainly allows.
-    fn is_null_marker_beside(candidate: &Schema, sibling: &Schema) -> bool {
-        matches!(candidate.schema_type(), Some(SchemaType::Null))
-            || (candidate.is_empty_nullable_object() && sibling.reference().is_some())
-    }
-
-    /// An object schema carrying `nullable: true` and constraining nothing.
-    fn is_empty_nullable_object(&self) -> bool {
-        let details = self.details();
-        if !details.is_nullable() {
-            return false;
-        }
-        if !matches!(
-            self.schema_type(),
-            Some(SchemaType::Object) | Some(SchemaType::Null) | None
-        ) {
-            return false;
-        }
-        self.reference().is_none()
-            && details.properties.as_ref().is_none_or(BTreeMap::is_empty)
-            && details.additional_properties.is_none()
-            && details.enum_values.is_none()
-            && details.const_value.is_none()
-            && details.pattern_properties.is_none()
-            && details.items.is_none()
-            && details.prefix_items.is_none()
-            && self.all_of_len() == 0
-    }
-
-    /// Number of `allOf` members, for shapes that only matter when empty.
-    fn all_of_len(&self) -> usize {
+    /// This is intentionally branch-local. OpenAPI 3.0's `nullable: true`
+    /// widens the schema it annotates; it does not erase that schema's other
+    /// accepted values. In particular, `{nullable: true}` and
+    /// `{type: object, nullable: true}` remain real alternatives even beside
+    /// a `$ref`.
+    pub(crate) fn is_explicit_null_only(&self) -> bool {
         match self {
-            Schema::AllOf { all_of, .. } => all_of.len(),
-            _ => 0,
+            Schema::Typed { schema_type, .. } => *schema_type == SchemaType::Null,
+            Schema::TypedMulti { schema_types, .. } => {
+                !schema_types.is_empty()
+                    && schema_types
+                        .iter()
+                        .all(|schema_type| *schema_type == SchemaType::Null)
+            }
+            Schema::Untyped { details } => {
+                details.const_value.as_ref().is_some_and(Value::is_null)
+                    || details.enum_values.as_ref().is_some_and(
+                        |values| matches!(values.as_slice(), [value] if value.is_null()),
+                    )
+            }
+            _ => false,
         }
     }
 
@@ -937,7 +1021,9 @@ impl Schema {
             Schema::TypedMulti { .. } => self.schema_type().cloned(),
             Schema::Untyped { details } => {
                 // Infer from structure
-                if details.properties.is_some() {
+                if self.is_explicit_null_only() {
+                    Some(SchemaType::Null)
+                } else if details.properties.is_some() {
                     Some(SchemaType::Object)
                 } else if details.items.is_some() || details.prefix_items.is_some() {
                     Some(SchemaType::Array)
@@ -956,12 +1042,12 @@ impl SchemaDetails {
     /// The schema every array element must satisfy, i.e. `items` in its
     /// 2020-12 single-schema spelling. Returns `None` for the draft-04 tuple
     /// form, which constrains positions rather than every element — read that
-    /// through [`Self::positional_items`] — and for a boolean schema, which
-    /// constrains nothing worth typing.
+    /// through [`Self::positional_items`]. A boolean schema is a schema like
+    /// any other here: `items: true` accepts every element.
     pub fn item_schema(&self) -> Option<&Schema> {
         match self.items.as_ref()? {
             Items::Single(schema) => Some(schema),
-            Items::Positional(_) | Items::Bool(_) => None,
+            Items::Positional(_) => None,
         }
     }
 
@@ -973,7 +1059,7 @@ impl SchemaDetails {
         }
         match self.items.as_ref()? {
             Items::Positional(schemas) => Some(schemas),
-            Items::Single(_) | Items::Bool(_) => None,
+            Items::Single(_) => None,
         }
     }
 
@@ -986,7 +1072,12 @@ impl SchemaDetails {
         let Some(positions) = self.positional_items() else {
             return false;
         };
-        if matches!(self.items, Some(Items::Bool(false))) {
+        // `items: false` — no element beyond the positions may exist. It is a
+        // boolean schema in the ordinary single-schema slot.
+        if matches!(
+            self.items.as_ref(),
+            Some(Items::Single(schema)) if matches!(**schema, Schema::Bool(false))
+        ) {
             return true;
         }
         if self.extra.get("additionalItems") == Some(&Value::Bool(false)) {
@@ -1663,6 +1754,141 @@ mod tests {
         assert!(schema.is_nullable_pattern());
         let non_null = schema.non_null_variant().unwrap();
         assert!(non_null.is_reference());
+    }
+
+    #[test]
+    fn explicit_null_only_branches_are_order_independent_nullable_patterns() {
+        for union_keyword in ["anyOf", "oneOf"] {
+            for null_schema in [
+                json!({"type": "null"}),
+                json!({"type": ["null"]}),
+                json!({"const": null}),
+                json!({"enum": [null]}),
+            ] {
+                for variants in [
+                    vec![
+                        json!({"$ref": "#/components/schemas/User"}),
+                        null_schema.clone(),
+                    ],
+                    vec![
+                        null_schema.clone(),
+                        json!({"$ref": "#/components/schemas/User"}),
+                    ],
+                ] {
+                    let schema: Schema = serde_json::from_value(json!({
+                        (union_keyword): variants,
+                    }))
+                    .unwrap();
+                    let non_null = schema.non_null_variant().unwrap_or_else(|| {
+                        panic!("{union_keyword} must recognize {null_schema} as null-only")
+                    });
+                    assert_eq!(
+                        non_null.reference(),
+                        Some("#/components/schemas/User"),
+                        "{union_keyword} with {null_schema}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_schemas_are_real_union_branches_even_beside_references() {
+        for union_keyword in ["anyOf", "oneOf"] {
+            for nullable_branch in [
+                json!({"nullable": true}),
+                json!({"type": "object", "nullable": true}),
+                json!({
+                    "$ref": "#/components/schemas/Other",
+                    "nullable": true
+                }),
+            ] {
+                for variants in [
+                    vec![
+                        json!({"$ref": "#/components/schemas/User"}),
+                        nullable_branch.clone(),
+                    ],
+                    vec![
+                        nullable_branch.clone(),
+                        json!({"$ref": "#/components/schemas/User"}),
+                    ],
+                ] {
+                    let schema: Schema = serde_json::from_value(json!({
+                        (union_keyword): variants,
+                    }))
+                    .unwrap();
+                    assert!(
+                        schema.non_null_variant().is_none(),
+                        "{union_keyword} must preserve nullable branch {nullable_branch}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reference_sibling_nullable_annotation_is_not_lost() {
+        for reference_keyword in ["$ref", "$recursiveRef", "$dynamicRef"] {
+            let nullable: Schema = serde_json::from_value(json!({
+                (reference_keyword): "#/components/schemas/Value",
+                "nullable": true,
+                "description": "retained sibling"
+            }))
+            .unwrap();
+            assert!(
+                nullable.is_nullable_any(),
+                "{reference_keyword} should retain nullable:true"
+            );
+
+            let non_nullable: Schema = serde_json::from_value(json!({
+                (reference_keyword): "#/components/schemas/Value",
+                "nullable": false
+            }))
+            .unwrap();
+            assert!(
+                !non_nullable.is_nullable_any(),
+                "{reference_keyword} nullable:false must stay non-nullable"
+            );
+        }
+    }
+
+    #[test]
+    fn null_only_enum_and_const_infer_null_instead_of_string() {
+        for source in [json!({"enum": [null]}), json!({"const": null})] {
+            let schema: Schema = serde_json::from_value(source.clone()).unwrap();
+            assert_eq!(schema.inferred_type(), Some(SchemaType::Null), "{source}");
+        }
+
+        for source in [
+            json!({"enum": ["null"]}),
+            json!({"enum": ["ready", null]}),
+            json!({"type": "string", "enum": ["ready"]}),
+        ] {
+            let schema: Schema = serde_json::from_value(source.clone()).unwrap();
+            assert_ne!(schema.inferred_type(), Some(SchemaType::Null), "{source}");
+        }
+    }
+
+    #[test]
+    fn three_branch_unions_do_not_collapse_even_with_an_explicit_null() {
+        for union_keyword in ["anyOf", "oneOf"] {
+            let schema: Schema = serde_json::from_value(json!({
+                (union_keyword): [
+                    {"$ref": "#/components/schemas/User"},
+                    {"type": "null"},
+                    {"type": "array", "items": {"type": "string"}}
+                ],
+            }))
+            .unwrap();
+            assert!(
+                schema.non_null_variant().is_none(),
+                "{union_keyword} with three branches must retain its non-null union"
+            );
+            assert!(
+                schema.is_nullable_any(),
+                "{union_keyword} with an explicit null branch must remain nullable"
+            );
+        }
     }
 
     #[test]

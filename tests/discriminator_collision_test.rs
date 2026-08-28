@@ -17,7 +17,7 @@ fn generate(schemas: Value) -> String {
 }
 
 #[test]
-fn repeated_implicit_discriminator_values_fall_back_to_untagged_union() {
+fn repeated_implicit_discriminator_values_use_lossless_anyof_dispatch() {
     let generated = generate(json!({
         "GlobalEvent": {
             "type": "object",
@@ -65,15 +65,20 @@ fn repeated_implicit_discriminator_values_fall_back_to_untagged_union() {
         }
     }));
 
-    assert!(generated.contains("#[serde(untagged)]\npub enum GlobalEventPayload"));
+    assert!(generated.contains("pub enum GlobalEventPayload"));
+    assert!(generated.contains("impl<'de> Deserialize<'de> for GlobalEventPayload"));
+    assert!(generated.contains("preserves_complete_json_input"));
+    assert!(!generated.contains("#[serde(untagged)]\npub enum GlobalEventPayload"));
     assert!(!generated.contains("#[serde(tag = \"type\")]\npub enum GlobalEventPayload"));
     assert_eq!(generated.matches("#[serde(rename = \"sync\")]").count(), 2);
-    assert!(generated.contains("pub r#type: SyncEventSessionCreatedTypeSync"));
-    assert!(generated.contains("pub r#type: SyncEventSessionUpdatedTypeSync"));
+    assert!(generated.contains("pub r#type: SyncEventSessionCreatedType"));
+    assert!(generated.contains("pub r#type: SyncEventSessionUpdatedType"));
+    assert!(generated.contains("#[serde(rename = \"session.created.1\")]"));
+    assert!(generated.contains("#[serde(rename = \"session.updated.1\")]"));
 }
 
 #[test]
-fn unique_implicit_discriminator_values_still_generate_tagged_union() {
+fn unique_implicit_discriminator_values_still_generate_discriminated_union() {
     let generated = generate(json!({
         "Event": {
             "anyOf": [
@@ -99,6 +104,9 @@ fn unique_implicit_discriminator_values_still_generate_tagged_union() {
         }
     }));
 
-    assert!(generated.contains("#[serde(tag = \"type\")]\npub enum Event"));
+    assert!(generated.contains("pub enum Event"));
+    assert!(generated.contains("match discriminator"));
+    assert!(generated.contains("Some(discriminator)"));
+    assert!(generated.contains("unknown discriminator value"));
     assert!(!generated.contains("#[serde(untagged)]\npub enum Event"));
 }

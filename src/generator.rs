@@ -1,4 +1,8 @@
-use crate::{GeneratorError, Result, analysis::SchemaAnalysis, streaming::StreamingConfig};
+use crate::{
+    GeneratorError, Result,
+    analysis::{SchemaAnalysis, SchemaType},
+    streaming::StreamingConfig,
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::BTreeMap;
@@ -84,18 +88,7 @@ fn strip_trailing_zero(v: f64) -> String {
     }
 }
 
-/// Info about schemas that are variants in discriminated unions
-#[derive(Clone)]
-pub(crate) struct DiscriminatedVariantInfo {
-    /// The discriminator field name (e.g., "type")
-    pub(crate) discriminator_field: String,
-    /// The const value of the discriminator (e.g., "text")
-    pub(crate) discriminator_value: String,
-    /// Whether the parent union is untagged
-    pub(crate) is_parent_untagged: bool,
-}
-
-/// One object property after discriminator filtering and Rust-identifier
+/// One object property after Rust-identifier
 /// disambiguation. Struct fields, request-model constructors, and builders
 /// all consume this shared projection so their names and types cannot drift.
 pub(crate) struct EmittedObjectProperty<'a> {
@@ -115,7 +108,6 @@ struct TypeGenerationIndex {
 }
 
 struct TypeGenerationContext<'a> {
-    discriminated_variants: &'a BTreeMap<String, DiscriminatedVariantInfo>,
     index: &'a TypeGenerationIndex,
 }
 
@@ -395,6 +387,37 @@ fn untyped_tokens(shape: crate::analysis::UntypedShape) -> TokenStream {
     }
 }
 
+fn schema_type_uses_serde_codec(schema_type: &SchemaType, codec: &str) -> bool {
+    match schema_type {
+        SchemaType::Primitive {
+            serde_with: Some(actual),
+            ..
+        } => actual == codec,
+        SchemaType::Object {
+            properties,
+            additional_properties,
+            ..
+        } => {
+            properties
+                .values()
+                .any(|property| schema_type_uses_serde_codec(&property.schema_type, codec))
+                || matches!(
+                    additional_properties,
+                    crate::analysis::ObjectAdditionalProperties::Typed { value_type }
+                        if schema_type_uses_serde_codec(value_type, codec)
+                )
+        }
+        SchemaType::Array { item_type }
+        | SchemaType::Nullable {
+            inner_type: item_type,
+        } => schema_type_uses_serde_codec(item_type, codec),
+        SchemaType::Tuple { element_types } => element_types
+            .iter()
+            .any(|element| schema_type_uses_serde_codec(element, codec)),
+        _ => false,
+    }
+}
+
 impl CodeGenerator {
     pub fn new(config: GeneratorConfig) -> Self {
         Self {
@@ -542,53 +565,8 @@ impl CodeGenerator {
         let provenance_attribute = self.provenance_attribute();
         let mut type_definitions = TokenStream::new();
 
-        // Collect all schemas that are used as variants in discriminated unions
-        // Only include direct references, not schemas wrapped in allOf
-        let mut discriminated_variant_info: BTreeMap<String, DiscriminatedVariantInfo> =
-            BTreeMap::new();
-
-        // Sort schemas for deterministic processing
-        let mut sorted_schemas: Vec<_> = analysis.schemas.iter().collect();
-        sorted_schemas.sort_by_key(|(name, _)| name.as_str());
-
-        for (_parent_name, schema) in sorted_schemas {
-            if let crate::analysis::SchemaType::DiscriminatedUnion {
-                variants,
-                discriminator_field,
-            } = &schema.schema_type
-            {
-                // Check if this discriminated union will be generated as untagged
-                let is_parent_untagged =
-                    self.should_use_untagged_discriminated_union(schema, analysis);
-
-                for variant in variants {
-                    // Only add if it's a direct reference to a schema that will have the discriminator field
-                    // Check if the schema exists and has the discriminator field as a property
-                    if let Some(variant_schema) = analysis.schemas.get(&variant.type_name) {
-                        if let crate::analysis::SchemaType::Object { properties, .. } =
-                            &variant_schema.schema_type
-                        {
-                            if properties.contains_key(discriminator_field) {
-                                discriminated_variant_info.insert(
-                                    variant.type_name.clone(),
-                                    DiscriminatedVariantInfo {
-                                        discriminator_field: discriminator_field.clone(),
-                                        discriminator_value: variant.discriminator_value.clone(),
-                                        is_parent_untagged,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         let type_index = self.type_generation_index(analysis);
-        let type_context = TypeGenerationContext {
-            discriminated_variants: &discriminated_variant_info,
-            index: &type_index,
-        };
+        let type_context = TypeGenerationContext { index: &type_index };
 
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
@@ -621,10 +599,63 @@ impl CodeGenerator {
             }
         }
 
+        let mut uses_plain_tri_state = false;
+        let mut tri_state_codecs = std::collections::HashSet::new();
+        for (schema_name, schema) in &analysis.schemas {
+            let crate::analysis::SchemaType::Object {
+                properties,
+                required,
+                ..
+            } = &schema.schema_type
+            else {
+                continue;
+            };
+            for (field_name, property) in properties {
+                if !self.property_is_tri_state(
+                    schema_name,
+                    field_name,
+                    property,
+                    required.contains(field_name),
+                ) {
+                    continue;
+                }
+                if let Some(codec) = self.schema_type_serde_codec(&property.schema_type, analysis) {
+                    tri_state_codecs.insert(codec);
+                } else {
+                    uses_plain_tri_state = true;
+                }
+            }
+        }
+
         // Helper modules emitted only when the analyzer actually
         // referenced their codecs. Avoids polluting every generated
         // file (and every snapshot) with dead code for specs that
         // don't use `format: byte`.
+        let base64_double_option = if tri_state_codecs.contains("base64_serde") {
+            quote! {
+                pub mod double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<Vec<u8>>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => super::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<Vec<u8>>>, D::Error> {
+                        super::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let base64_helper = if analysis
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::Base64)
@@ -691,6 +722,190 @@ impl CodeGenerator {
                             .transpose()
                         }
                     }
+
+                    #base64_double_option
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let uses_binary_bytes_codec = analysis
+            .schemas
+            .values()
+            .any(|schema| schema_type_uses_serde_codec(&schema.schema_type, "binary_bytes_serde"));
+        let binary_bytes_double_option = if tri_state_codecs.contains("binary_bytes_serde") {
+            quote! {
+                pub mod double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<bytes::Bytes>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => super::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<bytes::Bytes>>, D::Error> {
+                        super::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+        let binary_bytes_helper = if uses_binary_bytes_codec {
+            quote! {
+                /// UTF-8 JSON string codec for `bytes::Bytes` model fields
+                /// produced from `format: binary`. Raw HTTP body and multipart
+                /// paths use their byte carriers directly and do not invoke it.
+                mod binary_bytes_serde {
+                    use serde::{Deserialize, Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        bytes: &bytes::Bytes,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        let value = std::str::from_utf8(bytes.as_ref())
+                            .map_err(serde::ser::Error::custom)?;
+                        ser.serialize_str(value)
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<bytes::Bytes, D::Error> {
+                        String::deserialize(de).map(bytes::Bytes::from)
+                    }
+
+                    pub mod option {
+                        use serde::{Deserialize, Deserializer, Serializer};
+
+                        pub fn serialize<S: Serializer>(
+                            value: &Option<bytes::Bytes>,
+                            ser: S,
+                        ) -> Result<S::Ok, S::Error> {
+                            match value {
+                                Some(bytes) => super::serialize(bytes, ser),
+                                None => ser.serialize_none(),
+                            }
+                        }
+
+                        pub fn deserialize<'de, D: Deserializer<'de>>(
+                            de: D,
+                        ) -> Result<Option<bytes::Bytes>, D::Error> {
+                            Option::<String>::deserialize(de)
+                                .map(|value| value.map(bytes::Bytes::from))
+                        }
+                    }
+
+                    #binary_bytes_double_option
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let uses_binary_vec_codec = analysis
+            .schemas
+            .values()
+            .any(|schema| schema_type_uses_serde_codec(&schema.schema_type, "binary_vec_serde"));
+        let binary_vec_double_option = if tri_state_codecs.contains("binary_vec_serde") {
+            quote! {
+                /// Preserve the distinction between an omitted field and an
+                /// explicit JSON null while retaining the binary codec.
+                pub mod double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<Vec<u8>>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => super::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<Vec<u8>>>, D::Error> {
+                        super::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+        let binary_vec_helper = if uses_binary_vec_codec {
+            quote! {
+                /// UTF-8 JSON string codec for `Vec<u8>` model fields produced
+                /// from `format: binary` under the vec_u8 strategy.
+                mod binary_vec_serde {
+                    use serde::{Deserialize, Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        bytes: &Vec<u8>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        let value = std::str::from_utf8(bytes)
+                            .map_err(serde::ser::Error::custom)?;
+                        ser.serialize_str(value)
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Vec<u8>, D::Error> {
+                        String::deserialize(de).map(String::into_bytes)
+                    }
+
+                    pub mod option {
+                        use serde::{Deserialize, Deserializer, Serializer};
+
+                        pub fn serialize<S: Serializer>(
+                            value: &Option<Vec<u8>>,
+                            ser: S,
+                        ) -> Result<S::Ok, S::Error> {
+                            match value {
+                                Some(bytes) => super::serialize(bytes, ser),
+                                None => ser.serialize_none(),
+                            }
+                        }
+
+                        pub fn deserialize<'de, D: Deserializer<'de>>(
+                            de: D,
+                        ) -> Result<Option<Vec<u8>>, D::Error> {
+                            Option::<String>::deserialize(de)
+                                .map(|value| value.map(String::into_bytes))
+                        }
+                    }
+
+                    #binary_vec_double_option
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let tri_state_helper = if uses_plain_tri_state {
+            quote! {
+                /// Serde normally maps both a missing `Option<T>` field and an
+                /// explicit JSON null to `None`. Wrapping the decoded value in
+                /// `Some` retains the field-presence bit for `Option<Option<T>>`.
+                mod tri_state_serde {
+                    use serde::{Deserialize, Deserializer};
+
+                    pub fn deserialize<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+                    where
+                        D: Deserializer<'de>,
+                        T: Deserialize<'de>,
+                    {
+                        T::deserialize(de).map(Some)
+                    }
                 }
             }
         } else {
@@ -703,6 +918,31 @@ impl CodeGenerator {
         // the `format_description!` macro. It expands to a module
         // (with an `::option` submodule) referenced from fields as
         // `#[serde(with = "time_date_format")]` etc.
+        let time_date_double_option = if tri_state_codecs.contains("time_date_format") {
+            quote! {
+                mod time_date_double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<time::Date>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => time_date_format::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<time::Date>>, D::Error> {
+                        time_date_format::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let time_date_helper = if analysis
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::TimeDate)
@@ -713,6 +953,8 @@ impl CodeGenerator {
                     Date,
                     "[year]-[month]-[day]"
                 );
+
+                #time_date_double_option
             }
         } else {
             TokenStream::new()
@@ -722,6 +964,31 @@ impl CodeGenerator {
         // format their contents, so whole seconds serialize with a
         // trailing ".0" — in exchange, parsing accepts inputs both
         // with and without fractional seconds.
+        let time_time_double_option = if tri_state_codecs.contains("time_time_format") {
+            quote! {
+                mod time_time_double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<time::Time>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => time_time_format::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<time::Time>>, D::Error> {
+                        time_time_format::option::deserialize(de).map(Some)
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let time_time_helper = if analysis
             .used_type_features
             .contains(crate::type_mapping::TypeFeature::TimeTime)
@@ -733,6 +1000,35 @@ impl CodeGenerator {
                     Time,
                     "[hour]:[minute]:[second][optional [.[subsecond]]]"
                 );
+
+                #time_time_double_option
+            }
+        } else {
+            TokenStream::new()
+        };
+
+        let time_rfc3339_double_option_helper = if tri_state_codecs.contains("time::serde::rfc3339")
+        {
+            quote! {
+                mod time_rfc3339_double_option {
+                    use serde::{Deserializer, Serializer};
+
+                    pub fn serialize<S: Serializer>(
+                        value: &Option<Option<time::OffsetDateTime>>,
+                        ser: S,
+                    ) -> Result<S::Ok, S::Error> {
+                        match value {
+                            Some(value) => time::serde::rfc3339::option::serialize(value, ser),
+                            None => ser.serialize_none(),
+                        }
+                    }
+
+                    pub fn deserialize<'de, D: Deserializer<'de>>(
+                        de: D,
+                    ) -> Result<Option<Option<time::OffsetDateTime>>, D::Error> {
+                        time::serde::rfc3339::option::deserialize(de).map(Some)
+                    }
+                }
             }
         } else {
             TokenStream::new()
@@ -756,9 +1052,17 @@ impl CodeGenerator {
 
             #base64_helper
 
+            #binary_bytes_helper
+
+            #binary_vec_helper
+
+            #tri_state_helper
+
             #time_date_helper
 
             #time_time_helper
+
+            #time_rfc3339_double_option_helper
 
             #type_definitions
         };
@@ -1490,6 +1794,7 @@ impl CodeGenerator {
             SchemaType::DiscriminatedUnion {
                 discriminator_field,
                 variants,
+                exclusive,
             } => {
                 // Check if this discriminated union should be untagged due to being nested
                 if self.should_use_untagged_discriminated_union(schema, analysis) {
@@ -1501,17 +1806,21 @@ impl CodeGenerator {
                             nullable: false,
                         })
                         .collect();
-                    self.generate_union_enum(schema, &schema_refs, analysis)
+                    self.generate_union_enum(schema, &schema_refs, *exclusive, analysis)
                 } else {
                     self.generate_discriminated_enum(
                         schema,
                         discriminator_field,
                         variants,
+                        *exclusive,
                         analysis,
                     )
                 }
             }
-            SchemaType::Union { variants } => self.generate_union_enum(schema, variants, analysis),
+            SchemaType::Union {
+                variants,
+                exclusive,
+            } => self.generate_union_enum(schema, variants, *exclusive, analysis),
             SchemaType::Reference { target } => {
                 // For references, check if we need to generate a type alias
                 // This handles cases like nullable patterns
@@ -1555,46 +1864,7 @@ impl CodeGenerator {
             SchemaType::Array { item_type } => {
                 // Generate type alias for named array schemas.
                 //
-                // Special case: if the array item is a struct whose discriminator
-                // field was stripped (because it's used in a tagged enum), the bare
-                // struct won't serialize the discriminator in standalone contexts.
-                // Generate a single-variant tagged wrapper enum so the discriminator
-                // field is re-added by serde's tag attribute.
                 let array_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
-
-                // Check if the item type is a Reference to a discriminator-stripped struct
-                if let SchemaType::Reference { target } = item_type.as_ref() {
-                    if let Some(info) = type_context.discriminated_variants.get(target) {
-                        if !info.is_parent_untagged {
-                            // Generate a wrapper enum that re-adds the discriminator tag
-                            let wrapper_name =
-                                format_ident!("{}Item", self.to_rust_type_name(&schema.name));
-                            let variant_type = format_ident!("{}", self.to_rust_type_name(target));
-                            let disc_field = &info.discriminator_field;
-                            let disc_value = &info.discriminator_value;
-
-                            let doc_comment = if let Some(desc) = &schema.description {
-                                quote! { #[doc = #desc] }
-                            } else {
-                                TokenStream::new()
-                            };
-
-                            return Ok(quote! {
-                                /// Wrapper enum that re-adds the discriminator tag
-                                /// for array contexts where the inner struct had its
-                                /// discriminator field stripped for tagged enum use.
-                                #[derive(Debug, Clone, Deserialize, Serialize)]
-                                #[serde(tag = #disc_field)]
-                                pub enum #wrapper_name {
-                                    #[serde(rename = #disc_value)]
-                                    #variant_type(#variant_type),
-                                }
-                                #doc_comment
-                                pub type #array_name = Vec<#wrapper_name>;
-                            });
-                        }
-                    }
-                }
 
                 let inner_type = self.generate_array_item_type(item_type, analysis);
 
@@ -1607,6 +1877,13 @@ impl CodeGenerator {
                 Ok(quote! {
                     #doc_comment
                     pub type #array_name = Vec<#inner_type>;
+                })
+            }
+            SchemaType::Nullable { inner_type } => {
+                let nullable_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
+                let inner_type = self.generate_array_item_type(inner_type, analysis);
+                Ok(quote! {
+                    pub type #nullable_name = Option<#inner_type>;
                 })
             }
             SchemaType::Composition { schemas } => {
@@ -1970,8 +2247,9 @@ impl CodeGenerator {
             required,
             additional_properties,
             analysis,
-            type_context.discriminated_variants.get(&schema.name),
         );
+        let variant_field_ident =
+            variant.map(|_| format_ident!("{}", self.variant_field_name(properties)));
 
         let mut fields: Vec<TokenStream> = emitted_properties
             .iter()
@@ -1980,14 +2258,18 @@ impl CodeGenerator {
                 let property = emitted.property;
                 let field_ident = &emitted.ident;
                 let field_type = &emitted.field_type;
-                let serde_attrs = self.generate_serde_field_attrs(
-                    &schema.name,
-                    field_name,
-                    field_ident,
-                    property,
-                    emitted.is_required,
-                    analysis,
-                );
+                let serde_attrs = if variant.is_none() {
+                    self.generate_serde_field_attrs(
+                        &schema.name,
+                        field_name,
+                        field_ident,
+                        property,
+                        emitted.is_required,
+                        analysis,
+                    )
+                } else {
+                    TokenStream::new()
+                };
                 let specta_attrs = self.generate_specta_field_attrs(field_name);
 
                 let doc_comment = if let Some(desc) = &property.description {
@@ -2016,19 +2298,29 @@ impl CodeGenerator {
         match additional_properties {
             crate::analysis::ObjectAdditionalProperties::Forbidden => {}
             crate::analysis::ObjectAdditionalProperties::Untyped => {
+                let serde_flatten = if variant.is_none() {
+                    quote! { #[serde(flatten)] }
+                } else {
+                    TokenStream::new()
+                };
                 fields.push(quote! {
                     /// Additional properties not explicitly defined in the schema
-                    #[serde(flatten)]
+                    #serde_flatten
                     pub additional_properties:
                         std::collections::BTreeMap<String, serde_json::Value>,
                 });
             }
             crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
                 let value_tokens = self.generate_array_item_type(value_type, analysis);
+                let serde_flatten = if variant.is_none() {
+                    quote! { #[serde(flatten)] }
+                } else {
+                    TokenStream::new()
+                };
                 fields.push(quote! {
                     /// Additional properties matching the spec's
                     /// `additionalProperties` value schema.
-                    #[serde(flatten)]
+                    #serde_flatten
                     pub additional_properties:
                         std::collections::BTreeMap<String, #value_tokens>,
                 });
@@ -2039,12 +2331,10 @@ impl CodeGenerator {
         // fields, and one of these shapes". The union rides in a flattened
         // field so both halves round-trip: serde reads the declared properties
         // and hands the remaining keys to the variant enum.
-        if let Some(variant) = variant {
+        if let (Some(variant), Some(variant_field)) = (variant, variant_field_ident.as_ref()) {
             let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
-            let variant_field = format_ident!("{}", self.variant_field_name(properties));
             fields.push(quote! {
                 /// The variant this value takes, alongside the fields above.
-                #[serde(flatten)]
                 pub #variant_field: #variant_type,
             });
         }
@@ -2055,36 +2345,205 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Default is safe only when no emitted wire property is required.
+        // Default is safe only when the schema requires no wire property.
         // Optional fields are represented as Option<T>, and the generated
         // additional-properties map (when present) is empty by default. We do
         // not invent values for required data, even when the Rust type itself
         // happens to implement Default.
         // A flattened variant is one of several shapes, and picking one would
         // invent data the same way a required field would.
-        let can_derive_default = variant.is_none()
-            && emitted_properties
-                .iter()
-                .all(|property| !property.is_required);
+        let can_derive_default = variant.is_none() && required.is_empty();
 
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
         // between Rust, JSON API, and TypeScript
-        let derives = match (self.config.enable_specta, can_derive_default) {
-            (true, true) => quote! {
+        let derives = match (
+            self.config.enable_specta,
+            can_derive_default,
+            variant.is_some(),
+        ) {
+            (true, _, true) => quote! {
+                #[derive(Debug, Clone)]
+                #[cfg_attr(feature = "specta", derive(specta::Type))]
+            },
+            (false, _, true) => quote! {
+                #[derive(Debug, Clone)]
+            },
+            (true, true, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
-            (true, false) => quote! {
+            (true, false, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
-            (false, true) => quote! {
+            (false, true, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
             },
-            (false, false) => quote! {
+            (false, false, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
             },
+        };
+
+        // `#[serde(flatten)]` removes keys already consumed by sibling fields
+        // before it invokes the flattened value's deserializer. That is wrong
+        // for a sibling-property + oneOf schema when both halves intentionally
+        // share the discriminator. Decode both halves from the complete JSON
+        // object, and merge their serialized maps with duplicate-value checks.
+        let shared_variant_serde = if let (Some(variant), Some(variant_field)) =
+            (variant, variant_field_ident.as_ref())
+        {
+            let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
+            let helper_name = format_ident!("__{}Base", self.to_rust_type_name(&schema.name));
+            let variant_properties = self.union_declared_properties(
+                &variant.target,
+                analysis,
+                &mut std::collections::HashSet::new(),
+            );
+            let variant_projection_removals = emitted_properties
+                .iter()
+                .filter(|emitted| !variant_properties.contains(emitted.wire_name))
+                .map(|emitted| {
+                    let wire_name = emitted.wire_name;
+                    quote! { object.remove(#wire_name); }
+                })
+                .collect::<Vec<_>>();
+            let mut helper_fields: Vec<TokenStream> = emitted_properties
+                .iter()
+                .map(|emitted| {
+                    let field_name = emitted.wire_name;
+                    let property = emitted.property;
+                    let field_ident = &emitted.ident;
+                    let field_type = &emitted.field_type;
+                    let serde_attrs = self.generate_serde_field_attrs(
+                        &schema.name,
+                        field_name,
+                        field_ident,
+                        property,
+                        emitted.is_required,
+                        analysis,
+                    );
+                    quote! {
+                        #serde_attrs
+                        #field_ident: #field_type,
+                    }
+                })
+                .collect();
+            let mut base_initializers: Vec<TokenStream> = emitted_properties
+                .iter()
+                .map(|emitted| {
+                    let field_ident = &emitted.ident;
+                    quote! { #field_ident: self.#field_ident.clone(), }
+                })
+                .collect();
+            let mut result_fields: Vec<TokenStream> = emitted_properties
+                .iter()
+                .map(|emitted| {
+                    let field_ident = &emitted.ident;
+                    quote! { #field_ident: base.#field_ident, }
+                })
+                .collect();
+
+            match additional_properties {
+                crate::analysis::ObjectAdditionalProperties::Forbidden => {}
+                crate::analysis::ObjectAdditionalProperties::Untyped => {
+                    helper_fields.push(quote! {
+                        #[serde(flatten)]
+                        additional_properties:
+                            std::collections::BTreeMap<String, serde_json::Value>,
+                    });
+                    base_initializers.push(quote! {
+                        additional_properties: self.additional_properties.clone(),
+                    });
+                    result_fields.push(quote! {
+                        additional_properties: base.additional_properties,
+                    });
+                }
+                crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
+                    let value_tokens = self.generate_array_item_type(value_type, analysis);
+                    helper_fields.push(quote! {
+                        #[serde(flatten)]
+                        additional_properties:
+                            std::collections::BTreeMap<String, #value_tokens>,
+                    });
+                    base_initializers.push(quote! {
+                        additional_properties: self.additional_properties.clone(),
+                    });
+                    result_fields.push(quote! {
+                        additional_properties: base.additional_properties,
+                    });
+                }
+            }
+
+            quote! {
+                #[derive(Deserialize, Serialize)]
+                struct #helper_name {
+                    #(#helper_fields)*
+                }
+
+                impl serde::Serialize for #struct_name {
+                    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        let base = #helper_name {
+                            #(#base_initializers)*
+                        };
+                        let mut value = serde_json::to_value(base)
+                            .map_err(serde::ser::Error::custom)?;
+                        let variant = serde_json::to_value(&self.#variant_field)
+                            .map_err(serde::ser::Error::custom)?;
+                        let object = value.as_object_mut().ok_or_else(|| {
+                            serde::ser::Error::custom("shared union base did not serialize as an object")
+                        })?;
+                        let variant_object = variant.as_object().ok_or_else(|| {
+                            serde::ser::Error::custom("shared union variant did not serialize as an object")
+                        })?;
+                        for (key, variant_value) in variant_object {
+                            if let Some(base_value) = object.get(key)
+                                && base_value != variant_value
+                            {
+                                return Err(serde::ser::Error::custom(format!(
+                                    "shared union field `{key}` serialized conflicting values",
+                                )));
+                            }
+                            object.insert(key.clone(), variant_value.clone());
+                        }
+                        serde::Serialize::serialize(&value, serializer)
+                    }
+                }
+
+                impl<'de> serde::Deserialize<'de> for #struct_name {
+                    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        let value = serde_json::Value::deserialize(deserializer)?;
+                        let base = serde_json::from_value::<#helper_name>(value.clone())
+                            .map_err(serde::de::Error::custom)?;
+                        let variant = match serde_json::from_value::<#variant_type>(value.clone()) {
+                            Ok(variant) => variant,
+                            Err(complete_error) => {
+                                let mut variant_input = value;
+                                if let Some(object) = variant_input.as_object_mut() {
+                                    #(#variant_projection_removals)*
+                                }
+                                serde_json::from_value::<#variant_type>(variant_input).map_err(
+                                    |projected_error| serde::de::Error::custom(format!(
+                                        "complete shared-union input failed: {complete_error}; projected input failed: {projected_error}",
+                                    )),
+                                )?
+                            }
+                        };
+                        Ok(Self {
+                            #(#result_fields)*
+                            #variant_field: variant,
+                        })
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
         };
 
         let builder = if type_context.index.request_body_roots.contains(&schema.name)
@@ -2117,6 +2576,7 @@ impl CodeGenerator {
                 #(#fields)*
             }
 
+            #shared_variant_serde
             #builder
         })
     }
@@ -2132,7 +2592,6 @@ impl CodeGenerator {
         required: &std::collections::HashSet<String>,
         additional_properties: &crate::analysis::ObjectAdditionalProperties,
         analysis: &crate::analysis::SchemaAnalysis,
-        discriminator_info: Option<&DiscriminatedVariantInfo>,
     ) -> Vec<EmittedObjectProperty<'a>> {
         let mut sorted_properties: Vec<_> = properties.iter().collect();
         sorted_properties.sort_by_key(|(name, _)| name.as_str());
@@ -2147,12 +2606,6 @@ impl CodeGenerator {
 
         let mut emitted = Vec::new();
         for (field_name, property) in sorted_properties {
-            if discriminator_info.is_some_and(|info| {
-                !info.is_parent_untagged && field_name.as_str() == info.discriminator_field.as_str()
-            }) {
-                continue;
-            }
-
             let raw = self.to_rust_field_name(field_name);
             let mut chosen = raw.clone();
             let mut suffix = 2;
@@ -2299,12 +2752,60 @@ impl CodeGenerator {
                 }
                 let setter_ident = Self::to_field_ident(&setter_name);
                 let wire_name = property.wire_name;
-                quote! {
-                    #[doc = concat!("Set the optional `", #wire_name, "` request field.")]
-                    #[must_use]
-                    pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
-                        self.value.#field_ident = Some(#field_ident);
-                        self
+                if self.property_is_tri_state(
+                    &schema.name,
+                    property.wire_name,
+                    property.property,
+                    property.is_required,
+                ) {
+                    let mut null_name = format!("{plain_field_name}_null");
+                    let null_base = null_name.clone();
+                    let mut suffix = 2;
+                    while !used_builder_methods.insert(null_name.clone()) {
+                        null_name = format!("{null_base}_{suffix}");
+                        suffix += 1;
+                    }
+                    let null_ident = Self::to_field_ident(&null_name);
+
+                    let mut absent_name = format!("{plain_field_name}_absent");
+                    let absent_base = absent_name.clone();
+                    let mut suffix = 2;
+                    while !used_builder_methods.insert(absent_name.clone()) {
+                        absent_name = format!("{absent_base}_{suffix}");
+                        suffix += 1;
+                    }
+                    let absent_ident = Self::to_field_ident(&absent_name);
+
+                    quote! {
+                        #[doc = concat!("Set the optional nullable `", #wire_name, "` request field to a value.")]
+                        #[must_use]
+                        pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
+                            self.value.#field_ident = Some(Some(#field_ident));
+                            self
+                        }
+
+                        #[doc = concat!("Set the optional nullable `", #wire_name, "` request field to JSON null.")]
+                        #[must_use]
+                        pub fn #null_ident(mut self) -> Self {
+                            self.value.#field_ident = Some(None);
+                            self
+                        }
+
+                        #[doc = concat!("Omit the optional nullable `", #wire_name, "` request field.")]
+                        #[must_use]
+                        pub fn #absent_ident(mut self) -> Self {
+                            self.value.#field_ident = None;
+                            self
+                        }
+                    }
+                } else {
+                    quote! {
+                        #[doc = concat!("Set the optional `", #wire_name, "` request field.")]
+                        #[must_use]
+                        pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
+                            self.value.#field_ident = Some(#field_ident);
+                            self
+                        }
                     }
                 }
             })
@@ -2393,6 +2894,7 @@ impl CodeGenerator {
         schema: &crate::analysis::AnalyzedSchema,
         discriminator_field: &str,
         variants: &[crate::analysis::UnionVariant],
+        exclusive: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
@@ -2419,33 +2921,212 @@ impl CodeGenerator {
                     nullable: false,
                 })
                 .collect();
-            return self.generate_union_enum(schema, &schema_refs, analysis);
+            return self.generate_union_enum(schema, &schema_refs, exclusive, analysis);
         }
 
         let enclosing = self.to_rust_type_name(&schema.name);
-        let enum_variants = variants.iter().map(|variant| {
-            let variant_name = format_ident!("{}", variant.rust_name);
-            let variant_value = &variant.discriminator_value;
-
-            let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.type_name));
-            // Box variant payloads that point at the enclosing enum or any
-            // schema in the analysis's recursive set, otherwise the enum has
-            // infinite size (E0072).
-            let payload = if self.to_rust_type_name(&variant.type_name) == enclosing
-                || analysis
-                    .dependencies
-                    .recursive_schemas
-                    .contains(&variant.type_name)
-            {
-                quote! { Box<#variant_type> }
+        let variant_shapes: Vec<_> = variants
+            .iter()
+            .map(|variant| {
+                let variant_name = format_ident!("{}", variant.rust_name);
+                let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.type_name));
+                // Box variant payloads that point at the enclosing enum or any
+                // schema in the analysis's recursive set, otherwise the enum has
+                // infinite size (E0072).
+                let payload = if self.to_rust_type_name(&variant.type_name) == enclosing
+                    || analysis
+                        .dependencies
+                        .recursive_schemas
+                        .contains(&variant.type_name)
+                {
+                    quote! { Box<#variant_type> }
+                } else {
+                    quote! { #variant_type }
+                };
+                (variant, variant_name, payload)
+            })
+            .collect();
+        let enum_variants = variant_shapes.iter().map(|(_, variant_name, payload)| {
+            quote! { #variant_name(#payload), }
+        });
+        let serialize_arms = variant_shapes.iter().map(|(variant, variant_name, _)| {
+            let canonical_value = &variant.discriminator_value;
+            let variant_values = &variant.discriminator_values;
+            let serialize_discriminator = if variant.discriminator_field_declared {
+                quote! {
+                    match object.get(#discriminator_field) {
+                        Some(serde_json::Value::String(tag))
+                            if matches!(tag.as_str(), #(#variant_values)|*) => {}
+                        Some(serde_json::Value::String(tag)) => {
+                            return Err(serde::ser::Error::custom(format!(
+                                "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                #discriminator_field,
+                                stringify!(#variant_name),
+                            )));
+                        }
+                        Some(_) => {
+                            return Err(serde::ser::Error::custom(concat!(
+                                "discriminator `",
+                                #discriminator_field,
+                                "` did not serialize as a string",
+                            )));
+                        }
+                        None => {
+                            object.insert(
+                                #discriminator_field.to_string(),
+                                serde_json::Value::String(#canonical_value.to_string()),
+                            );
+                        }
+                    }
+                }
             } else {
-                quote! { #variant_type }
+                TokenStream::new()
             };
             quote! {
-                #[serde(rename = #variant_value)]
-                #variant_name(#payload),
+                Self::#variant_name(payload) => {
+                    let mut value = serde_json::to_value(payload)
+                        .map_err(serde::ser::Error::custom)?;
+                    let object = value.as_object_mut().ok_or_else(|| {
+                        serde::ser::Error::custom(concat!(
+                            "discriminated union variant `",
+                            stringify!(#variant_name),
+                            "` did not serialize as an object",
+                        ))
+                    })?;
+                    #serialize_discriminator
+                    value.serialize(serializer)
+                }
             }
         });
+        let mut deserialize_arms = Vec::new();
+        for (primary_index, (variant, variant_name, payload)) in variant_shapes.iter().enumerate() {
+            for tag in &variant.preferred_discriminator_values {
+                let fallback_attempts = variant_shapes.iter().enumerate().filter_map(
+                    |(fallback_index, (_, fallback_name, fallback_payload))| {
+                        if fallback_index == primary_index {
+                            return None;
+                        }
+                        if exclusive {
+                            Some(quote! {
+                                if let Ok(payload) =
+                                    serde_json::from_value::<#fallback_payload>(value.clone())
+                                {
+                                    if let Some((_, first_name)) = &structural_match {
+                                        return Err(serde::de::Error::custom(format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            #discriminator_field,
+                                            #tag,
+                                            first_name,
+                                            stringify!(#fallback_name),
+                                        )));
+                                    }
+                                    structural_match = Some((
+                                        Self::#fallback_name(payload),
+                                        stringify!(#fallback_name),
+                                    ));
+                                }
+                            })
+                        } else {
+                            Some(quote! {
+                                if let Ok(payload) =
+                                    serde_json::from_value::<#fallback_payload>(value.clone())
+                                {
+                                    return Ok(Self::#fallback_name(payload));
+                                }
+                            })
+                        }
+                    },
+                );
+                let structural_fallback = if exclusive {
+                    quote! {
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        #(#fallback_attempts)*
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                } else {
+                    quote! {
+                        #(#fallback_attempts)*
+                        Err(serde::de::Error::custom(primary_error))
+                    }
+                };
+                deserialize_arms.push(quote! {
+                    #tag => {
+                        let primary_error = match serde_json::from_value::<#payload>(value.clone()) {
+                            Ok(payload) => return Ok(Self::#variant_name(payload)),
+                            Err(error) => error,
+                        };
+                        #structural_fallback
+                    }
+                });
+            }
+        }
+        let missing_discriminator_attempts = variant_shapes.iter().filter_map(
+            |(variant, variant_name, payload)| {
+                if variant.discriminator_field_required {
+                    return None;
+                }
+                if exclusive {
+                    Some(quote! {
+                        if let Ok(payload) = serde_json::from_value::<#payload>(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(serde::de::Error::custom(format!(
+                                    "missing discriminator `{}` structurally matched both `{}` and `{}`",
+                                    #discriminator_field,
+                                    first_name,
+                                    stringify!(#variant_name),
+                                )));
+                            }
+                            structural_match = Some((
+                                Self::#variant_name(payload),
+                                stringify!(#variant_name),
+                            ));
+                        }
+                    })
+                } else {
+                    Some(quote! {
+                        if let Ok(payload) = serde_json::from_value::<#payload>(value.clone()) {
+                            return Ok(Self::#variant_name(payload));
+                        }
+                    })
+                }
+            },
+        );
+        let has_missing_discriminator_candidates = variants
+            .iter()
+            .any(|variant| !variant.discriminator_field_required);
+        let missing_discriminator_fallback = if has_missing_discriminator_candidates && exclusive {
+            quote! {
+                let mut structural_match: Option<(Self, &'static str)> = None;
+                #(#missing_discriminator_attempts)*
+                structural_match
+                    .map(|(payload, _)| payload)
+                    .ok_or_else(|| serde::de::Error::custom(concat!(
+                        "missing string discriminator `",
+                        #discriminator_field,
+                        "` and no tagless branch matched",
+                    )))
+            }
+        } else if has_missing_discriminator_candidates {
+            quote! {
+                #(#missing_discriminator_attempts)*
+                Err(serde::de::Error::custom(concat!(
+                    "missing string discriminator `",
+                    #discriminator_field,
+                    "` and no tagless branch matched",
+                )))
+            }
+        } else {
+            quote! {
+                Err(serde::de::Error::custom(concat!(
+                    "missing string discriminator `",
+                    #discriminator_field,
+                    "`",
+                )))
+            }
+        };
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -2453,17 +3134,20 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Generate derives with optional Specta support
+        // Keep the discriminator on each standalone component model, then do
+        // explicit discriminator-directed dispatch here. A derive-based
+        // internally tagged enum requires stripping the tag from its payload;
+        // that made the same component serialize invalid JSON when used
+        // directly or in an array. Explicit dispatch retains O(1)-by-tag
+        // behavior without giving the payload two incompatible wire shapes.
         let derives = if self.config.enable_specta {
             quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize)]
+                #[derive(Debug, Clone)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
-                #[serde(tag = #discriminator_field)]
             }
         } else {
             quote! {
-                #[derive(Debug, Clone, Deserialize, Serialize)]
-                #[serde(tag = #discriminator_field)]
+                #[derive(Debug, Clone)]
             }
         };
 
@@ -2472,6 +3156,49 @@ impl CodeGenerator {
             #derives
             pub enum #enum_name {
                 #(#enum_variants)*
+            }
+
+            impl serde::Serialize for #enum_name {
+                fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                where
+                    S: serde::Serializer,
+                {
+                    match self {
+                        #(#serialize_arms)*
+                    }
+                }
+            }
+
+            impl<'de> serde::Deserialize<'de> for #enum_name {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    let value = serde_json::Value::deserialize(deserializer)?;
+                    let discriminator = match value.get(#discriminator_field) {
+                        Some(serde_json::Value::String(discriminator)) => {
+                            Some(discriminator.as_str())
+                        }
+                        Some(_) => {
+                            return Err(serde::de::Error::custom(concat!(
+                                "non-string discriminator `",
+                                #discriminator_field,
+                                "`",
+                            )));
+                        }
+                        None => None,
+                    };
+                    match discriminator {
+                        Some(discriminator) => match discriminator {
+                            #(#deserialize_arms)*
+                            other => Err(serde::de::Error::custom(format!(
+                                "unknown discriminator value `{other}` for `{}`",
+                                #discriminator_field,
+                            ))),
+                        },
+                        None => { #missing_discriminator_fallback }
+                    }
+                }
             }
         })
     }
@@ -2487,10 +3214,8 @@ impl CodeGenerator {
 
         // Check if this schema is used as a variant in another discriminated union
         for other_schema in analysis.schemas.values() {
-            if let crate::analysis::SchemaType::DiscriminatedUnion {
-                variants,
-                discriminator_field: _,
-            } = &other_schema.schema_type
+            if let crate::analysis::SchemaType::DiscriminatedUnion { variants, .. } =
+                &other_schema.schema_type
             {
                 for variant in variants {
                     if variant.type_name == schema.name {
@@ -2536,58 +3261,88 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         variants: &[crate::analysis::SchemaRef],
+        exclusive: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
         // Generate meaningful variant names based on type names
         let mut used_variant_names = std::collections::HashSet::new();
-        let enum_variants = variants.iter().enumerate().map(|(i, variant)| {
-            // Generate a meaningful variant name from the type name
-            let base_variant_name = self.type_name_to_variant_name(&variant.target);
-            let variant_name = self.ensure_unique_variant_name_generator(
-                base_variant_name,
-                &mut used_variant_names,
-                i,
-            );
-            let variant_name_ident = format_ident!("{}", variant_name);
+        let enum_variants = variants
+            .iter()
+            .enumerate()
+            .map(|(i, variant)| {
+                // Generate a meaningful variant name from the type name
+                let base_variant_name = self.type_name_to_variant_name(&variant.target);
+                let variant_name = self.ensure_unique_variant_name_generator(
+                    base_variant_name,
+                    &mut used_variant_names,
+                    i,
+                );
+                let variant_name_ident = format_ident!("{}", variant_name);
 
-            // For primitive types and Vec types, use them directly without conversion
-            let variant_type_tokens = if matches!(
-                variant.target.as_str(),
-                "bool"
-                    | "i8"
-                    | "i16"
-                    | "i32"
-                    | "i64"
-                    | "i128"
-                    | "u8"
-                    | "u16"
-                    | "u32"
-                    | "u64"
-                    | "u128"
-                    | "f32"
-                    | "f64"
-                    | "String"
-            ) {
-                let type_ident = format_ident!("{}", variant.target);
-                quote! { #type_ident }
-            } else if variant.target == "serde_json::Value" {
-                // The target is a fully-qualified path; emit it as a path so
-                // it doesn't get mangled into a phantom `SerdeJsonValue` ident.
-                quote! { serde_json::Value }
-            } else if variant.target.starts_with("Vec<") && variant.target.ends_with(">") {
-                // Handle Vec types by parsing the inner type
-                let inner = &variant.target[4..variant.target.len() - 1];
+                // For primitive types and Vec types, use them directly without conversion
+                let variant_type_tokens = if matches!(
+                    variant.target.as_str(),
+                    "bool"
+                        | "i8"
+                        | "i16"
+                        | "i32"
+                        | "i64"
+                        | "i128"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "u128"
+                        | "f32"
+                        | "f64"
+                        | "String"
+                ) {
+                    let type_ident = format_ident!("{}", variant.target);
+                    quote! { #type_ident }
+                } else if variant.target == "serde_json::Value" {
+                    // The target is a fully-qualified path; emit it as a path so
+                    // it doesn't get mangled into a phantom `SerdeJsonValue` ident.
+                    quote! { serde_json::Value }
+                } else if variant.target.starts_with("Vec<") && variant.target.ends_with(">") {
+                    // Handle Vec types by parsing the inner type
+                    let inner = &variant.target[4..variant.target.len() - 1];
 
-                // Handle nested Vec types (e.g., Vec<Vec<i64>>)
-                if inner.starts_with("Vec<") && inner.ends_with(">") {
-                    let inner_inner = &inner[4..inner.len() - 1];
-                    if inner_inner == "serde_json::Value" {
-                        quote! { Vec<Vec<serde_json::Value>> }
+                    // Handle nested Vec types (e.g., Vec<Vec<i64>>)
+                    if inner.starts_with("Vec<") && inner.ends_with(">") {
+                        let inner_inner = &inner[4..inner.len() - 1];
+                        if inner_inner == "serde_json::Value" {
+                            quote! { Vec<Vec<serde_json::Value>> }
+                        } else {
+                            let inner_inner_type = if matches!(
+                                inner_inner,
+                                "bool"
+                                    | "i8"
+                                    | "i16"
+                                    | "i32"
+                                    | "i64"
+                                    | "i128"
+                                    | "u8"
+                                    | "u16"
+                                    | "u32"
+                                    | "u64"
+                                    | "u128"
+                                    | "f32"
+                                    | "f64"
+                                    | "String"
+                            ) {
+                                format_ident!("{}", inner_inner)
+                            } else {
+                                format_ident!("{}", self.to_rust_type_name(inner_inner))
+                            };
+                            quote! { Vec<Vec<#inner_inner_type>> }
+                        }
+                    } else if inner == "serde_json::Value" {
+                        quote! { Vec<serde_json::Value> }
                     } else {
-                        let inner_inner_type = if matches!(
-                            inner_inner,
+                        let inner_type = if matches!(
+                            inner,
                             "bool"
                                 | "i8"
                                 | "i16"
@@ -2603,75 +3358,57 @@ impl CodeGenerator {
                                 | "f64"
                                 | "String"
                         ) {
-                            format_ident!("{}", inner_inner)
+                            format_ident!("{}", inner)
                         } else {
-                            format_ident!("{}", self.to_rust_type_name(inner_inner))
+                            format_ident!("{}", self.to_rust_type_name(inner))
                         };
-                        quote! { Vec<Vec<#inner_inner_type>> }
+                        quote! { Vec<#inner_type> }
                     }
-                } else if inner == "serde_json::Value" {
-                    quote! { Vec<serde_json::Value> }
+                } else if variant.target.contains("::") || variant.target.contains('<') {
+                    // Qualified Rust path or generic (chrono::DateTime<chrono::Utc>,
+                    // bytes::Bytes, std::net::Ipv4Addr) emitted by TypeMapper. Pass
+                    // it straight to syn — the to_rust_type_name PascalCase
+                    // pipeline below would mangle it into a non-existent ident.
+                    parse_rust_type(&variant.target).unwrap_or_else(|_| {
+                        let fallback = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                        quote! { #fallback }
+                    })
                 } else {
-                    let inner_type = if matches!(
-                        inner,
-                        "bool"
-                            | "i8"
-                            | "i16"
-                            | "i32"
-                            | "i64"
-                            | "i128"
-                            | "u8"
-                            | "u16"
-                            | "u32"
-                            | "u64"
-                            | "u128"
-                            | "f32"
-                            | "f64"
-                            | "String"
-                    ) {
-                        format_ident!("{}", inner)
-                    } else {
-                        format_ident!("{}", self.to_rust_type_name(inner))
-                    };
-                    quote! { Vec<#inner_type> }
-                }
-            } else if variant.target.contains("::") || variant.target.contains('<') {
-                // Qualified Rust path or generic (chrono::DateTime<chrono::Utc>,
-                // bytes::Bytes, std::net::Ipv4Addr) emitted by TypeMapper. Pass
-                // it straight to syn — the to_rust_type_name PascalCase
-                // pipeline below would mangle it into a non-existent ident.
-                parse_rust_type(&variant.target).unwrap_or_else(|_| {
-                    let fallback = format_ident!("{}", self.to_rust_type_name(&variant.target));
-                    quote! { #fallback }
-                })
-            } else {
-                let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
-                quote! { #type_ident }
-            };
+                    let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                    quote! { #type_ident }
+                };
 
-            // Self-referential variant (variant payload type == enclosing
-            // enum) yields an infinite-size enum (E0072). Wrap in `Box<T>` to
-            // break the cycle. Observed in microsoft-graph.yaml.
-            let target_rust_name = self.to_rust_type_name(&variant.target);
-            let enclosing_name = self.to_rust_type_name(&schema.name);
-            let is_self_ref = target_rust_name == enclosing_name;
-            // Indirect cycles (stripe BankAccount → BankAccountCustomer →
-            // Customer → BankAccountCustomer): variants pointing into the
-            // analysis's recursive_schemas set must also be heap-allocated.
-            let is_recursive_target = analysis
-                .dependencies
-                .recursive_schemas
-                .contains(&variant.target);
-            let variant_type_tokens = if is_self_ref || is_recursive_target {
-                quote! { Box<#variant_type_tokens> }
-            } else {
-                variant_type_tokens
-            };
+                // Self-referential variant (variant payload type == enclosing
+                // enum) yields an infinite-size enum (E0072). Wrap in `Box<T>` to
+                // break the cycle. Observed in microsoft-graph.yaml.
+                let target_rust_name = self.to_rust_type_name(&variant.target);
+                let enclosing_name = self.to_rust_type_name(&schema.name);
+                let is_self_ref = target_rust_name == enclosing_name;
+                // Indirect cycles (stripe BankAccount → BankAccountCustomer →
+                // Customer → BankAccountCustomer): variants pointing into the
+                // analysis's recursive_schemas set must also be heap-allocated.
+                let is_recursive_target = analysis
+                    .dependencies
+                    .recursive_schemas
+                    .contains(&variant.target);
+                let variant_type_tokens = if is_self_ref || is_recursive_target {
+                    quote! { Box<#variant_type_tokens> }
+                } else {
+                    variant_type_tokens
+                };
+                let variant_type_tokens = if variant.nullable {
+                    quote! { Option<#variant_type_tokens> }
+                } else {
+                    variant_type_tokens
+                };
 
-            quote! {
-                #variant_name_ident(#variant_type_tokens),
-            }
-        });
+                (variant_name_ident, variant_type_tokens)
+            })
+            .collect::<Vec<_>>();
+        let variant_declarations = enum_variants
+            .iter()
+            .map(|(variant_name, variant_type)| quote! { #variant_name(#variant_type), })
+            .collect::<Vec<_>>();
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -2679,7 +3416,229 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Generate derives with optional Specta support
+        let object_only = variants.iter().all(|variant| {
+            self.union_target_serializes_as_object(
+                &variant.target,
+                analysis,
+                &mut std::collections::HashSet::new(),
+            )
+        });
+
+        if exclusive || object_only {
+            let derives = if self.config.enable_specta {
+                quote! {
+                    #[derive(Debug, Clone)]
+                    #[cfg_attr(feature = "specta", derive(specta::Type))]
+                }
+            } else {
+                quote! { #[derive(Debug, Clone)] }
+            };
+            let serialize_arms = enum_variants
+                .iter()
+                .map(|(variant_name, _)| {
+                    quote! {
+                        Self::#variant_name(value) => serde::Serialize::serialize(value, serializer),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let deserialize_attempts = enum_variants
+                .iter()
+                .zip(variants)
+                .map(|((variant_name, variant_type), variant)| {
+                    if exclusive {
+                        let constraints = self.union_branch_literal_constraints(
+                            &variant.target,
+                            analysis,
+                            &mut std::collections::HashSet::new(),
+                        );
+                        let constraint_checks =
+                            constraints.iter().map(|(field, (required, allowed))| {
+                                let allowed = allowed
+                                    .iter()
+                                    .map(serde_json::Value::to_string)
+                                    .collect::<Vec<_>>();
+                                if allowed.is_empty() && *required {
+                                    quote! { false }
+                                } else if allowed.is_empty() {
+                                    quote! { object.get(#field).is_none() }
+                                } else if *required {
+                                    quote! {
+                                        object.get(#field).is_some_and(|value| {
+                                            value.is_null()
+                                                || matches!(value.to_string().as_str(), #(#allowed)|*)
+                                        })
+                                    }
+                                } else {
+                                    quote! {
+                                        object.get(#field).is_none_or(|value| {
+                                            value.is_null()
+                                                || matches!(value.to_string().as_str(), #(#allowed)|*)
+                                        })
+                                    }
+                                }
+                            });
+                        let constraints_match = if constraints.is_empty() {
+                            quote! { true }
+                        } else {
+                            quote! {
+                                input.as_object().is_some_and(|object| {
+                                    true #(&& #constraint_checks)*
+                                })
+                            }
+                        };
+                        quote! {
+                            if #constraints_match {
+                                if let Ok(candidate) =
+                                    serde_json::from_value::<#variant_type>(input.clone())
+                                {
+                                    let preserves_complete_input = serde_json::to_value(&candidate)
+                                        .map(|encoded| encoded == input)
+                                        .unwrap_or(false);
+                                    if preserves_complete_input {
+                                        if matched.is_some() {
+                                            return Err(serde::de::Error::custom(concat!(
+                                                "ambiguous oneOf value for ",
+                                                stringify!(#enum_name),
+                                                ": more than one branch preserved the complete input",
+                                            )));
+                                        }
+                                        matched = Some(Self::#variant_name(candidate));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        quote! {
+                            if let Ok(candidate) =
+                                serde_json::from_value::<#variant_type>(input.clone())
+                            {
+                                let preserves_complete_input = serde_json::to_value(&candidate)
+                                    .map(|encoded| {
+                                        preserves_complete_json_input(&encoded, &input)
+                                    })
+                                    .unwrap_or(false);
+                                if preserves_complete_input {
+                                    return Ok(Self::#variant_name(candidate));
+                                }
+                            }
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+            let no_match = if exclusive {
+                quote! {
+                    matched.ok_or_else(|| serde::de::Error::custom(concat!(
+                        "no oneOf branch for ",
+                        stringify!(#enum_name),
+                        " preserved the complete input",
+                    )))
+                }
+            } else {
+                quote! {
+                    Err(serde::de::Error::custom(concat!(
+                        "no anyOf branch for ",
+                        stringify!(#enum_name),
+                        " preserved the complete input",
+                    )))
+                }
+            };
+            let matched_declaration = exclusive.then(|| quote! { let mut matched = None; });
+            let preservation_helper = (!exclusive).then(|| {
+                quote! {
+                    fn exact_json_integer(number: &serde_json::Number) -> Option<i128> {
+                        number
+                            .as_i64()
+                            .map(i128::from)
+                            .or_else(|| number.as_u64().map(i128::from))
+                    }
+
+                    fn json_numbers_have_same_value(
+                        encoded: &serde_json::Number,
+                        input: &serde_json::Number,
+                    ) -> bool {
+                        match (exact_json_integer(encoded), exact_json_integer(input)) {
+                            (Some(encoded), Some(input)) => encoded == input,
+                            (Some(encoded), None) => input.as_f64().is_some_and(|input| {
+                                input.is_finite()
+                                    && input.fract() == 0.0
+                                    && input as i128 == encoded
+                            }),
+                            (None, Some(input)) => encoded.as_f64().is_some_and(|encoded| {
+                                encoded.is_finite()
+                                    && encoded.fract() == 0.0
+                                    && encoded as i128 == input
+                            }),
+                            (None, None) => encoded.as_f64() == input.as_f64(),
+                        }
+                    }
+
+                    fn preserves_complete_json_input(
+                        encoded: &serde_json::Value,
+                        input: &serde_json::Value,
+                    ) -> bool {
+                        match (encoded, input) {
+                            (
+                                serde_json::Value::Object(encoded),
+                                serde_json::Value::Object(input),
+                            ) => input.iter().all(|(key, value)| {
+                                encoded.get(key).is_some_and(|encoded_value| {
+                                    preserves_complete_json_input(encoded_value, value)
+                                })
+                            }),
+                            (
+                                serde_json::Value::Array(encoded),
+                                serde_json::Value::Array(input),
+                            ) => {
+                                encoded.len() == input.len()
+                                    && encoded.iter().zip(input).all(|(encoded, input)| {
+                                        preserves_complete_json_input(encoded, input)
+                                    })
+                            }
+                            (
+                                serde_json::Value::Number(encoded),
+                                serde_json::Value::Number(input),
+                            ) => json_numbers_have_same_value(encoded, input),
+                            _ => encoded == input,
+                        }
+                    }
+                }
+            });
+
+            return Ok(quote! {
+                #doc_comment
+                #derives
+                pub enum #enum_name {
+                    #(#variant_declarations)*
+                }
+
+                impl Serialize for #enum_name {
+                    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        match self {
+                            #(#serialize_arms)*
+                        }
+                    }
+                }
+
+                impl<'de> Deserialize<'de> for #enum_name {
+                    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        #preservation_helper
+                        let input = <serde_json::Value as Deserialize>::deserialize(deserializer)?;
+                        #matched_declaration
+                        #(#deserialize_attempts)*
+                        #no_match
+                    }
+                }
+            });
+        }
+
+        // Generate derives with optional Specta support for non-exclusive
+        // unions, where multiple anyOf branches may legitimately match.
         let derives = if self.config.enable_specta {
             quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2697,9 +3656,168 @@ impl CodeGenerator {
             #doc_comment
             #derives
             pub enum #enum_name {
-                #(#enum_variants)*
+                #(#variant_declarations)*
             }
         })
+    }
+
+    fn union_branch_literal_constraints(
+        &self,
+        target: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> BTreeMap<String, (bool, Vec<serde_json::Value>)> {
+        if !visited.insert(target.to_string()) {
+            return BTreeMap::new();
+        }
+        let constraints = analysis
+            .schemas
+            .get(target)
+            .map(|schema| {
+                self.schema_literal_property_constraints(&schema.original, analysis, visited)
+            })
+            .unwrap_or_default();
+        visited.remove(target);
+        constraints
+    }
+
+    fn schema_literal_property_constraints(
+        &self,
+        schema: &serde_json::Value,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> BTreeMap<String, (bool, Vec<serde_json::Value>)> {
+        let Some(object) = schema.as_object() else {
+            return BTreeMap::new();
+        };
+        if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+            && let Some(target) = reference.rsplit('/').next()
+        {
+            return self.union_branch_literal_constraints(target, analysis, visited);
+        }
+
+        let required = object
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let mut constraints = BTreeMap::new();
+        if let Some(properties) = object
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (field, property) in properties {
+                if let Some(values) = self.schema_literal_domain(
+                    property,
+                    analysis,
+                    &mut std::collections::HashSet::new(),
+                ) && !values.is_empty()
+                {
+                    constraints.insert(field.clone(), (required.contains(field.as_str()), values));
+                }
+            }
+        }
+        if let Some(branches) = object.get("allOf").and_then(serde_json::Value::as_array) {
+            for branch in branches {
+                for (field, (branch_required, values)) in
+                    self.schema_literal_property_constraints(branch, analysis, visited)
+                {
+                    constraints
+                        .entry(field)
+                        .and_modify(|(is_required, existing)| {
+                            *is_required |= branch_required;
+                            existing.retain(|value| values.contains(value));
+                        })
+                        .or_insert((branch_required, values));
+                }
+            }
+        }
+        constraints
+    }
+
+    fn schema_literal_domain(
+        &self,
+        schema: &serde_json::Value,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<serde_json::Value>> {
+        let object = schema.as_object()?;
+        if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+            && let Some(target) = reference.rsplit('/').next()
+        {
+            if !visited.insert(target.to_string()) {
+                return None;
+            }
+            let result = analysis
+                .schemas
+                .get(target)
+                .and_then(|schema| self.schema_literal_domain(&schema.original, analysis, visited));
+            visited.remove(target);
+            return result;
+        }
+        let own = object
+            .get("const")
+            .map(|value| vec![value.clone()])
+            .or_else(|| {
+                object
+                    .get("enum")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            });
+        let composed = object
+            .get("allOf")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|branches| {
+                branches.iter().fold(None, |domain, branch| {
+                    let branch_domain = self.schema_literal_domain(branch, analysis, visited);
+                    match (domain, branch_domain) {
+                        (None, other) | (other, None) => other,
+                        (Some(mut left), Some(right)) => {
+                            left.retain(|value| right.contains(value));
+                            Some(left)
+                        }
+                    }
+                })
+            });
+        match (own, composed) {
+            (None, other) | (other, None) => other,
+            (Some(mut left), Some(right)) => {
+                left.retain(|value| right.contains(value));
+                Some(left)
+            }
+        }
+    }
+
+    fn union_target_serializes_as_object(
+        &self,
+        target: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !visited.insert(target.to_string()) {
+            return false;
+        }
+        let result = analysis
+            .schemas
+            .get(target)
+            .is_some_and(|schema| match &schema.schema_type {
+                crate::analysis::SchemaType::Object { .. }
+                | crate::analysis::SchemaType::Composition { .. }
+                | crate::analysis::SchemaType::DiscriminatedUnion { .. } => true,
+                crate::analysis::SchemaType::Reference { target } => {
+                    self.union_target_serializes_as_object(target, analysis, visited)
+                }
+                crate::analysis::SchemaType::Union { variants, .. } => {
+                    variants.iter().all(|variant| {
+                        self.union_target_serializes_as_object(&variant.target, analysis, visited)
+                    })
+                }
+                _ => false,
+            });
+        visited.remove(target);
+        result
     }
 
     /// Walk a chain of type-alias `Reference`s starting from `target` and
@@ -2743,11 +3861,45 @@ impl CodeGenerator {
     ) -> TokenStream {
         let base_type = self.generate_property_base_type(schema_name, field_name, prop, analysis);
 
-        if self.property_is_option_wrapped(schema_name, field_name, prop, is_required, analysis) {
+        if !is_required && self.property_is_nullable(schema_name, field_name, prop) {
+            quote! { Option<Option<#base_type>> }
+        } else if self.property_is_option_wrapped(
+            schema_name,
+            field_name,
+            prop,
+            is_required,
+            analysis,
+        ) {
             quote! { Option<#base_type> }
         } else {
             base_type
         }
+    }
+
+    pub(crate) fn property_is_nullable(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        prop: &crate::analysis::PropertyInfo,
+    ) -> bool {
+        let override_key = format!("{schema_name}.{field_name}");
+        prop.nullable
+            || self
+                .config
+                .nullable_field_overrides
+                .get(&override_key)
+                .copied()
+                .unwrap_or(false)
+    }
+
+    pub(crate) fn property_is_tri_state(
+        &self,
+        schema_name: &str,
+        field_name: &str,
+        prop: &crate::analysis::PropertyInfo,
+        is_required: bool,
+    ) -> bool {
+        !is_required && self.property_is_nullable(schema_name, field_name, prop)
     }
 
     fn property_is_option_wrapped(
@@ -2758,17 +3910,8 @@ impl CodeGenerator {
         is_required: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> bool {
-        let override_key = format!("{schema_name}.{field_name}");
-        let is_nullable_override = self
-            .config
-            .nullable_field_overrides
-            .get(&override_key)
-            .copied()
-            .unwrap_or(false);
-
         !is_required
-            || prop.nullable
-            || is_nullable_override
+            || self.property_is_nullable(schema_name, field_name, prop)
             || (prop.default.is_some() && self.type_lacks_default(&prop.schema_type, analysis))
     }
 
@@ -2829,6 +3972,10 @@ impl CodeGenerator {
                 let inner_type = self.generate_array_item_type(item_type, analysis);
                 quote! { Vec<#inner_type> }
             }
+            SchemaType::Nullable { inner_type } => {
+                let inner_type = self.generate_array_item_type(inner_type, analysis);
+                quote! { Option<#inner_type> }
+            }
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)
             }
@@ -2882,8 +4029,13 @@ impl CodeGenerator {
             attrs.push(quote! { rename = #field_name });
         }
 
-        // Add skip_serializing_if for optional fields to avoid sending null values
-        if !is_required || prop.nullable {
+        let is_tri_state = self.property_is_tri_state(schema_name, field_name, prop, is_required);
+
+        // Optional fields may be omitted when their outer Option is None.
+        // Optional nullable fields use Option<Option<T>> so Some(None) remains
+        // an explicit JSON null. Required nullable fields stay Option<T> and
+        // must serialize None rather than skipping the required wire name.
+        if !is_required {
             attrs.push(quote! { skip_serializing_if = "Option::is_none" });
         }
 
@@ -2904,11 +4056,7 @@ impl CodeGenerator {
         // the `::option` submodule of the codec — serde dispatches
         // on field type, and the base codec works on Vec<u8> /
         // chrono::Duration / etc., not their Option wrappers.
-        if let crate::analysis::SchemaType::Primitive {
-            serde_with: Some(codec),
-            ..
-        } = &prop.schema_type
-        {
+        if let Some(codec) = self.schema_type_serde_codec(&prop.schema_type, analysis) {
             let is_option_wrapped = self.property_is_option_wrapped(
                 schema_name,
                 field_name,
@@ -2916,10 +4064,12 @@ impl CodeGenerator {
                 is_required,
                 analysis,
             );
-            let codec_path = if is_option_wrapped {
+            let codec_path = if is_tri_state {
+                Self::double_option_codec_path(&codec)
+            } else if is_option_wrapped {
                 format!("{codec}::option")
             } else {
-                codec.clone()
+                codec
             };
             attrs.push(quote! { with = #codec_path });
             // A `with` codec disables serde's implicit
@@ -2929,12 +4079,54 @@ impl CodeGenerator {
             if is_option_wrapped {
                 attrs.push(quote! { default });
             }
+        } else if is_tri_state {
+            attrs.push(quote! { default });
+            attrs.push(quote! { deserialize_with = "tri_state_serde::deserialize" });
         }
 
         if attrs.is_empty() {
             TokenStream::new()
         } else {
             quote! { #[serde(#(#attrs),*)] }
+        }
+    }
+
+    fn double_option_codec_path(codec: &str) -> String {
+        match codec {
+            "time::serde::rfc3339" => "time_rfc3339_double_option".to_string(),
+            "time_date_format" => "time_date_double_option".to_string(),
+            "time_time_format" => "time_time_double_option".to_string(),
+            _ => format!("{codec}::double_option"),
+        }
+    }
+
+    /// Resolve a field codec through named scalar aliases. A property may
+    /// reference a component whose generated Rust type is `bytes::Bytes`; the
+    /// codec belongs on the property field, because a Rust type alias cannot
+    /// carry serde attributes of its own.
+    fn schema_type_serde_codec(
+        &self,
+        schema_type: &crate::analysis::SchemaType,
+        analysis: &crate::analysis::SchemaAnalysis,
+    ) -> Option<String> {
+        let mut current = schema_type;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            match current {
+                crate::analysis::SchemaType::Primitive {
+                    serde_with: Some(codec),
+                    ..
+                } => return Some(codec.clone()),
+                crate::analysis::SchemaType::Reference { target }
+                    if visited.insert(target.clone()) =>
+                {
+                    current = &analysis.schemas.get(target)?.schema_type;
+                }
+                crate::analysis::SchemaType::Nullable { inner_type } => {
+                    current = inner_type;
+                }
+                _ => return None,
+            }
         }
     }
 
@@ -3309,10 +4501,15 @@ impl CodeGenerator {
             result = format!("{leading_marker}{result}");
         }
 
-        // `self`, `super`, `crate`, `Self` are NOT permitted as raw identifiers
-        // (they trigger an `r#self cannot be a raw identifier` panic in
-        // proc_macro2). Suffix them instead.
+        // `self`, `super`, `crate`, and `Self` are not permitted as raw
+        // identifiers. Suffix them before constructing a proc-macro ident.
         if matches!(result.as_str(), "self" | "super" | "crate" | "Self") {
+            return format!("{result}_field");
+        }
+        // Keep boolean literal property names as stable ordinary identifiers
+        // and let the field allocator disambiguate an actual `true_field` or
+        // `false_field` property. Serde preserves the original wire name.
+        if matches!(result.as_str(), "true" | "false") {
             return format!("{result}_field");
         }
         // Handle reserved keywords using raw identifiers (r#keyword)
@@ -3479,6 +4676,61 @@ impl CodeGenerator {
         })
     }
 
+    fn union_declared_properties(
+        &self,
+        target: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
+        if !visited.insert(target.to_string()) {
+            return std::collections::HashSet::new();
+        }
+        let mut properties = std::collections::HashSet::new();
+        if let Some(schema) = analysis.schemas.get(target) {
+            match &schema.schema_type {
+                crate::analysis::SchemaType::Object {
+                    properties: own,
+                    variant,
+                    ..
+                } => {
+                    properties.extend(own.keys().cloned());
+                    if let Some(variant) = variant {
+                        properties.extend(self.union_declared_properties(
+                            &variant.target,
+                            analysis,
+                            visited,
+                        ));
+                    }
+                }
+                crate::analysis::SchemaType::DiscriminatedUnion { variants, .. } => {
+                    for variant in variants {
+                        properties.extend(self.union_declared_properties(
+                            &variant.type_name,
+                            analysis,
+                            visited,
+                        ));
+                    }
+                }
+                crate::analysis::SchemaType::Union { variants, .. }
+                | crate::analysis::SchemaType::Composition { schemas: variants } => {
+                    for variant in variants {
+                        properties.extend(self.union_declared_properties(
+                            &variant.target,
+                            analysis,
+                            visited,
+                        ));
+                    }
+                }
+                crate::analysis::SchemaType::Reference { target } => {
+                    properties.extend(self.union_declared_properties(target, analysis, visited));
+                }
+                _ => {}
+            }
+        }
+        visited.remove(target);
+        properties
+    }
+
     #[allow(dead_code)]
     fn find_missing_types(&self, analysis: &SchemaAnalysis) -> std::collections::HashSet<String> {
         let mut missing = std::collections::HashSet::new();
@@ -3488,7 +4740,7 @@ impl CodeGenerator {
         // Check all references in union variants
         for schema in analysis.schemas.values() {
             match &schema.schema_type {
-                crate::analysis::SchemaType::Union { variants } => {
+                crate::analysis::SchemaType::Union { variants, .. } => {
                     for variant in variants {
                         if !defined_types.contains(&variant.target) {
                             missing.insert(variant.target.clone());
@@ -3567,6 +4819,10 @@ impl CodeGenerator {
                 // Nested arrays
                 let inner_type = self.generate_array_item_type(item_type, analysis);
                 quote! { Vec<#inner_type> }
+            }
+            SchemaType::Nullable { inner_type } => {
+                let inner_type = self.generate_array_item_type(inner_type, analysis);
+                quote! { Option<#inner_type> }
             }
             SchemaType::Tuple { element_types } => {
                 self.generate_tuple_type(element_types, analysis)

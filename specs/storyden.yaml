@@ -7364,35 +7364,35 @@ components:
       type: object
       required: [type, thread_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [thread_deleted] }
         thread_id: { $ref: "#/components/schemas/Identifier" }
 
     AuditEventThreadReplyDeleted:
       type: object
       required: [type, reply_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [thread_reply_deleted] }
         reply_id: { $ref: "#/components/schemas/Identifier" }
 
     AuditEventAccountSuspended:
       type: object
       required: [type, account_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_suspended] }
         account_id: { $ref: "#/components/schemas/Identifier" }
 
     AuditEventAccountUnsuspended:
       type: object
       required: [type, account_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_unsuspended] }
         account_id: { $ref: "#/components/schemas/Identifier" }
 
     AuditEventAccountContentPurged:
       type: object
       required: [type, account_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_content_purged] }
         account_id: { $ref: "#/components/schemas/Identifier" }
         included:
           $ref: "#/components/schemas/ModerationActionPurgeAccountContentTypeList"
@@ -7401,7 +7401,7 @@ components:
       type: object
       required: [type, account_id, note_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [moderation_note_created] }
         account_id: { $ref: "#/components/schemas/Identifier" }
         note_id: { $ref: "#/components/schemas/Identifier" }
 
@@ -7409,7 +7409,7 @@ components:
       type: object
       required: [type, account_id, note_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [moderation_note_deleted] }
         account_id: { $ref: "#/components/schemas/Identifier" }
         note_id: { $ref: "#/components/schemas/Identifier" }
 
@@ -7417,7 +7417,7 @@ components:
       type: object
       required: [type, account_id, warning_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_warned] }
         account_id: { $ref: "#/components/schemas/Identifier" }
         warning_id: { $ref: "#/components/schemas/Identifier" }
 
@@ -7425,7 +7425,7 @@ components:
       type: object
       required: [type, account_id, warning_id, previous_reason, reason]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_warning_updated] }
         account_id: { $ref: "#/components/schemas/Identifier" }
         warning_id: { $ref: "#/components/schemas/Identifier" }
         previous_reason: { $ref: "#/components/schemas/WarningReason" }
@@ -7435,7 +7435,7 @@ components:
       type: object
       required: [type, account_id, warning_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_warning_deleted] }
         account_id: { $ref: "#/components/schemas/Identifier" }
         warning_id: { $ref: "#/components/schemas/Identifier" }
 
@@ -7443,7 +7443,7 @@ components:
       type: object
       required: [type, account_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_password_reset_token_issued] }
         account_id:
           description: Target account ID that received password reset access.
           $ref: "#/components/schemas/Identifier"
@@ -7452,7 +7452,7 @@ components:
       type: object
       required: [type, account_id, email_address_id]
       properties:
-        type: { $ref: "#/components/schemas/AuditEventType" }
+        type: { type: string, enum: [account_password_reset_email_sent] }
         account_id:
           description: Target account ID that received the password reset email.
           $ref: "#/components/schemas/Identifier"
@@ -7640,13 +7640,13 @@ components:
       type: object
       required: [mode]
       properties:
-        mode: { $ref: "#/components/schemas/PluginMode" }
+        mode: { type: string, enum: [supervised] }
 
     PluginExternalProps:
       type: object
       required: [mode, token]
       properties:
-        mode: { $ref: "#/components/schemas/PluginMode" }
+        mode: { type: string, enum: [external] }
         token:
           type: string
           description: |
@@ -7683,7 +7683,7 @@ components:
       type: object
       required: [mode, url]
       properties:
-        mode: { $ref: "#/components/schemas/PluginMode" }
+        mode: { type: string, enum: [supervised] }
         url:
           type: string
           format: uri
@@ -7697,7 +7697,7 @@ components:
       type: object
       required: [mode, manifest]
       properties:
-        mode: { $ref: "#/components/schemas/PluginMode" }
+        mode: { type: string, enum: [external] }
         manifest:
           $ref: "#/components/schemas/PluginManifest"
 
@@ -11401,35 +11401,35 @@ components:
       type: object
       required: [kind, ref]
       properties:
-        kind: { $ref: "#/components/schemas/DatagraphItemKind" }
+        kind: { type: string, enum: [post] }
         ref: { $ref: "#/components/schemas/Post" }
 
     DatagraphItemThread:
       type: object
       required: [kind, ref]
       properties:
-        kind: { $ref: "#/components/schemas/DatagraphItemKind" }
+        kind: { type: string, enum: [thread] }
         ref: { $ref: "#/components/schemas/Thread" }
 
     DatagraphItemReply:
       type: object
       required: [kind, ref]
       properties:
-        kind: { $ref: "#/components/schemas/DatagraphItemKind" }
+        kind: { type: string, enum: [reply] }
         ref: { $ref: "#/components/schemas/Reply" }
 
     DatagraphItemNode:
       type: object
       required: [kind, ref]
       properties:
-        kind: { $ref: "#/components/schemas/DatagraphItemKind" }
+        kind: { type: string, enum: [node] }
         ref: { $ref: "#/components/schemas/Node" }
 
     DatagraphItemProfile:
       type: object
       required: [kind, ref]
       properties:
-        kind: { $ref: "#/components/schemas/DatagraphItemKind" }
+        kind: { type: string, enum: [profile] }
         ref: { $ref: "#/components/schemas/PublicProfile" }
 
     DatagraphMatch:

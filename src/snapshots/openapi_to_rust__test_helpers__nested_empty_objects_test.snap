@@ -11,10 +11,27 @@ expression: "&generated_code"
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
+/// Serde normally maps both a missing `Option<T>` field and an
+/// explicit JSON null to `None`. Wrapping the decoded value in
+/// `Some` retains the field-presence bit for `Option<Option<T>>`.
+mod tri_state_serde {
+    use serde::{Deserialize, Deserializer};
+    pub fn deserialize<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        T::deserialize(de).map(Some)
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Container {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub data: Option<Option<serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }

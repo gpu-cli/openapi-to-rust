@@ -3936,14 +3936,14 @@ components:
             extensions:
               $ref: "#/components/schemas/Extensions"
             tags:
-              type: [array, null]
+              type: [array, "null"]
               items:
                 type: string
               description: >
                 An array of tags associated with the file, such as `["tag1", "tag2"]`. Send `null` to unset all tags associated with the file.
               example: ["tag1", "tag2"]
             customCoordinates:
-              type: [string, null]
+              type: [string, "null"]
               description: |
                 Define an important area in the image in the format `x,y,width,height` e.g. `10,10,100,100`. Send `null` to unset this value.
             customMetadata:
@@ -5799,13 +5799,13 @@ components:
           description: |
             Path of the file. This is the path you would use in the URL to access the file. For example, if the file is at the root of the media library, the path will be `/file.jpg`. If the file is inside a folder named `images`, the path will be `/images/file.jpg`.
         tags:
-          type: [array, null]
+          type: [array, "null"]
           items:
             type: string
           description: |
             An array of tags assigned to the file. Tags are used to search files in the media library.
         AITags:
-          type: [array, null]
+          type: [array, "null"]
           items:
             type: object
             properties:
@@ -5840,7 +5840,7 @@ components:
           description: |
             Specifies if the file is published or not.
         customCoordinates:
-          type: [string, null]
+          type: [string, "null"]
           description: |
             An string with custom coordinates of the file.
         url:
@@ -6080,12 +6080,12 @@ components:
           type: string
           description: The video codec used in the video (only for video).
         tags:
-          type: [array, null]
+          type: [array, "null"]
           items:
             type: string
           description: The array of tags associated with the asset. If no tags are set, it will be `null`. Send `tags` in `responseFields` in API request to get the value of this field.
         AITags:
-          type: [array, null]
+          type: [array, "null"]
           items:
             type: object
             properties:
@@ -6120,7 +6120,7 @@ components:
           description: |
             Is the file published or in draft state. It can be either `true` or `false`. Send `isPublished` in `responseFields` in API request to get the value of this field.
         customCoordinates:
-          type: [string, null]
+          type: [string, "null"]
           description: |
             Value of custom coordinates associated with the image in the format `x,y,width,height`. If `customCoordinates` are not defined, then it is `null`. Send `customCoordinates` in `responseFields` in API request to get the value of this field.
         fileType:

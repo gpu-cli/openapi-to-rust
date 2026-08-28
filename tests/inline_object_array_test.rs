@@ -355,10 +355,11 @@ fn test_inline_object_with_nullable_fields() {
         "Should generate a struct for data array items"
     );
 
-    // Check that nullable field is properly typed as Option
+    // The field is both optional and nullable, so retain the distinction
+    // between a missing key and an explicit JSON null.
     assert!(
-        result.contains("pub optional_field: Option<String>"),
-        "Nullable field should be Option<String>"
+        result.contains("pub optional_field: Option<Option<String>>"),
+        "Optional nullable field should be Option<Option<String>>"
     );
 
     // Check that required field is not Option

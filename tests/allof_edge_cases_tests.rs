@@ -214,8 +214,8 @@ fn test_property_name_with_underscores_creates_types() {
     // Verify display_settings field uses proper enum type
     assert!(result.contains("pub display_settings: ConfigObjectDisplaySettings"));
 
-    // Verify cache_control is optional enum type
-    assert!(result.contains("pub cache_control: Option<ConfigObjectCacheControl>"));
+    // Optional + nullable keeps absence distinct from an explicit JSON null.
+    assert!(result.contains("pub cache_control: Option<Option<ConfigObjectCacheControl>>"));
 }
 
 #[test]

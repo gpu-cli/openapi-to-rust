@@ -16,52 +16,21 @@ pub struct Outer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nested: Option<OuterNested>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<OuterTagsItemRED>>,
+    pub tags: Option<Vec<OuterTagsItem>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub enum OuterTagsItemRED {
+pub enum OuterTagsItem {
     #[default]
     #[serde(rename = "RED")]
     Red,
     #[serde(rename = "BLUE")]
     Blue,
 }
-impl OuterTagsItemRED {
+impl OuterTagsItem {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Red => "RED",
             Self::Blue => "BLUE",
-        }
-    }
-}
-impl ::std::fmt::Display for OuterTagsItemRED {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-impl AsRef<str> for OuterTagsItemRED {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct OuterNested {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<OuterTagsItem>>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub enum OuterTagsItem {
-    #[default]
-    #[serde(rename = "HOT")]
-    Hot,
-    #[serde(rename = "COLD")]
-    Cold,
-}
-impl OuterTagsItem {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Hot => "HOT",
-            Self::Cold => "COLD",
         }
     }
 }
@@ -71,6 +40,37 @@ impl ::std::fmt::Display for OuterTagsItem {
     }
 }
 impl AsRef<str> for OuterTagsItem {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct OuterNested {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<OuterNestedTagsItem>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum OuterNestedTagsItem {
+    #[default]
+    #[serde(rename = "HOT")]
+    Hot,
+    #[serde(rename = "COLD")]
+    Cold,
+}
+impl OuterNestedTagsItem {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hot => "HOT",
+            Self::Cold => "COLD",
+        }
+    }
+}
+impl ::std::fmt::Display for OuterNestedTagsItem {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for OuterNestedTagsItem {
     fn as_ref(&self) -> &str {
         self.as_str()
     }

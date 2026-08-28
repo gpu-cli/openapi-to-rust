@@ -6,7 +6,27 @@
 //! resolve to direct type references instead of unnecessary compositions.
 
 use openapi_to_rust::test_helpers::*;
-use serde_json::json;
+use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
+use serde_json::{Value, json};
+
+fn generate(spec: Value, module_name: &str) -> String {
+    let mut analyzer = SchemaAnalyzer::new(spec).expect("schema analyzer");
+    let mut analysis = analyzer.analyze().expect("schema analysis");
+    CodeGenerator::new(GeneratorConfig {
+        module_name: module_name.to_string(),
+        ..Default::default()
+    })
+    .generate(&mut analysis)
+    .expect("code generation")
+}
+
+fn struct_body<'a>(generated: &'a str, name: &str) -> &'a str {
+    generated
+        .split(&format!("pub struct {name} {{"))
+        .nth(1)
+        .and_then(|tail| tail.split("\n}").next())
+        .unwrap_or_else(|| panic!("missing struct `{name}`:\n{generated}"))
+}
 
 #[test]
 fn test_single_reference_allof_resolves_directly() {
@@ -246,4 +266,264 @@ fn reference_with_annotation_sibling_preserves_recursive_model_reference() {
         .unwrap();
     assert!(expression.contains("Expression"), "{expression}");
     assert!(!expression.contains("serde_json::Value"), "{expression}");
+}
+
+#[test]
+fn transitive_alias_extension_preserves_inherited_required_fields() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "transitive alias", "version": "1.0"},
+        "components": { "schemas": {
+            "Base": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                },
+                "required": ["id"]
+            },
+            "Alias": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/Base" },
+                    { "description": "single-reference alias wrapper" }
+                ]
+            },
+            "Extended": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/Alias" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" }
+                        },
+                        "required": ["enabled"]
+                    }
+                ]
+            },
+            "Holder": {
+                "type": "object",
+                "properties": {
+                    "extended": {
+                        "allOf": [{ "$ref": "#/components/schemas/Extended" }]
+                    }
+                },
+                "required": ["extended"]
+            }
+        }}
+    });
+
+    let generated = generate(spec, "transitive_alias_extension");
+    let extended = struct_body(&generated, "Extended");
+    let holder = struct_body(&generated, "Holder");
+
+    assert!(extended.contains("pub id: String"), "{generated}");
+    assert!(!extended.contains("pub id: Option<"), "{generated}");
+    assert!(extended.contains("pub enabled: bool"), "{generated}");
+    assert!(!extended.contains("pub enabled: Option<"), "{generated}");
+    assert!(holder.contains("pub extended: Extended"), "{generated}");
+    assert!(!holder.contains("serde_json::Value"), "{generated}");
+}
+
+#[test]
+fn three_hop_single_reference_alias_chain_stays_typed() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "three hop alias", "version": "1.0"},
+        "components": { "schemas": {
+            "Base": {
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string" }
+                },
+                "required": ["code"]
+            },
+            "AliasOne": {
+                "allOf": [{ "$ref": "#/components/schemas/Base" }]
+            },
+            "AliasTwo": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/AliasOne" },
+                    { "description": "hop two" }
+                ]
+            },
+            "AliasThree": {
+                "allOf": [{ "$ref": "#/components/schemas/AliasTwo" }]
+            },
+            "Extended": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/AliasThree" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "enabled": { "type": "boolean" }
+                        },
+                        "required": ["enabled"]
+                    }
+                ]
+            },
+            "Holder": {
+                "type": "object",
+                "properties": {
+                    "leaf": {
+                        "allOf": [{ "$ref": "#/components/schemas/Extended" }]
+                    }
+                },
+                "required": ["leaf"]
+            }
+        }}
+    });
+
+    let generated = generate(spec, "three_hop_alias_chain");
+    let extended = struct_body(&generated, "Extended");
+    let holder = struct_body(&generated, "Holder");
+
+    assert!(extended.contains("pub code: String"), "{generated}");
+    assert!(!extended.contains("pub code: Option<"), "{generated}");
+    assert!(extended.contains("pub enabled: bool"), "{generated}");
+    assert!(!extended.contains("pub enabled: Option<"), "{generated}");
+    assert!(holder.contains("pub leaf: Extended"), "{generated}");
+    assert!(!holder.contains("Option<"), "{generated}");
+    assert!(!holder.contains("serde_json::Value"), "{generated}");
+    assert!(!generated.contains("pub struct HolderLeaf"), "{generated}");
+}
+
+#[test]
+fn self_referential_single_reference_allof_terminates_and_keeps_outer_field() {
+    let spec = json!({
+        "openapi": "3.0.0",
+        "info": {"title": "self cycle", "version": "1.0"},
+        "components": { "schemas": {
+            "SelfAlias": {
+                "allOf": [{ "$ref": "#/components/schemas/SelfAlias" }]
+            },
+            "Extended": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/SelfAlias" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" }
+                        },
+                        "required": ["id"]
+                    }
+                ]
+            },
+            "Holder": {
+                "type": "object",
+                "properties": {
+                    "root": {
+                        "allOf": [{ "$ref": "#/components/schemas/Extended" }]
+                    }
+                },
+                "required": ["root"]
+            }
+        }}
+    });
+
+    let generated = generate(spec, "self_cycle_single_reference_allof");
+    let extended = struct_body(&generated, "Extended");
+    let holder = struct_body(&generated, "Holder");
+
+    assert!(extended.contains("pub id: String"), "{generated}");
+    assert!(!extended.contains("pub id: Option<"), "{generated}");
+    assert!(holder.contains("pub root: Extended"), "{generated}");
+}
+
+#[test]
+fn two_node_single_reference_allof_cycle_terminates_and_keeps_local_fields() {
+    let spec = json!({
+        "openapi": "3.0.0",
+        "info": {"title": "two node cycle", "version": "1.0"},
+        "components": { "schemas": {
+            "AliasA": {
+                "allOf": [{ "$ref": "#/components/schemas/AliasB" }]
+            },
+            "AliasB": {
+                "allOf": [{ "$ref": "#/components/schemas/AliasA" }]
+            },
+            "Extended": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/AliasA" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" }
+                        },
+                        "required": ["name"]
+                    }
+                ]
+            },
+            "Holder": {
+                "type": "object",
+                "properties": {
+                    "left": {
+                        "allOf": [{ "$ref": "#/components/schemas/Extended" }]
+                    }
+                },
+                "required": ["left"]
+            }
+        }}
+    });
+
+    let generated = generate(spec, "two_node_cycle_single_reference_allof");
+    let extended = struct_body(&generated, "Extended");
+    let holder = struct_body(&generated, "Holder");
+
+    assert!(extended.contains("pub name: String"), "{generated}");
+    assert!(!extended.contains("pub name: Option<"), "{generated}");
+    assert!(holder.contains("pub left: Extended"), "{generated}");
+}
+
+#[test]
+fn reverse_component_order_still_resolves_transitive_single_reference_allof() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "reverse order", "version": "1.0"},
+        "components": { "schemas": {
+            "XExtended": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/YAlias" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "extra": { "type": "string" }
+                        },
+                        "required": ["extra"]
+                    }
+                ]
+            },
+            "YAlias": {
+                "allOf": [
+                    { "$ref": "#/components/schemas/ZBase" },
+                    { "description": "declared after dependent" }
+                ]
+            },
+            "ZBase": {
+                "type": "object",
+                "properties": {
+                    "base_id": { "type": "string" }
+                },
+                "required": ["base_id"]
+            },
+            "Holder": {
+                "type": "object",
+                "properties": {
+                    "item": {
+                        "allOf": [{ "$ref": "#/components/schemas/XExtended" }]
+                    }
+                },
+                "required": ["item"]
+            }
+        }}
+    });
+
+    let generated = generate(spec, "reverse_component_order_alias_chain");
+    let extended = struct_body(&generated, "XExtended");
+    let holder = struct_body(&generated, "Holder");
+
+    assert!(extended.contains("pub base_id: String"), "{generated}");
+    assert!(!extended.contains("pub base_id: Option<"), "{generated}");
+    assert!(extended.contains("pub extra: String"), "{generated}");
+    assert!(!extended.contains("pub extra: Option<"), "{generated}");
+    assert!(holder.contains("pub item: XExtended"), "{generated}");
+    assert!(!generated.contains("serde_json::Value"), "{generated}");
 }

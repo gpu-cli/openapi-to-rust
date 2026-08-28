@@ -476,44 +476,18 @@ fn test_inline_enum_collision_at_different_nesting_levels() {
 
     let result = test_generation("inline_enum_collision_nesting", spec).expect("Generation failed");
 
-    // The exact assignment of "primary" vs "disambiguated" depends on
-    // schema-walk order. What we MUST verify is:
-    //   1. Two distinct enums got emitted (one for each value-set), and
-    //   2. The struct field types route to the correct enums.
-    //
-    // Both enums must exist somewhere:
-    let plans_enum_name = if result.contains("pub enum PlanDataType")
-        && extract_enum_variants(&result, "PlanDataType")
-            .iter()
-            .any(|v| v == "Plans")
-    {
-        "PlanDataType".to_string()
-    } else {
-        let disambiguated = ["PlanDataTypePlans"];
-        disambiguated
-            .iter()
-            .find(|name| result.contains(&format!("pub enum {name}")))
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| panic!("could not find resource-type enum in: {result}"))
-    };
-    let drives_enum_name = if result.contains("pub enum PlanDataType")
-        && extract_enum_variants(&result, "PlanDataType")
-            .iter()
-            .any(|v| v == "Nvme")
-    {
-        "PlanDataType".to_string()
-    } else {
-        let disambiguated = ["PlanDataTypeSsd", "PlanDataTypeHdd", "PlanDataTypeNvme"];
-        disambiguated
-            .iter()
-            .find(|name| result.contains(&format!("pub enum {name}")))
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| panic!("could not find drives-media-type enum in: {result}"))
-    };
-
-    assert_ne!(
-        plans_enum_name, drives_enum_name,
-        "two distinct inline `type` enums must NOT collapse to the same name: {result}"
+    // Path-aware names make the assignment deterministic: the direct property
+    // gets the concise name, while the nested array item carries its full
+    // provenance. The two value domains must remain distinct.
+    let plans_enum_name = "PlanDataType";
+    let drives_enum_name = "PlanDataAttributesSpecsDrivesItemType";
+    assert_eq!(
+        extract_enum_variants(&result, plans_enum_name),
+        vec!["Plans"]
+    );
+    assert_eq!(
+        extract_enum_variants(&result, drives_enum_name),
+        vec!["Ssd", "Hdd", "Nvme"]
     );
 
     // Resource-type field on `PlanData` references the plans enum.
@@ -525,8 +499,8 @@ fn test_inline_enum_collision_at_different_nesting_levels() {
     );
 
     // Drive-item field references the drives enum.
-    let drives_struct = extract_struct_block(&result, "PlanDataDrivesItem")
-        .expect("PlanDataDrivesItem struct must be present");
+    let drives_struct = extract_struct_block(&result, "PlanDataAttributesSpecsDrivesItem")
+        .expect("nested drive item struct must be present");
     assert!(
         drives_struct.contains(&format!("Option<{drives_enum_name}>")),
         "PlanDataDrivesItem.type must reference {drives_enum_name}, got: {drives_struct}"

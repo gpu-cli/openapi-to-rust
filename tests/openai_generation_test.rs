@@ -191,15 +191,15 @@ mod tests {
             "Input should NOT be serde_json::Value"
         );
 
-        // 4. Nullable fields should be Option<T>
+        // 4. Optional nullable fields preserve missing vs explicit null.
         assert!(
-            types_content.contains("pub store: Option<bool>"),
-            "Nullable boolean should be Option<bool>"
+            types_content.contains("pub store: Option<Option<bool>>"),
+            "Optional nullable boolean should be Option<Option<bool>>"
         );
         assert!(
-            types_content.contains("pub max_tokens: Option<i32>")
-                || types_content.contains("pub max_tokens: Option<i64>"),
-            "Nullable integer should be Option<i32/i64>"
+            types_content.contains("pub max_tokens: Option<Option<i32>>")
+                || types_content.contains("pub max_tokens: Option<Option<i64>>"),
+            "Optional nullable integer should be Option<Option<i32/i64>>"
         );
     }
 
@@ -299,14 +299,15 @@ mod tests {
             "Object field should be typed"
         );
 
-        // Nullable fields
+        // Both nullable fields are optional, so preserve the difference between
+        // a missing property and an explicit JSON null.
         assert!(
-            types_content.contains("pub content: Option<String>"),
-            "Nullable content should be Option<String>"
+            types_content.contains("pub content: Option<Option<String>>"),
+            "Optional nullable content should be Option<Option<String>>"
         );
         assert!(
-            types_content.contains("pub finish_reason: Option<"),
-            "Nullable finish_reason should be Option<T>"
+            types_content.contains("pub finish_reason: Option<Option<"),
+            "Optional nullable finish_reason should be Option<Option<T>>"
         );
     }
 }

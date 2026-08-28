@@ -99,6 +99,7 @@ fn builder_spec() -> serde_json::Value {
                 "properties": {
                     "name": { "type": "string" },
                     "instructions": { "type": "string" },
+                    "nullable_note": { "type": ["string", "null"] },
                     "send": { "type": "string" },
                     "with_send": { "type": "string" },
                     "request": { "type": "string" },
@@ -209,6 +210,9 @@ fn mixed_body_builder_is_additive_and_collision_safe() {
     assert!(compact.contains("pubfntags(mutself,tags:Vec<String>)->Self"));
     assert!(compact.contains("pubfnx_trace(mutself,x_trace:implInto<String>)->Self"));
     assert!(compact.contains("pubfninstructions(mutself,instructions:String)->Self"));
+    assert!(compact.contains("pubfnnullable_note(mutself,nullable_note:String)->Self"));
+    assert!(compact.contains("pubfnnullable_note_null(mutself)->Self"));
+    assert!(compact.contains("pubfnnullable_note_absent(mutself)->Self"));
     assert!(compact.contains("pubfnwith_send(mutself,send:String)->Self"));
     assert!(compact.contains("pubfnwith_with_send(mutself,with_send:String)->Self"));
     assert!(compact.contains("pubfnwith_request(mutself,request:String)->Self"));
@@ -270,6 +274,9 @@ pub async fn both_calls_compile(client: &generated::HttpClient) {
     .tags(vec!["a".to_string(), "b".to_string()])
     .x_trace("trace-id")
     .instructions("be concise".to_string())
+    .nullable_note("value".to_string())
+    .nullable_note_null()
+    .nullable_note_absent()
     .with_send("reserved".to_string())
     .with_with_send("collision".to_string())
     .with_request("field".to_string())

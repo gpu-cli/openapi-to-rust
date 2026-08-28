@@ -16594,7 +16594,18 @@
       },
       "ApplicationCommandHandler": {
         "type": "integer",
-        "oneOf": [],
+        "oneOf": [
+          {
+            "title": "APP_HANDLER",
+            "description": "The app handles the interaction using an interaction token",
+            "const": 1
+          },
+          {
+            "title": "DISCORD_LAUNCH_ACTIVITY",
+            "description": "Discord handles the interaction by launching an Activity and sending a follow-up message without coordinating with the app",
+            "const": 2
+          }
+        ],
         "format": "int32"
       },
       "ApplicationCommandIntegerOption": {
@@ -23170,7 +23181,18 @@
       },
       "EntitlementOwnerTypes": {
         "type": "integer",
-        "oneOf": [],
+        "oneOf": [
+          {
+            "title": "GUILD",
+            "description": "A guild subscription",
+            "const": 1
+          },
+          {
+            "title": "USER",
+            "description": "A user subscription",
+            "const": 2
+          }
+        ],
         "format": "int32"
       },
       "EntitlementResponse": {
@@ -32002,7 +32024,68 @@
       },
       "NameplatePalette": {
         "type": "string",
-        "oneOf": []
+        "oneOf": [
+          {
+            "title": "CRIMSON",
+            "description": "Crimson color palette",
+            "const": "crimson"
+          },
+          {
+            "title": "BERRY",
+            "description": "Berry color palette",
+            "const": "berry"
+          },
+          {
+            "title": "SKY",
+            "description": "Sky color palette",
+            "const": "sky"
+          },
+          {
+            "title": "TEAL",
+            "description": "Teal color palette",
+            "const": "teal"
+          },
+          {
+            "title": "FOREST",
+            "description": "Forest color palette",
+            "const": "forest"
+          },
+          {
+            "title": "BUBBLE_GUM",
+            "description": "Bubble gum color palette",
+            "const": "bubble_gum"
+          },
+          {
+            "title": "VIOLET",
+            "description": "Violet color palette",
+            "const": "violet"
+          },
+          {
+            "title": "COBALT",
+            "description": "Cobalt color palette",
+            "const": "cobalt"
+          },
+          {
+            "title": "CLOVER",
+            "description": "Clover color palette",
+            "const": "clover"
+          },
+          {
+            "title": "LEMON",
+            "description": "Lemon color palette",
+            "const": "lemon"
+          },
+          {
+            "title": "WHITE",
+            "description": "White color palette",
+            "const": "white"
+          },
+          {
+            "title": "BLACK",
+            "description": "Black color palette",
+            "const": "black"
+          }
+        ]
       },
       "NewMemberActionResponse": {
         "type": "object",
@@ -32782,7 +32865,13 @@
       },
       "PollLayoutTypes": {
         "type": "integer",
-        "oneOf": [],
+        "oneOf": [
+          {
+            "title": "DEFAULT",
+            "description": "The, uhm, default layout type.",
+            "const": 1
+          }
+        ],
         "format": "int32"
       },
       "PollMedia": {

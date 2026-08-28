@@ -65,6 +65,27 @@ fn test_tool_input_empty_object() {
 }
 
 #[test]
+fn test_closed_empty_object_remains_a_structural_type() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": {"title": "Test", "version": "1.0"},
+        "components": {
+            "schemas": {
+                "ClosedEmpty": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }
+        }
+    });
+
+    let result = test_generation("closed_empty_object_test", spec).expect("Generation failed");
+    assert!(result.contains("pub struct ClosedEmpty"));
+    assert!(!result.contains("pub type ClosedEmpty = serde_json::Value"));
+}
+
+#[test]
 fn test_object_with_additional_properties_only() {
     let spec = json!({
         "openapi": "3.1.0",
@@ -173,7 +194,7 @@ fn test_nested_empty_objects() {
     let result = test_generation("nested_empty_objects_test", spec).expect("Generation failed");
 
     // Both data and metadata should be serde_json::Value
-    assert!(result.contains("pub data: Option<serde_json::Value>"));
+    assert!(result.contains("pub data: Option<Option<serde_json::Value>>"));
     assert!(result.contains("pub metadata: Option<serde_json::Value>"));
 }
 

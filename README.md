@@ -727,6 +727,14 @@ cargo insta review        # review snapshot diffs
 scripts/spec-compile.sh   # generate + cargo-check every spec in specs/ (full corpus)
 ```
 
+`scripts/spec-compile.sh` also synthesizes valid JSON instances from each
+source component schema, hydrates the exact generated Rust model, serializes it
+back to JSON, validates that output against the same schema, and requires a
+stable second round trip. The summary reports tested components, generated
+samples, and explicit skips. Pass one or more spec names (for example,
+`scripts/spec-compile.sh anthropic`) for a focused trial before running the
+full 55-spec compile suite.
+
 The compile tiers are intentionally different:
 
 - Every pull request and push to `main` generates all 55 supported OpenAPI

@@ -1046,7 +1046,7 @@ paths:
           schema:
             description: Server ID
             examples:
-              - 024a29e-b4b7-4c91-9a46-505be123d9f8
+              - 024a29e9-b4b7-4c91-9a46-505be123d9f8
             format: uuid4
             title: Server Id
             type: string
@@ -1091,7 +1091,7 @@ paths:
           schema:
             description: Server ID
             examples:
-              - 024a29e-b4b7-4c91-9a46-505be123d9f8
+              - 024a29e9-b4b7-4c91-9a46-505be123d9f8
             format: uuid4
             title: Server Id
             type: string
@@ -1141,7 +1141,7 @@ paths:
           schema:
             description: Server ID
             examples:
-              - 024a29e-b4b7-4c91-9a46-505be123d9f8
+              - 024a29e9-b4b7-4c91-9a46-505be123d9f8
             format: uuid4
             title: Server Id
             type: string
@@ -1220,7 +1220,7 @@ paths:
           schema:
             description: Server ID
             examples:
-              - 024a29e-b4b7-4c91-9a46-505be123d9f8
+              - 024a29e9-b4b7-4c91-9a46-505be123d9f8
             format: uuid4
             title: Server Id
             type: string
@@ -1271,7 +1271,7 @@ paths:
           schema:
             description: Server ID
             examples:
-              - 024a29e-b4b7-4c91-9a46-505be123d9f8
+              - 024a29e9-b4b7-4c91-9a46-505be123d9f8
             format: uuid4
             title: Server Id
             type: string
@@ -18585,7 +18585,7 @@ paths:
           schema:
             description: Optional. Can be used to only show subnets of the specific network
             examples:
-              - 123e4567-e89b-12d3-a456-426614174000
+              - 123e4567-e89b-42d3-a456-426614174000
             format: uuid4
             title: Network Id
             type: string
@@ -64761,7 +64761,7 @@ components:
               existing_floating_id: 57be69f6-6f6a-4f03-a4ad-8eb86c69ec0a
               source: existing
             network_id: 53609647-2619-420a-b046-59905c8e3370
-            subnet_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+            subnet_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
             type: subnet
           - network_id: 783b36b4-3ef4-48ac-879d-5b3ea53180d8
             subnet_id: 382a83e5-1b38-49f9-bd83-730353b29ed4
@@ -68019,7 +68019,7 @@ components:
             existing_floating_id: 57be69f6-6f6a-4f03-a4ad-8eb86c69ec0a
             source: existing
           network_id: 59905c8e-2619-420a-b046-536096473370
-          subnet_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+          subnet_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
           type: subnet
       properties:
         floating_ip:
@@ -72677,7 +72677,7 @@ components:
         existing_floating_id:
           description: An existing available floating IP id must be specified if the source is set to `existing`
           examples:
-            - e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - e3c6ee77-48cb-416b-b204-1b492cc776e3
           format: uuid4
           title: Existing Floating Id
           type: string
@@ -78711,7 +78711,7 @@ components:
                 existing_floating_id: 57be69f6-6f6a-4f03-a4ad-8eb86c69ec0a
                 source: existing
               network_id: 53609647-2619-420a-b046-59905c8e3370
-              subnet_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+              subnet_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
               type: subnet
             - network_id: 783b36b4-3ef4-48ac-879d-5b3ea53180d8
               subnet_id: 382a83e5-1b38-49f9-bd83-730353b29ed4
@@ -81383,11 +81383,6 @@ components:
       title: K8sClusterSlurmAddonV2Serializer
       type: object
     K8sClusterSlurmAddonV2Serializers:
-      discriminator:
-        mapping:
-          'False': '#/components/schemas/K8sClusterSlurmAddonDisableV2Serializer'
-          'True': '#/components/schemas/K8sClusterSlurmAddonEnableV2Serializer'
-        propertyName: enabled
       title: K8sClusterSlurmAddonV2Serializers
       anyOf:
         - $ref: '#/components/schemas/K8sClusterSlurmAddonEnableV2Serializer'
@@ -85998,7 +85993,7 @@ components:
           existing_floating_id: 57be69f6-6f6a-4f03-a4ad-8eb86c69ec0a
           source: existing
         network_id: 59905c8e-2619-420a-b046-536096473370
-        subnet_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+        subnet_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
         type: subnet
     NetworkSubnetworkCollectionSerializer:
       properties:
@@ -86346,7 +86341,7 @@ components:
         - network_id
       description: Instance will be attached to the network subnet with the largest count of available ips
       example:
-        network_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+        network_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
         type: any_subnet
         security_groups:
           - id: 4536dba1-93b1-492e-b3df-270b6b9f3650
@@ -86595,7 +86590,7 @@ components:
             existing_floating_id: 57be69f6-6f6a-4f03-a4ad-8eb86c69ec0a
             source: existing
           network_id: 59905c8e-2619-420a-b046-536096473370
-          subnet_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+          subnet_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
           type: subnet
       properties:
         floating_ip:
@@ -86679,7 +86674,7 @@ components:
         - subnet_id
       description: Instance will be attached to specified subnet
       example:
-        subnet_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+        subnet_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
         type: subnet
         security_groups:
           - id: 4536dba1-93b1-492e-b3df-270b6b9f3650
@@ -86706,7 +86701,7 @@ components:
         network_id:
           description: Reserved fixed IP will be allocated in a subnet of this network
           examples:
-            - e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - e3c6ee77-48cb-416b-b204-1b492cc776e3
           format: uuid4
           title: Network Id
           type: string
@@ -86762,7 +86757,7 @@ components:
         network_id:
           description: Reserved fixed IP will be allocated in a subnet of this network
           examples:
-            - e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - e3c6ee77-48cb-416b-b204-1b492cc776e3
           format: uuid4
           title: Network Id
           type: string
@@ -86808,7 +86803,7 @@ components:
         subnet_id:
           description: Reserved fixed IP will be allocated in this subnet
           examples:
-            - e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - e3c6ee77-48cb-416b-b204-1b492cc776e3
           format: uuid4
           title: Subnet Id
           type: string
@@ -93571,7 +93566,7 @@ components:
         attachments:
           description: Reserved fixed IP attachment entities
           examples:
-            - - resource_id: e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - - resource_id: e3c6ee77-48cb-416b-b204-1b492cc776e3
                 resource_type: instance
               - resource_id: e73a4dbd-da04-4b6e-8ef9-07e8742001b7
                 resource_type: ai_cluster
@@ -102331,7 +102326,7 @@ components:
         subnet_id:
           description: Port is assigned an IP address from this subnet
           examples:
-            - e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - e3c6ee77-48cb-416b-b204-1b492cc776e3
           format: uuid4
           title: Subnet Id
           type: string
@@ -102368,7 +102363,7 @@ components:
         subnet_id:
           description: Port is assigned an IP address from this subnet
           examples:
-            - e3c6ee77-48cb-416b-b204-11b492cc776e3
+            - e3c6ee77-48cb-416b-b204-1b492cc776e3
           format: uuid4
           title: Subnet Id
           type: string

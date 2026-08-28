@@ -11,19 +11,242 @@ expression: "&generated_code"
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum EventUnion {
-    #[serde(rename = "response.reasoning_summary_part.done")]
     ReasoningSummaryPartDone(ResponseReasoningSummaryPartDoneEvent),
-    #[serde(rename = "response.reasoning_summary_part.added")]
     ReasoningSummaryPartAdded(ResponseReasoningSummaryPartAddedEvent),
+}
+impl serde::Serialize for EventUnion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::ReasoningSummaryPartDone(payload) => {
+                let mut value = serde_json::to_value(payload)
+                    .map_err(serde::ser::Error::custom)?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        serde::ser::Error::custom(
+                            concat!(
+                                "discriminated union variant `",
+                                stringify!(ReasoningSummaryPartDone),
+                                "` did not serialize as an object",
+                            ),
+                        )
+                    })?;
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(
+                        tag.as_str(), "response.reasoning_summary_part.done"
+                    ) => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(ReasoningSummaryPartDone),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String(
+                                    "response.reasoning_summary_part.done".to_string(),
+                                ),
+                            );
+                    }
+                }
+                value.serialize(serializer)
+            }
+            Self::ReasoningSummaryPartAdded(payload) => {
+                let mut value = serde_json::to_value(payload)
+                    .map_err(serde::ser::Error::custom)?;
+                let object = value
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        serde::ser::Error::custom(
+                            concat!(
+                                "discriminated union variant `",
+                                stringify!(ReasoningSummaryPartAdded),
+                                "` did not serialize as an object",
+                            ),
+                        )
+                    })?;
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(
+                        tag.as_str(), "response.reasoning_summary_part.added"
+                    ) => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(ReasoningSummaryPartAdded),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String(
+                                    "response.reasoning_summary_part.added".to_string(),
+                                ),
+                            );
+                    }
+                }
+                value.serialize(serializer)
+            }
+        }
+    }
+}
+impl<'de> serde::Deserialize<'de> for EventUnion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let discriminator = match value.get("type") {
+            Some(serde_json::Value::String(discriminator)) => {
+                Some(discriminator.as_str())
+            }
+            Some(_) => {
+                return Err(
+                    serde::de::Error::custom(
+                        concat!("non-string discriminator `", "type", "`",),
+                    ),
+                );
+            }
+            None => None,
+        };
+        match discriminator {
+            Some(discriminator) => {
+                match discriminator {
+                    "response.reasoning_summary_part.done" => {
+                        let primary_error = match serde_json::from_value::<
+                            ResponseReasoningSummaryPartDoneEvent,
+                        >(value.clone()) {
+                            Ok(payload) => {
+                                return Ok(Self::ReasoningSummaryPartDone(payload));
+                            }
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            ResponseReasoningSummaryPartAddedEvent,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "response.reasoning_summary_part.done", first_name,
+                                            stringify!(ReasoningSummaryPartAdded),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::ReasoningSummaryPartAdded(payload),
+                                stringify!(ReasoningSummaryPartAdded),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "response.reasoning_summary_part.added" => {
+                        let primary_error = match serde_json::from_value::<
+                            ResponseReasoningSummaryPartAddedEvent,
+                        >(value.clone()) {
+                            Ok(payload) => {
+                                return Ok(Self::ReasoningSummaryPartAdded(payload));
+                            }
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            ResponseReasoningSummaryPartDoneEvent,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "response.reasoning_summary_part.added", first_name,
+                                            stringify!(ReasoningSummaryPartDone),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::ReasoningSummaryPartDone(payload),
+                                stringify!(ReasoningSummaryPartDone),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    other => {
+                        Err(
+                            serde::de::Error::custom(
+                                format!(
+                                    "unknown discriminator value `{other}` for `{}`", "type",
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+            None => {
+                Err(
+                    serde::de::Error::custom(
+                        concat!("missing string discriminator `", "type", "`",),
+                    ),
+                )
+            }
+        }
+    }
 }
 ///Emitted when a reasoning summary part is completed.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResponseReasoningSummaryPartDoneEvent {
     pub item_id: String,
     pub part: ReasoningItem,
+    ///The type of the event. Always `response.reasoning_summary_part.done`.
+    pub r#type: ResponseReasoningSummaryPartDoneEventType,
 }
 ///The type of the event. Always `response.reasoning_summary_part.done`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
@@ -56,6 +279,8 @@ impl AsRef<str> for ResponseReasoningSummaryPartDoneEventType {
 pub struct ResponseReasoningSummaryPartAddedEvent {
     pub item_id: String,
     pub part: ReasoningItem,
+    ///The type of the event. Always `response.reasoning_summary_part.added`.
+    pub r#type: ResponseReasoningSummaryPartAddedEventType,
 }
 ///The type of the event. Always `response.reasoning_summary_part.added`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]

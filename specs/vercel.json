@@ -23911,6 +23911,11 @@
                       "srv"
                     ],
                     "properties": {
+                      "name": {
+                        "description": "A subdomain name or an empty string for the root domain.",
+                        "type": "string",
+                        "example": "subdomain"
+                      },
                       "type": {
                         "description": "Must be of type `SRV`.",
                         "type": "string",
@@ -23991,6 +23996,11 @@
                       "name"
                     ],
                     "properties": {
+                      "name": {
+                        "description": "A subdomain name or an empty string for the root domain.",
+                        "type": "string",
+                        "example": "subdomain"
+                      },
                       "type": {
                         "description": "Must be of type `TXT`.",
                         "type": "string",
@@ -24067,6 +24077,11 @@
                       "https"
                     ],
                     "properties": {
+                      "name": {
+                        "description": "A subdomain name or an empty string for the root domain.",
+                        "type": "string",
+                        "example": "subdomain"
+                      },
                       "type": {
                         "description": "Must be of type `HTTPS`.",
                         "type": "string",

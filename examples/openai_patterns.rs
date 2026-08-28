@@ -102,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 openapi_to_rust::analysis::SchemaType::Object { properties, .. } => {
                     format!("Object({} properties)", properties.len())
                 }
-                openapi_to_rust::analysis::SchemaType::Union { variants } => {
+                openapi_to_rust::analysis::SchemaType::Union { variants, .. } => {
                     let variant_info: Vec<String> =
                         variants.iter().map(|v| v.target.to_string()).collect();
                     format!("Union(variants: [{}])", variant_info.join(", "))

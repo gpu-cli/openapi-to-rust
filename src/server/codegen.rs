@@ -184,12 +184,13 @@ fn collect_schema_type_refs(
                 seed(&variant.type_name, queue, keep);
             }
         }
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for variant in variants {
                 seed(&variant.target, queue, keep);
             }
         }
         SchemaType::Array { item_type } => collect_schema_type_refs(item_type, queue, keep),
+        SchemaType::Nullable { inner_type } => collect_schema_type_refs(inner_type, queue, keep),
         SchemaType::Tuple { element_types } => {
             for element_type in element_types {
                 collect_schema_type_refs(element_type, queue, keep);

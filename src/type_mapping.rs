@@ -79,6 +79,15 @@ impl MappedType {
             feature: Some(feature),
         }
     }
+
+    /// Mapping with an inlined generated codec and no crate dependency.
+    pub fn with_inline_codec(rust_type: impl Into<String>, codec_path: impl Into<String>) -> Self {
+        Self {
+            rust_type: rust_type.into(),
+            serde_with: Some(codec_path.into()),
+            feature: None,
+        }
+    }
 }
 
 /// Identifies an optional crate a mapping introduced.
@@ -476,10 +485,13 @@ impl UsedFeatures {
 pub enum DateStrategy {
     /// Plain `String`. Pre-Q2 behavior; pick this to opt out.
     String,
-    /// `chrono::DateTime<Utc>` / `NaiveDate` / `NaiveTime` (default).
+    /// `chrono::DateTime<Utc>` / `NaiveDate` (default). JSON Schema
+    /// `format: time` remains a String because RFC 3339 full-time carries an
+    /// offset that `NaiveTime` cannot represent.
     #[default]
     Chrono,
-    /// `time::OffsetDateTime` / `Date` / `Time`.
+    /// `time::OffsetDateTime` / `Date`. JSON Schema `format: time` remains a
+    /// String because `time::Time` cannot represent its required offset.
     Time,
 }
 
@@ -682,6 +694,17 @@ fn builtin_format_aliases() -> &'static [(&'static str, &'static str)] {
         ("unixtime", "int64"),
         ("timestamp", "int64"),
     ]
+}
+
+/// Normalize a built-in format alias without applying user configuration.
+///
+/// Internal schema tooling uses this alongside [`TypeMapper`] so synthesis,
+/// validation, and Rust type selection agree on vendor spellings.
+pub(crate) fn normalize_builtin_format(format: &str) -> &str {
+    builtin_format_aliases()
+        .iter()
+        .find_map(|(from, to)| (*from == format).then_some(*to))
+        .unwrap_or(format)
 }
 
 impl TypeMappingConfig {
@@ -891,12 +914,7 @@ impl TypeMapper {
         if let Some(target) = self.config.format_aliases.get(raw) {
             return Some(target.clone());
         }
-        for (from, to) in builtin_format_aliases() {
-            if *from == raw {
-                return Some((*to).to_string());
-            }
-        }
-        Some(raw.to_string())
+        Some(normalize_builtin_format(raw).to_string())
     }
 
     fn map_date_time(&self, strat: DateStrategy) -> MappedType {
@@ -941,20 +959,14 @@ impl TypeMapper {
         }
     }
 
-    fn map_time(&self, strat: DateStrategy) -> MappedType {
-        match strat {
-            DateStrategy::String => MappedType::plain("String"),
-            DateStrategy::Chrono => {
-                self.record(TypeFeature::Chrono);
-                MappedType::with_feature("chrono::NaiveTime", TypeFeature::Chrono)
-            }
-            DateStrategy::Time => {
-                self.record(TypeFeature::TimeTime);
-                // Same story as `time::Date`: no built-in codec, so
-                // the generator emits `time_time_format`.
-                MappedType::with_codec("time::Time", "time_time_format", TypeFeature::TimeTime)
-            }
-        }
+    fn map_time(&self, _strat: DateStrategy) -> MappedType {
+        // JSON Schema's `time` format is RFC 3339 `full-time`, not a local
+        // wall-clock time: `03:04:05Z` and `03:04:05.123-07:00` are canonical
+        // values. Neither chrono::NaiveTime nor time::Time has a UTC-offset
+        // component, so mapping to either type rejects or loses valid wire
+        // data. Preserve the exact string for every strategy; `date` and
+        // `date-time` continue to honor their configured typed mappings.
+        MappedType::plain("String")
     }
 
     fn map_duration(&self, strat: DurationStrategy) -> MappedType {
@@ -1004,10 +1016,10 @@ impl TypeMapper {
     fn map_binary(&self, strat: BinaryStrategy) -> MappedType {
         match strat {
             BinaryStrategy::String => MappedType::plain("String"),
-            BinaryStrategy::VecU8 => MappedType::plain("Vec<u8>"),
+            BinaryStrategy::VecU8 => MappedType::with_inline_codec("Vec<u8>", "binary_vec_serde"),
             BinaryStrategy::Bytes => {
                 self.record(TypeFeature::Bytes);
-                MappedType::with_feature("bytes::Bytes", TypeFeature::Bytes)
+                MappedType::with_codec("bytes::Bytes", "binary_bytes_serde", TypeFeature::Bytes)
             }
         }
     }
@@ -1141,6 +1153,7 @@ mod tests {
             "chrono::DateTime<chrono::Utc>"
         );
         assert_eq!(m.string_format(Some("date")).rust_type, "chrono::NaiveDate");
+        assert_eq!(m.string_format(Some("time")).rust_type, "String");
         assert_eq!(m.string_format(Some("uuid")).rust_type, "uuid::Uuid");
         assert_eq!(m.string_format(Some("uri")).rust_type, "url::Url");
         assert_eq!(
@@ -1254,9 +1267,11 @@ mod tests {
     fn builtin_aliases_normalize_uuid_variants_to_uuid() {
         let m = TypeMapper::default();
         for fmt in ["uuid4", "uuid_v4", "UUID"] {
+            assert_eq!(normalize_builtin_format(fmt), "uuid", "format = {fmt}");
             let mt = m.string_format(Some(fmt));
             assert_eq!(mt.rust_type, "uuid::Uuid", "format = {fmt}");
         }
+        assert_eq!(normalize_builtin_format("vendor-id"), "vendor-id");
     }
 
     #[test]

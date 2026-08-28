@@ -47,7 +47,7 @@ mod tests {
         let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
-        // Should generate untagged union
+        // Primitive/array branches can use Serde's untagged dispatch.
         assert!(
             types_content.contains("#[serde(untagged)]"),
             "Should generate untagged union"
@@ -152,8 +152,9 @@ mod tests {
         println!("Object variants test output:\n{types_content}");
 
         assert!(
-            types_content.contains("#[serde(untagged)]"),
-            "Should generate untagged union"
+            types_content.contains("impl<'de> Deserialize<'de> for MessageContent")
+                && types_content.contains("preserved the complete input"),
+            "Object oneOf should deserialize by exact branch shape"
         );
         assert!(
             types_content.contains("pub enum MessageContent"),
@@ -268,14 +269,86 @@ mod tests {
         let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
-        // Should generate tagged union for discriminated oneOf
+        // Discriminator dispatch is implemented manually so standalone
+        // variant structs can retain their own discriminator fields.
         assert!(
-            types_content.contains("#[serde(tag = \"type\")]"),
-            "Should generate tagged union for discriminated oneOf"
+            types_content.contains("match discriminator {")
+                && types_content.contains("\"cat\" =>")
+                && types_content.contains("\"dog\" =>"),
+            "Should deserialize the discriminated oneOf by tag"
         );
         assert!(
             !types_content.contains("#[serde(untagged)]"),
             "Should NOT generate untagged union when discriminator present"
+        );
+    }
+
+    #[test]
+    fn test_anyof_preserves_nested_discriminated_oneof_branch() {
+        let spec_json = minimal_spec(json!({
+            "ClearThinking": {
+                "type": "object",
+                "properties": {
+                    "keep": {
+                        "anyOf": [
+                            {
+                                "oneOf": [
+                                    {"$ref": "#/components/schemas/ThinkingTurns"},
+                                    {"$ref": "#/components/schemas/AllThinkingTurns"}
+                                ],
+                                "discriminator": {
+                                    "propertyName": "type",
+                                    "mapping": {
+                                        "thinking_turns": "#/components/schemas/ThinkingTurns",
+                                        "all": "#/components/schemas/AllThinkingTurns"
+                                    }
+                                }
+                            },
+                            {"type": "string", "const": "all"}
+                        ]
+                    }
+                }
+            },
+            "ThinkingTurns": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "const": "thinking_turns"},
+                    "value": {"type": "integer"}
+                },
+                "required": ["type", "value"]
+            },
+            "AllThinkingTurns": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "const": "all"}
+                },
+                "required": ["type"]
+            }
+        }));
+
+        let mut analyzer = openapi_to_rust::SchemaAnalyzer::new(spec_json).unwrap();
+        let mut analysis = analyzer.analyze().unwrap();
+        let generator = openapi_to_rust::CodeGenerator::new(Default::default());
+        let types_content = generator.generate(&mut analysis).unwrap();
+
+        assert!(
+            types_content.contains("pub enum ClearThinkingKeep"),
+            "outer anyOf should remain a Rust union, got:\n{types_content}"
+        );
+        assert!(
+            types_content.contains("String(String)"),
+            "outer anyOf should retain its string branch, got:\n{types_content}"
+        );
+        assert!(
+            types_content.contains("ThinkingTurns(ThinkingTurns)")
+                && types_content.contains("AllThinkingTurns(AllThinkingTurns)"),
+            "nested discriminated oneOf should retain both object variants, got:\n{types_content}"
+        );
+        assert!(
+            types_content.contains("match discriminator {")
+                && types_content.contains("\"thinking_turns\" =>")
+                && types_content.contains("\"all\" =>"),
+            "nested discriminated oneOf should dispatch on its tag, got:\n{types_content}"
         );
     }
 

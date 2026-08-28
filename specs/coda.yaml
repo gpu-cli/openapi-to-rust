@@ -8790,7 +8790,6 @@ components:
         - layout
         - createdAt
         - updatedAt
-        - viewId
       additionalProperties: false
       properties:
         id: *ref_29
@@ -10941,12 +10940,12 @@ components:
         - sessionsDesktop
         - sessionsOther
         - totalSessions
-        - aiCreditsChat,
-        - aiCreditsBlock,
-        - aiCreditsColumn,
-        - aiCreditsAssistant,
-        - aiCreditsReviewer,
-        - aiCredits,
+        - aiCreditsChat
+        - aiCreditsBlock
+        - aiCreditsColumn
+        - aiCreditsAssistant
+        - aiCreditsReviewer
+        - aiCredits
       additionalProperties: false
       properties:
         date:
@@ -11907,7 +11906,7 @@ components:
         mapping:
           user: '#/components/schemas/PackUserPrincipal'
           workspace: '#/components/schemas/PackWorkspacePrincipal'
-          global: '#/components/schemas/PackGlobalPrincipal'
+          worldwide: '#/components/schemas/PackGlobalPrincipal'
           nomosOrganization: '#/components/schemas/PackNomosOrganizationPrincipal'
           group: '#/components/schemas/PackGroupPrincipal'
           grammarlyInstitution: '#/components/schemas/PackGrammarlyInstitutionPrincipal'
@@ -14109,8 +14108,8 @@ components:
         propertyName: type
         mapping:
           custom: '#/components/schemas/PackCustomLog'
-          fetcher: '#/components/schemas/PackInvocationLog'
-          invocation: '#/components/schemas/PackFetcherLog'
+          fetcher: '#/components/schemas/PackFetcherLog'
+          invocation: '#/components/schemas/PackInvocationLog'
           internal: '#/components/schemas/PackInternalLog'
           auth: '#/components/schemas/PackAuthLog'
           ingestionLifecycle: '#/components/schemas/PackIngestionLifecycleLog'
@@ -15470,13 +15469,12 @@ components:
       required:
         - completionTimestamp
         - creationTimestamp
-        - errorMessage
         - executionType
         - fullExecutionId
         - ingestionExecutionId
         - ingestionId
         - ingestionName
-        - ingestionStatuses
+        - ingestionStatusCounts
         - startTimestamp
       additionalProperties: false
       properties:
@@ -15631,7 +15629,6 @@ components:
         - startTimestamp
         - completionTimestamp
         - errorMessage
-        - message
       additionalProperties: false
       properties:
         csbIngestionExecutionId:
@@ -15678,7 +15675,6 @@ components:
       type: object
       required:
         - completionTimestamp
-        - creationTimestamp
         - errorMessage
         - executionType
         - ingestionExecutionId

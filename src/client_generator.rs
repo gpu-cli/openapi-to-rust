@@ -166,6 +166,7 @@ struct BodyFieldPlan {
     value_ident: syn::Ident,
     value_type: TokenStream,
     access_path: Vec<syn::Ident>,
+    tri_state: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -770,6 +771,7 @@ impl CodeGenerator {
                         &field.preferred_method_name,
                         &mut used_methods,
                     );
+                    let preferred_method_name = field.preferred_method_name.clone();
                     let value_ident = field.value_ident;
                     let value_type = field.value_type;
                     let wire_name = field.wire_name;
@@ -779,15 +781,26 @@ impl CodeGenerator {
                         for access in &access_path {
                             target = quote! { #target.#access };
                         }
-                        quote! { #target = Some(#value_ident); }
+                        if field.tri_state {
+                            quote! { #target = Some(Some(#value_ident)); }
+                        } else {
+                            quote! { #target = Some(#value_ident); }
+                        }
                     } else {
                         let mut target = quote! { request };
                         for access in &access_path {
                             target = quote! { #target.#access };
                         }
-                        quote! {
-                            let request = self.#body_ident.get_or_insert_with(Default::default);
-                            #target = Some(#value_ident);
+                        if field.tri_state {
+                            quote! {
+                                let request = self.#body_ident.get_or_insert_with(Default::default);
+                                #target = Some(Some(#value_ident));
+                            }
+                        } else {
+                            quote! {
+                                let request = self.#body_ident.get_or_insert_with(Default::default);
+                                #target = Some(#value_ident);
+                            }
                         }
                     };
                     setters.push(quote! {
@@ -798,6 +811,64 @@ impl CodeGenerator {
                             self
                         }
                     });
+                    if field.tri_state {
+                        let null_ident = Self::allocate_builder_method(
+                            &format!("{preferred_method_name}_null"),
+                            &mut used_methods,
+                        );
+                        let absent_ident = Self::allocate_builder_method(
+                            &format!("{preferred_method_name}_absent"),
+                            &mut used_methods,
+                        );
+                        let null_assignment = if operation.request_body_required {
+                            let mut target = quote! { self.#body_ident };
+                            for access in &access_path {
+                                target = quote! { #target.#access };
+                            }
+                            quote! { #target = Some(None); }
+                        } else {
+                            let mut target = quote! { request };
+                            for access in &access_path {
+                                target = quote! { #target.#access };
+                            }
+                            quote! {
+                                let request = self.#body_ident.get_or_insert_with(Default::default);
+                                #target = Some(None);
+                            }
+                        };
+                        let absent_assignment = if operation.request_body_required {
+                            let mut target = quote! { self.#body_ident };
+                            for access in &access_path {
+                                target = quote! { #target.#access };
+                            }
+                            quote! { #target = None; }
+                        } else {
+                            let mut target = quote! { request };
+                            for access in &access_path {
+                                target = quote! { #target.#access };
+                            }
+                            quote! {
+                                if let Some(request) = self.#body_ident.as_mut() {
+                                    #target = None;
+                                }
+                            }
+                        };
+                        setters.push(quote! {
+                            #[doc = concat!("Set the optional nullable request-body field `", #wire_name, "` to JSON null.")]
+                            #[must_use]
+                            pub fn #null_ident(mut self) -> Self {
+                                #null_assignment
+                                self
+                            }
+
+                            #[doc = concat!("Omit the optional nullable request-body field `", #wire_name, "`.")]
+                            #[must_use]
+                            pub fn #absent_ident(mut self) -> Self {
+                                #absent_assignment
+                                self
+                            }
+                        });
+                    }
                 }
             }
             call_arguments.push(quote! { self.#body_ident });
@@ -997,7 +1068,6 @@ impl CodeGenerator {
                     required,
                     additional_properties,
                     analysis,
-                    None,
                 );
                 let required_fields: Vec<_> = emitted
                     .iter()
@@ -1080,7 +1150,6 @@ impl CodeGenerator {
                     required,
                     additional_properties,
                     analysis,
-                    None,
                 ) {
                     if field.is_required {
                         continue;
@@ -1098,6 +1167,12 @@ impl CodeGenerator {
                             analysis,
                         ),
                         access_path: field_path,
+                        tri_state: self.property_is_tri_state(
+                            schema_name,
+                            field.wire_name,
+                            field.property,
+                            field.is_required,
+                        ),
                     });
                 }
             }
@@ -2560,7 +2635,6 @@ impl CodeGenerator {
             required,
             additional_properties,
             analysis,
-            None,
         );
         if matches!(
             additional_properties,
@@ -2577,6 +2651,13 @@ impl CodeGenerator {
         let mut parts = Vec::new();
         for field in fields {
             let wire_name = field.wire_name;
+            let is_nullable = self.property_is_nullable(resolved_name, wire_name, field.property);
+            let is_tri_state = self.property_is_tri_state(
+                resolved_name,
+                wire_name,
+                field.property,
+                field.is_required,
+            );
             let ident = field.ident;
             let wire_format = wire_properties
                 .and_then(|properties| properties.get(wire_name))
@@ -2635,7 +2716,22 @@ impl CodeGenerator {
                     form = form.text(#wire_name, value.to_string());
                 },
             };
-            parts.push(if field.is_required {
+            parts.push(if is_tri_state {
+                // Multipart has no representation for a JSON null part. A
+                // present concrete value is sent; both outer absence and an
+                // explicit-null model state omit the part.
+                quote! {
+                    if let Some(Some(value)) = &request.#ident {
+                        #add_value
+                    }
+                }
+            } else if field.is_required && is_nullable {
+                quote! {
+                    if let Some(value) = &request.#ident {
+                        #add_value
+                    }
+                }
+            } else if field.is_required {
                 quote! {
                     let value = &request.#ident;
                     #add_value

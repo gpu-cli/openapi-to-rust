@@ -6,6 +6,52 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- The 55-spec compile gate now generates deterministic JSON instances for
+  representable component schemas, validates them against the source JSON
+  Schema, hydrates and serializes the exact generated Rust models, validates
+  their output, and requires a stable second round trip. Targeted runs such as
+  `scripts/spec-compile.sh anthropic` use the same gate and report sample and
+  skip coverage.
+
+### Changed
+
+- **Breaking (generated API).** Structs used as discriminated-union variants
+  retain their discriminator fields, so constructing one directly now requires
+  the same tag its standalone component schema requires. Parent unions perform
+  explicit discriminator-directed Serde dispatch instead of stripping the
+  field and relying on an internally tagged derive. This keeps direct values,
+  arrays, and union payloads on one schema-valid wire shape.
+
+### Fixed
+
+- Required nullable fields serialize `None` as explicit JSON `null` instead of
+  omitting a key listed by the schema's `required` array. Nullable component
+  schemas referenced by a property now propagate that nullability to the field.
+- A composition nested as one branch of an outer `anyOf` is retained as a named
+  Rust union variant instead of being silently dropped.
+
+- Boolean subschemas (`true` and `false`) parse wherever JSON Schema 2020-12
+  allows one — a property, a `$defs` entry, `not`, `if`/`then`/`else`,
+  `contains`, `propertyNames`, `patternProperties`, `dependentSchemas`, a
+  `oneOf` branch. `properties: {extra: true}` is how a spec says "this key
+  exists, any value"; one of those anywhere in a document used to fail the whole
+  thing with "data did not match any variant of untagged enum Schema" (#63).
+
+  `true` generates `serde_json::Value` and `false` a value that cannot occur —
+  both reported as faithful by `--report-untyped`. In a union, a `true` branch
+  makes the union unconstrained and a `false` branch is dropped, so
+  `oneOf: [A, false]` is `A`.
+- Integer keywords written as decimals — `maxItems: 2.0`, which JSON Schema
+  permits and the 2020-12 suite exercises — are read as the counts they are
+  rather than rejecting the document. A fractional value like `2.5` is still an
+  error.
+
+  Together these take the vendored JSON Schema 2020-12 corpus from 38 parse
+  failures to zero, with no round-trip loss.
+
+
 ## [0.14.0] - 2026-08-27
 
 ### Added
