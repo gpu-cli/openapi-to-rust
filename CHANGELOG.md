@@ -6,6 +6,67 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-28
+
+### Breaking changes
+
+#### Generated Rust API
+
+- Optional, nullable properties now generate `Option<Option<T>>` so Serde can
+  distinguish a missing key (`None`) from an explicit JSON `null`
+  (`Some(None)`) and a value (`Some(Some(value))`). Existing constructors and
+  comparisons need one more `Some`; when only the value matters, prefer
+  `field.flatten()` (for example,
+  `body.stream.flatten().unwrap_or(false)`). Required nullable properties
+  remain `Option<T>`, but now serialize `None` as the required JSON `null`
+  instead of omitting the key.
+- Structs used as discriminated-union variants retain their discriminator
+  fields. Constructing a variant payload directly must now initialize the tag
+  field with its generated enum value. Parent unions use explicit
+  discriminator-directed Serde dispatch instead of stripping the tag with an
+  internally tagged derive.
+- Correct schema information can change generated names and field types.
+  Inline and nested types now use path/provenance-aware names; nullable
+  containers and references keep their wrappers; scalar `allOf`, combined
+  object/union compositions, constrained `additionalProperties`, and nested
+  unions no longer fall back to incomplete carriers or `serde_json::Value`.
+  Regenerate code and update imports, struct literals, and enum pattern matches
+  rather than expecting the `0.14.x` model shape.
+- Integer types are selected from the effective schema bounds and may widen
+  (for example, from `i32` to `i64` or `u64`). With either typed date strategy,
+  JSON Schema `format: time` now remains `String` because RFC 3339 full-time
+  includes an offset that `chrono::NaiveTime` and `time::Time` cannot preserve.
+  Binary model fields configured as `Vec<u8>` or `bytes::Bytes` still use those
+  Rust types but now serialize as JSON strings instead of byte arrays.
+
+#### Wire behavior
+
+- `oneOf` deserialization now requires exactly one schema-valid object branch;
+  ambiguous and no-match payloads are rejected. `anyOf` preserves the complete
+  input object and chooses a schema-valid branch deterministically instead of
+  silently dropping keys while trying variants. Applications that depended on
+  the previous first-Serde-match behavior should handle the resulting decode
+  errors explicitly.
+- Discriminator mappings, `const`/`enum` tag domains, required tags, and
+  multi-value tag domains are enforced. A mapped branch may fall back to
+  structural matching only when the preferred branch does not validate, and a
+  missing tag may fall back only where the branch schema permits it. Payloads
+  previously accepted with contradictory, invented, or stripped tags can now
+  be rejected.
+
+#### Library API
+
+- `openapi::Schema` gained `Bool(bool)`, and
+  `openapi::SchemaDetails::{minimum, maximum}` changed from `Option<f64>` to
+  `Option<serde_json::Number>` so wide integer bounds are not rounded.
+- `analysis::SchemaType` gained `Nullable`; its `Union` and
+  `DiscriminatedUnion` variants gained `exclusive`. `analysis::PropertyInfo`
+  gained `synthesized_required`, while `analysis::UnionVariant` gained
+  `discriminator_values`, `preferred_discriminator_values`,
+  `discriminator_field_declared`, and `discriminator_field_required`.
+  Downstream exhaustive matches and public-struct literals must include the
+  new variants and fields.
+
 ### Added
 
 - The 55-spec compile gate now generates deterministic JSON instances for
@@ -13,16 +74,17 @@ when correcting output that was wrong or incomplete on the wire.
   Schema, hydrates and serializes the exact generated Rust models, validates
   their output, and requires a stable second round trip. Targeted runs such as
   `scripts/spec-compile.sh anthropic` use the same gate and report sample and
-  skip coverage.
+  skip coverage. The completed corpus run covered 28,139 of 29,045 components
+  with 103,031 schema-valid samples and 906 explicit skips.
+- The `internal-tools` feature now exposes the `schema-roundtrip` binary and
+  module used by the corpus gate; the validation-only `uuid` dependency remains
+  outside normal CLI and library builds.
 
 ### Changed
 
-- **Breaking (generated API).** Structs used as discriminated-union variants
-  retain their discriminator fields, so constructing one directly now requires
-  the same tag its standalone component schema requires. Parent unions perform
-  explicit discriminator-directed Serde dispatch instead of stripping the
-  field and relying on an internally tagged derive. This keeps direct values,
-  arrays, and union payloads on one schema-valid wire shape.
+- Schema round-trip validation is enabled by default for non-parse-only
+  `scripts/spec-compile.sh` runs. Set `SPEC_COMPILE_SCHEMA_ROUNDTRIP=0` only to
+  isolate an unrelated generation or compile failure.
 
 ### Fixed
 
@@ -31,7 +93,6 @@ when correcting output that was wrong or incomplete on the wire.
   schemas referenced by a property now propagate that nullability to the field.
 - A composition nested as one branch of an outer `anyOf` is retained as a named
   Rust union variant instead of being silently dropped.
-
 - Boolean subschemas (`true` and `false`) parse wherever JSON Schema 2020-12
   allows one — a property, a `$defs` entry, `not`, `if`/`then`/`else`,
   `contains`, `propertyNames`, `patternProperties`, `dependentSchemas`, a
@@ -50,7 +111,15 @@ when correcting output that was wrong or incomplete on the wire.
 
   Together these take the vendored JSON Schema 2020-12 corpus from 38 parse
   failures to zero, with no round-trip loss.
-
+- Nullable values are preserved through reference siblings, array items,
+  additional-property values, multi-branch unions, `allOf`, and null-only enum
+  schemas instead of being rejected or collapsed into a non-null type.
+- Inline schemas use collision-safe provenance paths, and components are no
+  longer overwritten by same-named inline types. Scalar and union carriers in
+  `allOf` keep all declared information, including sibling object properties.
+- Closed empty objects, constrained dynamic object keys, boolean literal field
+  names, wide integer domains, binary strings, and RFC 3339 time offsets now
+  round-trip without changing their schema-defined JSON shape.
 
 ## [0.14.0] - 2026-08-27
 
@@ -503,7 +572,13 @@ would have passed any amount of spec-diffing.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.3...v0.13.0
+[0.12.3]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.2...v0.12.3
+[0.12.2]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.1...v0.12.2
+[0.12.1]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.9.1...v0.10.0
