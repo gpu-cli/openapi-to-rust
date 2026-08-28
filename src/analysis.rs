@@ -2589,18 +2589,11 @@ impl SchemaAnalyzer {
             .get("x-stainless-const")
             .and_then(Value::as_bool)
             == Some(true)
+            && let Some(default) = details.default.as_ref().and_then(Value::as_str)
         {
             own_domain = Self::intersect_optional_domains(
                 own_domain,
-                Some(
-                    details
-                        .default
-                        .as_ref()
-                        .and_then(Value::as_str)
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect(),
-                ),
+                Some(vec![default.to_string()]),
             );
         }
 

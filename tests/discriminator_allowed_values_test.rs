@@ -172,6 +172,35 @@ fn discriminator_spec() -> Value {
                     { "$ref": "#/components/schemas/ObjectCarrier" }
                 ],
                 "discriminator": { "propertyName": "@type" }
+            },
+            "StainlessAlpha": {
+                "type": "object",
+                "required": ["type", "alpha"],
+                "properties": {
+                    "type": {
+                        "const": "stainless.alpha",
+                        "x-stainless-const": true
+                    },
+                    "alpha": { "type": "string" }
+                }
+            },
+            "StainlessBeta": {
+                "type": "object",
+                "required": ["type", "beta"],
+                "properties": {
+                    "type": {
+                        "const": "stainless.beta",
+                        "x-stainless-const": true
+                    },
+                    "beta": { "type": "string" }
+                }
+            },
+            "StainlessEvent": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/StainlessAlpha" },
+                    { "$ref": "#/components/schemas/StainlessBeta" }
+                ],
+                "discriminator": { "propertyName": "type" }
             }
         } }
     })
@@ -242,6 +271,10 @@ fn discriminator_values_follow_refs_compositions_and_multi_value_enums() {
         &analysis.schemas["ScalarOrTaggedObject"].schema_type,
         SchemaType::Union { .. }
     ));
+    assert_eq!(
+        union_values(&analysis, "StainlessEvent"),
+        vec![vec!["stainless.alpha"], vec!["stainless.beta"]]
+    );
 }
 
 #[test]
@@ -259,7 +292,7 @@ fn generated_unions_preserve_every_allowed_discriminator_value() {
 mod discriminator_allowed_value_roundtrip {
     use super::{
         ConflictingMappedUnion, InterpreterOutput, Media, ScalarOrTaggedObject,
-        ScheduledEventResponse,
+        ScheduledEventResponse, StainlessEvent,
     };
     use serde::{Serialize, de::DeserializeOwned};
 
@@ -306,6 +339,12 @@ mod discriminator_allowed_value_roundtrip {
         exact::<ScalarOrTaggedObject>(serde_json::json!(12.5));
         exact::<ScalarOrTaggedObject>(serde_json::json!({
             "@type": "object", "value": "payload"
+        }));
+        exact::<StainlessEvent>(serde_json::json!({
+            "type": "stainless.alpha", "alpha": "payload"
+        }));
+        exact::<StainlessEvent>(serde_json::json!({
+            "type": "stainless.beta", "beta": "payload"
         }));
     }
 }
