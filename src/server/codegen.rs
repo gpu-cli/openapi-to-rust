@@ -184,7 +184,7 @@ fn collect_schema_type_refs(
                 seed(&variant.type_name, queue, keep);
             }
         }
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for variant in variants {
                 seed(&variant.target, queue, keep);
             }

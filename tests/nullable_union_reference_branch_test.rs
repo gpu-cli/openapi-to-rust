@@ -64,7 +64,7 @@ fn direct_and_chained_union_reference_branches_retain_nullability() {
         ("AnyDirect", "NullableB"),
         ("AnyChained", "NullableBAlias"),
     ] {
-        let SchemaType::Union { variants } = &analysis.schemas[union_name].schema_type else {
+        let SchemaType::Union { variants, .. } = &analysis.schemas[union_name].schema_type else {
             panic!("{union_name} should be an untagged union");
         };
         assert_eq!(variants.len(), 2, "{union_name}: {variants:?}");

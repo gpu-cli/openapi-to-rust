@@ -11,7 +11,7 @@ fn analyze(spec: Value) -> SchemaAnalysis {
 
 fn union_targets(analysis: &SchemaAnalysis, name: &str) -> Vec<String> {
     match &analysis.schemas[name].schema_type {
-        SchemaType::Union { variants } => variants
+        SchemaType::Union { variants, .. } => variants
             .iter()
             .map(|SchemaRef { target, .. }| target.clone())
             .collect(),

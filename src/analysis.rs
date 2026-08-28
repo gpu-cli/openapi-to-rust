@@ -198,7 +198,7 @@ fn collect_type_dependencies(
                 collect_type_dependencies(value_type, targets, depth + 1);
             }
         }
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for variant in variants {
                 targets.insert(variant.target.clone());
             }
@@ -375,7 +375,7 @@ fn collect_untyped(
         }
         // A union branch that mapped to an untyped Rust type is carried as a
         // variant target string, so it is recognized by name here.
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for (index, variant) in variants.iter().enumerate() {
                 if let Some(shape) = untyped_shape_of(&variant.target) {
                     findings.push(UntypedFinding {
@@ -626,8 +626,13 @@ pub enum SchemaType {
         discriminator_field: String,
         variants: Vec<UnionVariant>,
     },
-    /// Simple union (anyOf without discriminator)
-    Union { variants: Vec<SchemaRef> },
+    /// Simple union. Exclusive unions originate from `oneOf` and require
+    /// exactly one branch to preserve the complete input shape; non-exclusive
+    /// unions retain `anyOf`/multi-type first-match semantics.
+    Union {
+        variants: Vec<SchemaRef>,
+        exclusive: bool,
+    },
     /// Array type
     Array { item_type: Box<SchemaType> },
     /// A nullable value in a container position. Object properties carry
@@ -2817,7 +2822,10 @@ impl SchemaAnalyzer {
                             &mut dependencies,
                         )?);
                     }
-                    SchemaType::Union { variants }
+                    SchemaType::Union {
+                        variants,
+                        exclusive: false,
+                    }
                 } else {
                     self.analyze_single_typed_schema(
                         schema,
@@ -3590,7 +3598,10 @@ impl SchemaAnalyzer {
                 AnalyzedSchema {
                     name: union_type_name.clone(),
                     original: serde_json::to_value(schema).unwrap_or(Value::Null),
-                    schema_type: SchemaType::Union { variants },
+                    schema_type: SchemaType::Union {
+                        variants,
+                        exclusive: false,
+                    },
                     dependencies: HashSet::new(),
                     nullable: false,
                     description: details.description.clone(),
@@ -3819,10 +3830,7 @@ impl SchemaAnalyzer {
                         )?;
 
                         // If we got a union type (not discriminated), we need to store it as a named type
-                        if let SchemaType::Union {
-                            variants: _union_variants,
-                        } = &oneof_result
-                        {
+                        if let SchemaType::Union { .. } = &oneof_result {
                             // Store the union as a named type in resolved_cache
                             self.resolved_cache.insert(
                                 union_name.clone(),
@@ -3874,6 +3882,7 @@ impl SchemaAnalyzer {
                         }
                         return Ok(SchemaType::Union {
                             variants: union_variants,
+                            exclusive: false,
                         });
                     }
                 }
@@ -4806,6 +4815,7 @@ impl SchemaAnalyzer {
             if !union_variants.is_empty() {
                 return Ok(SchemaType::Union {
                     variants: union_variants,
+                    exclusive: matches!(union_kind, InlineUnionKind::OneOf),
                 });
             }
 
@@ -4849,6 +4859,16 @@ impl SchemaAnalyzer {
                 .analyze_schema_value(filtered[0].1, parent_name)
                 .map(|a| a.schema_type);
         }
+
+        // Exact, unique branch selection is appropriate for object-only
+        // oneOf unions. Mixed scalar/object and unconstrained branches need
+        // normal untagged Serde semantics: a `serde_json::Value` alternative,
+        // for example, intentionally accepts shapes that a narrower branch
+        // can also hydrate.
+        let exclusive_object_union = matches!(union_kind, InlineUnionKind::OneOf)
+            && filtered
+                .iter()
+                .all(|(_, schema)| self.branch_resolves_to_object(schema));
 
         let mut union_variants = Vec::new();
 
@@ -5028,6 +5048,7 @@ impl SchemaAnalyzer {
         if !union_variants.is_empty() {
             return Ok(SchemaType::Union {
                 variants: union_variants,
+                exclusive: exclusive_object_union,
             });
         }
 
@@ -6971,7 +6992,10 @@ impl SchemaAnalyzer {
             }
 
             if !variants.is_empty() {
-                return Ok(SchemaType::Union { variants });
+                return Ok(SchemaType::Union {
+                    variants,
+                    exclusive: false,
+                });
             }
         }
 
@@ -9064,7 +9088,7 @@ fn rewrite_schema_type_names(schema_type: &mut SchemaType, aliases: &BTreeMap<St
                 variant.schema_ref = renamed_schema_name(&variant.schema_ref, aliases);
             }
         }
-        SchemaType::Union { variants } | SchemaType::Composition { schemas: variants } => {
+        SchemaType::Union { variants, .. } | SchemaType::Composition { schemas: variants } => {
             for variant in variants {
                 variant.target = renamed_schema_name(&variant.target, aliases);
             }

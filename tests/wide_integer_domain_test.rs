@@ -116,7 +116,7 @@ fn integer_width_follows_effective_schema_domain() {
         SchemaType::Primitive { rust_type, .. } if rust_type == "u64"
     ));
 
-    let SchemaType::Union { variants } = &analysis.schemas["WideOrText"].schema_type else {
+    let SchemaType::Union { variants, .. } = &analysis.schemas["WideOrText"].schema_type else {
         panic!("WideOrText should be a union");
     };
     assert_eq!(variants[0].target, "u64");

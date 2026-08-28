@@ -1805,7 +1805,7 @@ impl CodeGenerator {
                             nullable: false,
                         })
                         .collect();
-                    self.generate_union_enum(schema, &schema_refs, analysis)
+                    self.generate_union_enum(schema, &schema_refs, false, analysis)
                 } else {
                     self.generate_discriminated_enum(
                         schema,
@@ -1815,7 +1815,10 @@ impl CodeGenerator {
                     )
                 }
             }
-            SchemaType::Union { variants } => self.generate_union_enum(schema, variants, analysis),
+            SchemaType::Union {
+                variants,
+                exclusive,
+            } => self.generate_union_enum(schema, variants, *exclusive, analysis),
             SchemaType::Reference { target } => {
                 // For references, check if we need to generate a type alias
                 // This handles cases like nullable patterns
@@ -2890,7 +2893,7 @@ impl CodeGenerator {
                     nullable: false,
                 })
                 .collect();
-            return self.generate_union_enum(schema, &schema_refs, analysis);
+            return self.generate_union_enum(schema, &schema_refs, false, analysis);
         }
 
         let enclosing = self.to_rust_type_name(&schema.name);
@@ -3195,58 +3198,88 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         variants: &[crate::analysis::SchemaRef],
+        exclusive: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
         // Generate meaningful variant names based on type names
         let mut used_variant_names = std::collections::HashSet::new();
-        let enum_variants = variants.iter().enumerate().map(|(i, variant)| {
-            // Generate a meaningful variant name from the type name
-            let base_variant_name = self.type_name_to_variant_name(&variant.target);
-            let variant_name = self.ensure_unique_variant_name_generator(
-                base_variant_name,
-                &mut used_variant_names,
-                i,
-            );
-            let variant_name_ident = format_ident!("{}", variant_name);
+        let enum_variants = variants
+            .iter()
+            .enumerate()
+            .map(|(i, variant)| {
+                // Generate a meaningful variant name from the type name
+                let base_variant_name = self.type_name_to_variant_name(&variant.target);
+                let variant_name = self.ensure_unique_variant_name_generator(
+                    base_variant_name,
+                    &mut used_variant_names,
+                    i,
+                );
+                let variant_name_ident = format_ident!("{}", variant_name);
 
-            // For primitive types and Vec types, use them directly without conversion
-            let variant_type_tokens = if matches!(
-                variant.target.as_str(),
-                "bool"
-                    | "i8"
-                    | "i16"
-                    | "i32"
-                    | "i64"
-                    | "i128"
-                    | "u8"
-                    | "u16"
-                    | "u32"
-                    | "u64"
-                    | "u128"
-                    | "f32"
-                    | "f64"
-                    | "String"
-            ) {
-                let type_ident = format_ident!("{}", variant.target);
-                quote! { #type_ident }
-            } else if variant.target == "serde_json::Value" {
-                // The target is a fully-qualified path; emit it as a path so
-                // it doesn't get mangled into a phantom `SerdeJsonValue` ident.
-                quote! { serde_json::Value }
-            } else if variant.target.starts_with("Vec<") && variant.target.ends_with(">") {
-                // Handle Vec types by parsing the inner type
-                let inner = &variant.target[4..variant.target.len() - 1];
+                // For primitive types and Vec types, use them directly without conversion
+                let variant_type_tokens = if matches!(
+                    variant.target.as_str(),
+                    "bool"
+                        | "i8"
+                        | "i16"
+                        | "i32"
+                        | "i64"
+                        | "i128"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "u128"
+                        | "f32"
+                        | "f64"
+                        | "String"
+                ) {
+                    let type_ident = format_ident!("{}", variant.target);
+                    quote! { #type_ident }
+                } else if variant.target == "serde_json::Value" {
+                    // The target is a fully-qualified path; emit it as a path so
+                    // it doesn't get mangled into a phantom `SerdeJsonValue` ident.
+                    quote! { serde_json::Value }
+                } else if variant.target.starts_with("Vec<") && variant.target.ends_with(">") {
+                    // Handle Vec types by parsing the inner type
+                    let inner = &variant.target[4..variant.target.len() - 1];
 
-                // Handle nested Vec types (e.g., Vec<Vec<i64>>)
-                if inner.starts_with("Vec<") && inner.ends_with(">") {
-                    let inner_inner = &inner[4..inner.len() - 1];
-                    if inner_inner == "serde_json::Value" {
-                        quote! { Vec<Vec<serde_json::Value>> }
+                    // Handle nested Vec types (e.g., Vec<Vec<i64>>)
+                    if inner.starts_with("Vec<") && inner.ends_with(">") {
+                        let inner_inner = &inner[4..inner.len() - 1];
+                        if inner_inner == "serde_json::Value" {
+                            quote! { Vec<Vec<serde_json::Value>> }
+                        } else {
+                            let inner_inner_type = if matches!(
+                                inner_inner,
+                                "bool"
+                                    | "i8"
+                                    | "i16"
+                                    | "i32"
+                                    | "i64"
+                                    | "i128"
+                                    | "u8"
+                                    | "u16"
+                                    | "u32"
+                                    | "u64"
+                                    | "u128"
+                                    | "f32"
+                                    | "f64"
+                                    | "String"
+                            ) {
+                                format_ident!("{}", inner_inner)
+                            } else {
+                                format_ident!("{}", self.to_rust_type_name(inner_inner))
+                            };
+                            quote! { Vec<Vec<#inner_inner_type>> }
+                        }
+                    } else if inner == "serde_json::Value" {
+                        quote! { Vec<serde_json::Value> }
                     } else {
-                        let inner_inner_type = if matches!(
-                            inner_inner,
+                        let inner_type = if matches!(
+                            inner,
                             "bool"
                                 | "i8"
                                 | "i16"
@@ -3262,80 +3295,57 @@ impl CodeGenerator {
                                 | "f64"
                                 | "String"
                         ) {
-                            format_ident!("{}", inner_inner)
+                            format_ident!("{}", inner)
                         } else {
-                            format_ident!("{}", self.to_rust_type_name(inner_inner))
+                            format_ident!("{}", self.to_rust_type_name(inner))
                         };
-                        quote! { Vec<Vec<#inner_inner_type>> }
+                        quote! { Vec<#inner_type> }
                     }
-                } else if inner == "serde_json::Value" {
-                    quote! { Vec<serde_json::Value> }
+                } else if variant.target.contains("::") || variant.target.contains('<') {
+                    // Qualified Rust path or generic (chrono::DateTime<chrono::Utc>,
+                    // bytes::Bytes, std::net::Ipv4Addr) emitted by TypeMapper. Pass
+                    // it straight to syn — the to_rust_type_name PascalCase
+                    // pipeline below would mangle it into a non-existent ident.
+                    parse_rust_type(&variant.target).unwrap_or_else(|_| {
+                        let fallback = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                        quote! { #fallback }
+                    })
                 } else {
-                    let inner_type = if matches!(
-                        inner,
-                        "bool"
-                            | "i8"
-                            | "i16"
-                            | "i32"
-                            | "i64"
-                            | "i128"
-                            | "u8"
-                            | "u16"
-                            | "u32"
-                            | "u64"
-                            | "u128"
-                            | "f32"
-                            | "f64"
-                            | "String"
-                    ) {
-                        format_ident!("{}", inner)
-                    } else {
-                        format_ident!("{}", self.to_rust_type_name(inner))
-                    };
-                    quote! { Vec<#inner_type> }
-                }
-            } else if variant.target.contains("::") || variant.target.contains('<') {
-                // Qualified Rust path or generic (chrono::DateTime<chrono::Utc>,
-                // bytes::Bytes, std::net::Ipv4Addr) emitted by TypeMapper. Pass
-                // it straight to syn — the to_rust_type_name PascalCase
-                // pipeline below would mangle it into a non-existent ident.
-                parse_rust_type(&variant.target).unwrap_or_else(|_| {
-                    let fallback = format_ident!("{}", self.to_rust_type_name(&variant.target));
-                    quote! { #fallback }
-                })
-            } else {
-                let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
-                quote! { #type_ident }
-            };
+                    let type_ident = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                    quote! { #type_ident }
+                };
 
-            // Self-referential variant (variant payload type == enclosing
-            // enum) yields an infinite-size enum (E0072). Wrap in `Box<T>` to
-            // break the cycle. Observed in microsoft-graph.yaml.
-            let target_rust_name = self.to_rust_type_name(&variant.target);
-            let enclosing_name = self.to_rust_type_name(&schema.name);
-            let is_self_ref = target_rust_name == enclosing_name;
-            // Indirect cycles (stripe BankAccount → BankAccountCustomer →
-            // Customer → BankAccountCustomer): variants pointing into the
-            // analysis's recursive_schemas set must also be heap-allocated.
-            let is_recursive_target = analysis
-                .dependencies
-                .recursive_schemas
-                .contains(&variant.target);
-            let variant_type_tokens = if is_self_ref || is_recursive_target {
-                quote! { Box<#variant_type_tokens> }
-            } else {
-                variant_type_tokens
-            };
-            let variant_type_tokens = if variant.nullable {
-                quote! { Option<#variant_type_tokens> }
-            } else {
-                variant_type_tokens
-            };
+                // Self-referential variant (variant payload type == enclosing
+                // enum) yields an infinite-size enum (E0072). Wrap in `Box<T>` to
+                // break the cycle. Observed in microsoft-graph.yaml.
+                let target_rust_name = self.to_rust_type_name(&variant.target);
+                let enclosing_name = self.to_rust_type_name(&schema.name);
+                let is_self_ref = target_rust_name == enclosing_name;
+                // Indirect cycles (stripe BankAccount → BankAccountCustomer →
+                // Customer → BankAccountCustomer): variants pointing into the
+                // analysis's recursive_schemas set must also be heap-allocated.
+                let is_recursive_target = analysis
+                    .dependencies
+                    .recursive_schemas
+                    .contains(&variant.target);
+                let variant_type_tokens = if is_self_ref || is_recursive_target {
+                    quote! { Box<#variant_type_tokens> }
+                } else {
+                    variant_type_tokens
+                };
+                let variant_type_tokens = if variant.nullable {
+                    quote! { Option<#variant_type_tokens> }
+                } else {
+                    variant_type_tokens
+                };
 
-            quote! {
-                #variant_name_ident(#variant_type_tokens),
-            }
-        });
+                (variant_name_ident, variant_type_tokens)
+            })
+            .collect::<Vec<_>>();
+        let variant_declarations = enum_variants
+            .iter()
+            .map(|(variant_name, variant_type)| quote! { #variant_name(#variant_type), })
+            .collect::<Vec<_>>();
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -3343,7 +3353,86 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        // Generate derives with optional Specta support
+        if exclusive {
+            let derives = if self.config.enable_specta {
+                quote! {
+                    #[derive(Debug, Clone)]
+                    #[cfg_attr(feature = "specta", derive(specta::Type))]
+                }
+            } else {
+                quote! { #[derive(Debug, Clone)] }
+            };
+            let serialize_arms = enum_variants
+                .iter()
+                .map(|(variant_name, _)| {
+                    quote! {
+                        Self::#variant_name(value) => serde::Serialize::serialize(value, serializer),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let deserialize_attempts = enum_variants
+                .iter()
+                .map(|(variant_name, variant_type)| {
+                    quote! {
+                        if let Ok(candidate) =
+                            serde_json::from_value::<#variant_type>(input.clone())
+                        {
+                            let preserves_complete_input = serde_json::to_value(&candidate)
+                                .map(|encoded| encoded == input)
+                                .unwrap_or(false);
+                            if preserves_complete_input {
+                                if matched.is_some() {
+                                    return Err(serde::de::Error::custom(concat!(
+                                        "ambiguous oneOf value for ",
+                                        stringify!(#enum_name),
+                                        ": more than one branch preserved the complete input",
+                                    )));
+                                }
+                                matched = Some(Self::#variant_name(candidate));
+                            }
+                        }
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            return Ok(quote! {
+                #doc_comment
+                #derives
+                pub enum #enum_name {
+                    #(#variant_declarations)*
+                }
+
+                impl Serialize for #enum_name {
+                    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        match self {
+                            #(#serialize_arms)*
+                        }
+                    }
+                }
+
+                impl<'de> Deserialize<'de> for #enum_name {
+                    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        let input = <serde_json::Value as Deserialize>::deserialize(deserializer)?;
+                        let mut matched = None;
+                        #(#deserialize_attempts)*
+                        matched.ok_or_else(|| serde::de::Error::custom(concat!(
+                            "no oneOf branch for ",
+                            stringify!(#enum_name),
+                            " preserved the complete input",
+                        )))
+                    }
+                }
+            });
+        }
+
+        // Generate derives with optional Specta support for non-exclusive
+        // unions, where multiple anyOf branches may legitimately match.
         let derives = if self.config.enable_specta {
             quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -3361,7 +3450,7 @@ impl CodeGenerator {
             #doc_comment
             #derives
             pub enum #enum_name {
-                #(#enum_variants)*
+                #(#variant_declarations)*
             }
         })
     }
@@ -4231,7 +4320,7 @@ impl CodeGenerator {
         // Check all references in union variants
         for schema in analysis.schemas.values() {
             match &schema.schema_type {
-                crate::analysis::SchemaType::Union { variants } => {
+                crate::analysis::SchemaType::Union { variants, .. } => {
                     for variant in variants {
                         if !defined_types.contains(&variant.target) {
                             missing.insert(variant.target.clone());
