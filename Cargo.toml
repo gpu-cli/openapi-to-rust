@@ -58,6 +58,7 @@ serde_path_to_error = "0.1.20"
 serde_yaml = "0.9"
 insta = { version = "1.41", features = ["yaml"] }
 tempfile = "3.0"
+uuid = { version = "1", features = ["serde"] }
 
 [features]
 default = ["cli"]
