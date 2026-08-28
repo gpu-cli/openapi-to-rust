@@ -98,10 +98,11 @@ fn top_level_two_scalar_type_array_becomes_untagged_enum() {
     );
 }
 
-/// The 3.1 nullable shorthand (`[X, "null"]`) must keep collapsing to
-/// `Option<X>` — only genuine multi-scalar unions get an enum.
+/// The 3.1 nullable shorthand (`[X, "null"]`) must not synthesize an enum.
+/// On an optional property, the outer `Option` tracks field presence while the
+/// inner `Option` retains an explicit JSON null.
 #[test]
-fn nullable_shorthand_still_collapses_to_option() {
+fn nullable_shorthand_uses_tri_state_option_without_union() {
     let spec = json!({
         "openapi": "3.1.0",
         "info": {"title": "Test", "version": "1.0"},
@@ -120,8 +121,8 @@ fn nullable_shorthand_still_collapses_to_option() {
     let result = test_generation("nullable_shorthand_collapses", spec).expect("Generation failed");
 
     assert!(
-        result.contains("pub maybe_name: Option<String>"),
-        "the nullable shorthand must stay a plain Option<String>, got:\n{result}"
+        result.contains("pub maybe_name: Option<Option<String>>"),
+        "the nullable shorthand must preserve missing versus explicit null, got:\n{result}"
     );
     assert!(
         !result.contains("enum WidgetMaybeName"),

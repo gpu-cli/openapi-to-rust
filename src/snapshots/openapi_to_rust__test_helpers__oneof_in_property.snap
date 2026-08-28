@@ -92,11 +92,38 @@ impl serde::Serialize for ImageBlockSource {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("base64".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "base64") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(Base64ImageSource),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("base64".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::URLImageSource(payload) => {
@@ -112,11 +139,38 @@ impl serde::Serialize for ImageBlockSource {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("url".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "url") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(URLImageSource),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("url".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -128,30 +182,99 @@ impl<'de> serde::Deserialize<'de> for ImageBlockSource {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let discriminator = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom(
-                concat!("missing string discriminator `", "type", "`",),
-            ))?
-            .to_string();
-        match discriminator.as_str() {
-            "base64" => {
-                serde_json::from_value::<Base64ImageSource>(value)
-                    .map(Self::Base64ImageSource)
-                    .map_err(serde::de::Error::custom)
+        let discriminator = match value.get("type") {
+            Some(serde_json::Value::String(discriminator)) => {
+                Some(discriminator.as_str())
             }
-            "url" => {
-                serde_json::from_value::<URLImageSource>(value)
-                    .map(Self::URLImageSource)
-                    .map_err(serde::de::Error::custom)
+            Some(_) => {
+                return Err(
+                    serde::de::Error::custom(
+                        concat!("non-string discriminator `", "type", "`",),
+                    ),
+                );
             }
-            other => {
+            None => None,
+        };
+        match discriminator {
+            Some(discriminator) => {
+                match discriminator {
+                    "base64" => {
+                        let primary_error = match serde_json::from_value::<
+                            Base64ImageSource,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::Base64ImageSource(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            URLImageSource,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "base64", first_name, stringify!(URLImageSource),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::URLImageSource(payload),
+                                stringify!(URLImageSource),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "url" => {
+                        let primary_error = match serde_json::from_value::<
+                            URLImageSource,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::URLImageSource(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            Base64ImageSource,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "url", first_name, stringify!(Base64ImageSource),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::Base64ImageSource(payload),
+                                stringify!(Base64ImageSource),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    other => {
+                        Err(
+                            serde::de::Error::custom(
+                                format!(
+                                    "unknown discriminator value `{other}` for `{}`", "type",
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+            None => {
                 Err(
                     serde::de::Error::custom(
-                        format!(
-                            "unknown discriminator value `{other}` for `{}`", "type",
-                        ),
+                        concat!("missing string discriminator `", "type", "`",),
                     ),
                 )
             }

@@ -78,14 +78,14 @@ fn test_underscore_properties_structured() {
     // Verify the struct is generated
     assert!(result.contains("pub struct ConfigSchema"));
 
-    // Verify the union types are generated with proper names (no underscores)
+    // Optional nullable properties preserve missing versus explicit null.
     assert!(
         result.contains("ConfigSchemaAllowedTools")
-            || result.contains("pub allowed_tools: Option<Vec<String>>")
+            || result.contains("pub allowed_tools: Option<Option<Vec<String>>>")
     );
     assert!(
         result.contains("ConfigSchemaCacheControl")
-            || result.contains("pub cache_control: Option<String>")
+            || result.contains("pub cache_control: Option<Option<String>>")
     );
 
     // Verify no underscores in generated type names
@@ -167,11 +167,9 @@ fn test_complex_nested_schema() {
     // Verify status enum is generated
     assert!(result.contains("pub enum MessageBatchStatus"));
 
-    // The last_id property is `anyOf: [null, string]` — a nullable
-    // pattern. We unwrap to Option<String> rather than synthesizing a
-    // union wrapper type (avoids name collisions with referenced
-    // schemas; see analyze_object_schema's nullable-pattern handling).
-    assert!(result.contains("pub last_id: Option<String>"));
+    // The nullable pattern avoids a synthetic union type, while the two
+    // Options retain field presence and explicit JSON null independently.
+    assert!(result.contains("pub last_id: Option<Option<String>>"));
 
     // Check union types don't have underscores
     assert!(!result.contains("Beta_List_Response"));
@@ -210,11 +208,6 @@ fn test_nullable_fields_structured() {
     assert!(result.contains("pub struct User"));
 
     // Verify nullable field types are handled properly
-    assert!(
-        result.contains("email: Option<UserEmail>") || result.contains("email: Option<String>")
-    );
-    assert!(
-        result.contains("metadata: Option<UserMetadata>")
-            || result.contains("metadata: Option<serde_json::Value>")
-    );
+    assert!(result.contains("email: Option<Option<String>>"));
+    assert!(result.contains("metadata: Option<Option<serde_json::Value>>"));
 }

@@ -47,7 +47,7 @@ mod tests {
         let generator = openapi_to_rust::CodeGenerator::new(Default::default());
         let types_content = generator.generate(&mut analysis).unwrap();
 
-        // Should generate untagged union
+        // Primitive/array branches can use Serde's untagged dispatch.
         assert!(
             types_content.contains("#[serde(untagged)]"),
             "Should generate untagged union"
@@ -152,8 +152,9 @@ mod tests {
         println!("Object variants test output:\n{types_content}");
 
         assert!(
-            types_content.contains("#[serde(untagged)]"),
-            "Should generate untagged union"
+            types_content.contains("impl<'de> Deserialize<'de> for MessageContent")
+                && types_content.contains("preserved the complete input"),
+            "Object oneOf should deserialize by exact branch shape"
         );
         assert!(
             types_content.contains("pub enum MessageContent"),
@@ -271,7 +272,9 @@ mod tests {
         // Discriminator dispatch is implemented manually so standalone
         // variant structs can retain their own discriminator fields.
         assert!(
-            types_content.contains("match discriminator.as_str()"),
+            types_content.contains("match discriminator {")
+                && types_content.contains("\"cat\" =>")
+                && types_content.contains("\"dog\" =>"),
             "Should deserialize the discriminated oneOf by tag"
         );
         assert!(
@@ -342,7 +345,9 @@ mod tests {
             "nested discriminated oneOf should retain both object variants, got:\n{types_content}"
         );
         assert!(
-            types_content.contains("match discriminator.as_str()"),
+            types_content.contains("match discriminator {")
+                && types_content.contains("\"thinking_turns\" =>")
+                && types_content.contains("\"all\" =>"),
             "nested discriminated oneOf should dispatch on its tag, got:\n{types_content}"
         );
     }

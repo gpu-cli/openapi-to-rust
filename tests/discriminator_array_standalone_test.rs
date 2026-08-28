@@ -101,7 +101,9 @@ fn test_discriminator_stripped_struct_in_standalone_array() {
          Generated:\n{result}"
     );
     assert!(
-        result.contains("match discriminator.as_str()"),
+        result.contains("Some(discriminator) =>")
+            && result.contains("\"text\" =>")
+            && result.contains("\"image\" =>"),
         "InputContentBlock must deserialize by inspecting its discriminator.\n\
          Generated:\n{result}"
     );

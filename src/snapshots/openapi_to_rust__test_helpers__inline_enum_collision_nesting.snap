@@ -18,62 +18,18 @@ pub struct PlanData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<PlanDataTypePlans>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub enum PlanDataTypePlans {
-    #[default]
-    #[serde(rename = "plans")]
-    Plans,
-}
-impl PlanDataTypePlans {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Plans => "plans",
-        }
-    }
-}
-impl ::std::fmt::Display for PlanDataTypePlans {
-    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-impl AsRef<str> for PlanDataTypePlans {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct PlanDataAttributes {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub specs: Option<PlanDataSpecs>,
-}
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct PlanDataSpecs {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub drives: Option<Vec<PlanDataDrivesItem>>,
-}
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct PlanDataDrivesItem {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub r#type: Option<PlanDataType>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum PlanDataType {
     #[default]
-    #[serde(rename = "SSD")]
-    Ssd,
-    #[serde(rename = "HDD")]
-    Hdd,
-    #[serde(rename = "NVME")]
-    Nvme,
+    #[serde(rename = "plans")]
+    Plans,
 }
 impl PlanDataType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Ssd => "SSD",
-            Self::Hdd => "HDD",
-            Self::Nvme => "NVME",
+            Self::Plans => "plans",
         }
     }
 }
@@ -83,6 +39,50 @@ impl ::std::fmt::Display for PlanDataType {
     }
 }
 impl AsRef<str> for PlanDataType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PlanDataAttributes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub specs: Option<PlanDataAttributesSpecs>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PlanDataAttributesSpecs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drives: Option<Vec<PlanDataAttributesSpecsDrivesItem>>,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct PlanDataAttributesSpecsDrivesItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<PlanDataAttributesSpecsDrivesItemType>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+pub enum PlanDataAttributesSpecsDrivesItemType {
+    #[default]
+    #[serde(rename = "SSD")]
+    Ssd,
+    #[serde(rename = "HDD")]
+    Hdd,
+    #[serde(rename = "NVME")]
+    Nvme,
+}
+impl PlanDataAttributesSpecsDrivesItemType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ssd => "SSD",
+            Self::Hdd => "HDD",
+            Self::Nvme => "NVME",
+        }
+    }
+}
+impl ::std::fmt::Display for PlanDataAttributesSpecsDrivesItemType {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl AsRef<str> for PlanDataAttributesSpecsDrivesItemType {
     fn as_ref(&self) -> &str {
         self.as_str()
     }

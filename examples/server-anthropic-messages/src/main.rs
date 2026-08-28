@@ -58,6 +58,7 @@ fn messages_unary() -> MessagesPostResponse {
         content: vec![gen::ContentBlock::TextBlock(gen::ResponseTextBlock {
             citations: None,
             text: "hello (unary)".into(),
+            r#type: gen::ResponseTextBlockType::Text,
         })],
         id: "msg_demo".into(),
         model: gen::Model::Custom("claude-demo".into()),

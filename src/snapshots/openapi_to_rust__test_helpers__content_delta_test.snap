@@ -11,6 +11,19 @@ expression: "&generated_code"
 #![allow(clippy::let_unit_value)]
 #![allow(unreachable_patterns)]
 use serde::{Deserialize, Serialize};
+/// Serde normally maps both a missing `Option<T>` field and an
+/// explicit JSON null to `None`. Wrapping the decoded value in
+/// `Some` retains the field-presence bit for `Option<Option<T>>`.
+mod tri_state_serde {
+    use serde::{Deserialize, Deserializer};
+    pub fn deserialize<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        T::deserialize(de).map(Some)
+    }
+}
 ///Represents a streamed chunk of a chat completion response
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateChatCompletionStreamResponse {
@@ -53,22 +66,26 @@ impl AsRef<str> for CreateChatCompletionStreamResponseObject {
 pub struct CreateChatCompletionStreamResponseChoicesItem {
     pub delta: ChatCompletionStreamResponseDelta,
     ///The reason the model stopped generating tokens
-    pub finish_reason: Option<CreateChatCompletionStreamResponseFinishReason>,
+    pub finish_reason: Option<CreateChatCompletionStreamResponseChoicesItemFinishReason>,
     ///The index of the choice in the list of choices
     pub index: i64,
     ///Log probability information for the choice
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub logprobs: Option<CreateChatCompletionStreamResponseLogprobs>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub logprobs: Option<Option<CreateChatCompletionStreamResponseChoicesItemLogprobs>>,
 }
 ///Log probability information for the choice
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CreateChatCompletionStreamResponseLogprobs {
+pub struct CreateChatCompletionStreamResponseChoicesItemLogprobs {
     pub content: Option<Vec<ChatCompletionTokenLogprob>>,
     pub refusal: Option<Vec<ChatCompletionTokenLogprob>>,
 }
 ///The reason the model stopped generating tokens
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub enum CreateChatCompletionStreamResponseFinishReason {
+pub enum CreateChatCompletionStreamResponseChoicesItemFinishReason {
     #[default]
     #[serde(rename = "stop")]
     Stop,
@@ -81,7 +98,7 @@ pub enum CreateChatCompletionStreamResponseFinishReason {
     #[serde(rename = "function_call")]
     FunctionCall,
 }
-impl CreateChatCompletionStreamResponseFinishReason {
+impl CreateChatCompletionStreamResponseChoicesItemFinishReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Stop => "stop",
@@ -92,12 +109,12 @@ impl CreateChatCompletionStreamResponseFinishReason {
         }
     }
 }
-impl ::std::fmt::Display for CreateChatCompletionStreamResponseFinishReason {
+impl ::std::fmt::Display for CreateChatCompletionStreamResponseChoicesItemFinishReason {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
-impl AsRef<str> for CreateChatCompletionStreamResponseFinishReason {
+impl AsRef<str> for CreateChatCompletionStreamResponseChoicesItemFinishReason {
     fn as_ref(&self) -> &str {
         self.as_str()
     }
@@ -110,8 +127,12 @@ pub struct ChatCompletionTokenLogprob {
 }
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ChatCompletionStreamResponseDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "tri_state_serde::deserialize"
+    )]
+    pub content: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<ChatCompletionStreamResponseDeltaRole>,
 }

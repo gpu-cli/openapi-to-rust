@@ -37,11 +37,38 @@ impl serde::Serialize for MessageResult {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("succeeded".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "succeeded") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(SucceededResult),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("succeeded".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::ErroredResult(payload) => {
@@ -57,11 +84,38 @@ impl serde::Serialize for MessageResult {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("errored".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "errored") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(ErroredResult),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("errored".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::CanceledResult(payload) => {
@@ -77,11 +131,38 @@ impl serde::Serialize for MessageResult {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("canceled".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "canceled") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(CanceledResult),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("canceled".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -93,35 +174,184 @@ impl<'de> serde::Deserialize<'de> for MessageResult {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let discriminator = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom(
-                concat!("missing string discriminator `", "type", "`",),
-            ))?
-            .to_string();
-        match discriminator.as_str() {
-            "succeeded" => {
-                serde_json::from_value::<SucceededResult>(value)
-                    .map(Self::SucceededResult)
-                    .map_err(serde::de::Error::custom)
+        let discriminator = match value.get("type") {
+            Some(serde_json::Value::String(discriminator)) => {
+                Some(discriminator.as_str())
             }
-            "errored" => {
-                serde_json::from_value::<ErroredResult>(value)
-                    .map(Self::ErroredResult)
-                    .map_err(serde::de::Error::custom)
+            Some(_) => {
+                return Err(
+                    serde::de::Error::custom(
+                        concat!("non-string discriminator `", "type", "`",),
+                    ),
+                );
             }
-            "canceled" => {
-                serde_json::from_value::<CanceledResult>(value)
-                    .map(Self::CanceledResult)
-                    .map_err(serde::de::Error::custom)
+            None => None,
+        };
+        match discriminator {
+            Some(discriminator) => {
+                match discriminator {
+                    "succeeded" => {
+                        let primary_error = match serde_json::from_value::<
+                            SucceededResult,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::SucceededResult(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            ErroredResult,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "succeeded", first_name, stringify!(ErroredResult),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::ErroredResult(payload),
+                                stringify!(ErroredResult),
+                            ));
+                        }
+                        if let Ok(payload) = serde_json::from_value::<
+                            CanceledResult,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "succeeded", first_name, stringify!(CanceledResult),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::CanceledResult(payload),
+                                stringify!(CanceledResult),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "errored" => {
+                        let primary_error = match serde_json::from_value::<
+                            ErroredResult,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::ErroredResult(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            SucceededResult,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "errored", first_name, stringify!(SucceededResult),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::SucceededResult(payload),
+                                stringify!(SucceededResult),
+                            ));
+                        }
+                        if let Ok(payload) = serde_json::from_value::<
+                            CanceledResult,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "errored", first_name, stringify!(CanceledResult),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::CanceledResult(payload),
+                                stringify!(CanceledResult),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "canceled" => {
+                        let primary_error = match serde_json::from_value::<
+                            CanceledResult,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::CanceledResult(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            SucceededResult,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "canceled", first_name, stringify!(SucceededResult),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::SucceededResult(payload),
+                                stringify!(SucceededResult),
+                            ));
+                        }
+                        if let Ok(payload) = serde_json::from_value::<
+                            ErroredResult,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "canceled", first_name, stringify!(ErroredResult),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::ErroredResult(payload),
+                                stringify!(ErroredResult),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    other => {
+                        Err(
+                            serde::de::Error::custom(
+                                format!(
+                                    "unknown discriminator value `{other}` for `{}`", "type",
+                                ),
+                            ),
+                        )
+                    }
+                }
             }
-            other => {
+            None => {
                 Err(
                     serde::de::Error::custom(
-                        format!(
-                            "unknown discriminator value `{other}` for `{}`", "type",
-                        ),
+                        concat!("missing string discriminator `", "type", "`",),
                     ),
                 )
             }

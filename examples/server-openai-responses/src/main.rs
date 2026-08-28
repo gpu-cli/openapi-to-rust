@@ -1,7 +1,7 @@
 //! Example: host a perfect-replica of OpenAI's `POST /v1/responses`.
 //!
 //! Exercises both branches of the typed response enum:
-//!   - `body.stream == Some(true)`  → `OkStream(Sse<...>)`
+//!   - `body.stream.flatten().unwrap_or(false)`  → `OkStream(Sse<...>)`
 //!   - otherwise                    → `Ok(Response)` (single JSON body)
 //!
 //! Run:
@@ -35,7 +35,7 @@ struct AppState;
 #[async_trait::async_trait]
 impl ResponsesApi for AppState {
     async fn create_response(&self, body: CreateResponse) -> CreateResponseResponse {
-        if body.stream == Some(true) {
+        if body.stream.flatten().unwrap_or(false) {
             create_response_streaming()
         } else {
             create_response_unary(body)

@@ -98,8 +98,8 @@ fn test_nullable_anyof_array_item_enum_is_hoisted() {
         "Should generate a named enum for nullable array items, got:\n{result}"
     );
     assert!(
-        result.contains("pub languages: Option<Vec<GetProfileResponseLanguagesItem>>"),
-        "Nullable array field should use the generated enum type, got:\n{result}"
+        result.contains("pub languages: Option<Option<Vec<GetProfileResponseLanguagesItem>>>"),
+        "Optional nullable array field should preserve presence and use the generated enum type, got:\n{result}"
     );
     assert!(
         result.contains("#[serde(rename = \"EN\")]")

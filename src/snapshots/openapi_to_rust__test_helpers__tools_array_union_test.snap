@@ -24,11 +24,102 @@ pub struct Message {
     pub content: String,
     pub role: String,
 }
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 pub enum CreateMessageParamsToolsItemUnion {
     Tool(Tool),
     BashTool(BashTool),
+}
+impl Serialize for CreateMessageParamsToolsItemUnion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Tool(value) => serde::Serialize::serialize(value, serializer),
+            Self::BashTool(value) => serde::Serialize::serialize(value, serializer),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for CreateMessageParamsToolsItemUnion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let input = <serde_json::Value as Deserialize>::deserialize(deserializer)?;
+        let mut matched = None;
+        if input
+            .as_object()
+            .is_some_and(|object| {
+                true
+                    && object
+                        .get("type")
+                        .is_none_or(|value| {
+                            value.is_null()
+                                || matches!(value.to_string().as_str(), "\"custom\"")
+                        })
+            })
+        {
+            if let Ok(candidate) = serde_json::from_value::<Tool>(input.clone()) {
+                let preserves_complete_input = serde_json::to_value(&candidate)
+                    .map(|encoded| encoded == input)
+                    .unwrap_or(false);
+                if preserves_complete_input {
+                    if matched.is_some() {
+                        return Err(
+                            serde::de::Error::custom(
+                                concat!(
+                                    "ambiguous oneOf value for ",
+                                    stringify!(CreateMessageParamsToolsItemUnion),
+                                    ": more than one branch preserved the complete input",
+                                ),
+                            ),
+                        );
+                    }
+                    matched = Some(Self::Tool(candidate));
+                }
+            }
+        }
+        if input
+            .as_object()
+            .is_some_and(|object| {
+                true
+                    && object
+                        .get("type")
+                        .is_none_or(|value| {
+                            value.is_null()
+                                || matches!(value.to_string().as_str(), "\"bash\"")
+                        })
+            })
+        {
+            if let Ok(candidate) = serde_json::from_value::<BashTool>(input.clone()) {
+                let preserves_complete_input = serde_json::to_value(&candidate)
+                    .map(|encoded| encoded == input)
+                    .unwrap_or(false);
+                if preserves_complete_input {
+                    if matched.is_some() {
+                        return Err(
+                            serde::de::Error::custom(
+                                concat!(
+                                    "ambiguous oneOf value for ",
+                                    stringify!(CreateMessageParamsToolsItemUnion),
+                                    ": more than one branch preserved the complete input",
+                                ),
+                            ),
+                        );
+                    }
+                    matched = Some(Self::BashTool(candidate));
+                }
+            }
+        }
+        matched
+            .ok_or_else(|| serde::de::Error::custom(
+                concat!(
+                    "no oneOf branch for ",
+                    stringify!(CreateMessageParamsToolsItemUnion),
+                    " preserved the complete input",
+                ),
+            ))
+    }
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {

@@ -39,11 +39,38 @@ impl serde::Serialize for ToolsRequestToolsItemUnion {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("text".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "text") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(TextTool),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("text".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
             Self::CodeTool(payload) => {
@@ -59,11 +86,38 @@ impl serde::Serialize for ToolsRequestToolsItemUnion {
                             ),
                         )
                     })?;
-                object
-                    .insert(
-                        "type".to_string(),
-                        serde_json::Value::String("code".to_string()),
-                    );
+                match object.get("type") {
+                    Some(
+                        serde_json::Value::String(tag),
+                    ) if matches!(tag.as_str(), "code") => {}
+                    Some(serde_json::Value::String(tag)) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                format!(
+                                    "discriminator `{}` value `{tag}` is not valid for variant `{}`",
+                                    "type", stringify!(CodeTool),
+                                ),
+                            ),
+                        );
+                    }
+                    Some(_) => {
+                        return Err(
+                            serde::ser::Error::custom(
+                                concat!(
+                                    "discriminator `", "type",
+                                    "` did not serialize as a string",
+                                ),
+                            ),
+                        );
+                    }
+                    None => {
+                        object
+                            .insert(
+                                "type".to_string(),
+                                serde_json::Value::String("code".to_string()),
+                            );
+                    }
+                }
                 value.serialize(serializer)
             }
         }
@@ -75,30 +129,99 @@ impl<'de> serde::Deserialize<'de> for ToolsRequestToolsItemUnion {
         D: serde::Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let discriminator = value
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| serde::de::Error::custom(
-                concat!("missing string discriminator `", "type", "`",),
-            ))?
-            .to_string();
-        match discriminator.as_str() {
-            "text" => {
-                serde_json::from_value::<TextTool>(value)
-                    .map(Self::TextTool)
-                    .map_err(serde::de::Error::custom)
+        let discriminator = match value.get("type") {
+            Some(serde_json::Value::String(discriminator)) => {
+                Some(discriminator.as_str())
             }
-            "code" => {
-                serde_json::from_value::<CodeTool>(value)
-                    .map(Self::CodeTool)
-                    .map_err(serde::de::Error::custom)
+            Some(_) => {
+                return Err(
+                    serde::de::Error::custom(
+                        concat!("non-string discriminator `", "type", "`",),
+                    ),
+                );
             }
-            other => {
+            None => None,
+        };
+        match discriminator {
+            Some(discriminator) => {
+                match discriminator {
+                    "text" => {
+                        let primary_error = match serde_json::from_value::<
+                            TextTool,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::TextTool(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            CodeTool,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "text", first_name, stringify!(CodeTool),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::CodeTool(payload),
+                                stringify!(CodeTool),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    "code" => {
+                        let primary_error = match serde_json::from_value::<
+                            CodeTool,
+                        >(value.clone()) {
+                            Ok(payload) => return Ok(Self::CodeTool(payload)),
+                            Err(error) => error,
+                        };
+                        let mut structural_match: Option<(Self, &'static str)> = None;
+                        if let Ok(payload) = serde_json::from_value::<
+                            TextTool,
+                        >(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(
+                                    serde::de::Error::custom(
+                                        format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            "type", "code", first_name, stringify!(TextTool),
+                                        ),
+                                    ),
+                                );
+                            }
+                            structural_match = Some((
+                                Self::TextTool(payload),
+                                stringify!(TextTool),
+                            ));
+                        }
+                        match structural_match {
+                            Some((payload, _)) => Ok(payload),
+                            None => Err(serde::de::Error::custom(primary_error)),
+                        }
+                    }
+                    other => {
+                        Err(
+                            serde::de::Error::custom(
+                                format!(
+                                    "unknown discriminator value `{other}` for `{}`", "type",
+                                ),
+                            ),
+                        )
+                    }
+                }
+            }
+            None => {
                 Err(
                     serde::de::Error::custom(
-                        format!(
-                            "unknown discriminator value `{other}` for `{}`", "type",
-                        ),
+                        concat!("missing string discriminator `", "type", "`",),
                     ),
                 )
             }
