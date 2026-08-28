@@ -697,8 +697,9 @@ fn an_extensible_enum_renders_as_a_string_everywhere_a_string_is_expected() {
 fn an_object_that_also_declares_variants_keeps_both_halves() {
     // `{properties: {...}, anyOf: [A, B]}` means "these fields, and one of
     // these shapes" — Cloudflare's DLP entries. Neither half can be dropped, so
-    // the object generates a struct and the union its own enum, held in a
-    // flattened field (#65).
+    // the object generates a struct and the union its own enum. Manual outer
+    // serde lets both halves inspect the complete object, including any shared
+    // discriminator, without emitting duplicate keys (#65).
     assert_types(
         spec_with_schemas(json!({
             "Profile": { "type": "object", "additionalProperties": false,
@@ -722,9 +723,10 @@ fn an_object_that_also_declares_variants_keeps_both_halves() {
         &[
             "pub struct Entry",
             "pub profiles: Vec<Profile>",
-            "#[serde(flatten)]",
             "pub variant: EntryVariant",
             "pub enum EntryVariant",
+            "struct __EntryBase",
+            "impl serde::Serialize for Entry",
         ],
     );
 }

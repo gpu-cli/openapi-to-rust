@@ -2243,6 +2243,8 @@ impl CodeGenerator {
             additional_properties,
             analysis,
         );
+        let variant_field_ident =
+            variant.map(|_| format_ident!("{}", self.variant_field_name(properties)));
 
         let mut fields: Vec<TokenStream> = emitted_properties
             .iter()
@@ -2251,14 +2253,18 @@ impl CodeGenerator {
                 let property = emitted.property;
                 let field_ident = &emitted.ident;
                 let field_type = &emitted.field_type;
-                let serde_attrs = self.generate_serde_field_attrs(
-                    &schema.name,
-                    field_name,
-                    field_ident,
-                    property,
-                    emitted.is_required,
-                    analysis,
-                );
+                let serde_attrs = if variant.is_none() {
+                    self.generate_serde_field_attrs(
+                        &schema.name,
+                        field_name,
+                        field_ident,
+                        property,
+                        emitted.is_required,
+                        analysis,
+                    )
+                } else {
+                    TokenStream::new()
+                };
                 let specta_attrs = self.generate_specta_field_attrs(field_name);
 
                 let doc_comment = if let Some(desc) = &property.description {
@@ -2287,19 +2293,29 @@ impl CodeGenerator {
         match additional_properties {
             crate::analysis::ObjectAdditionalProperties::Forbidden => {}
             crate::analysis::ObjectAdditionalProperties::Untyped => {
+                let serde_flatten = if variant.is_none() {
+                    quote! { #[serde(flatten)] }
+                } else {
+                    TokenStream::new()
+                };
                 fields.push(quote! {
                     /// Additional properties not explicitly defined in the schema
-                    #[serde(flatten)]
+                    #serde_flatten
                     pub additional_properties:
                         std::collections::BTreeMap<String, serde_json::Value>,
                 });
             }
             crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
                 let value_tokens = self.generate_array_item_type(value_type, analysis);
+                let serde_flatten = if variant.is_none() {
+                    quote! { #[serde(flatten)] }
+                } else {
+                    TokenStream::new()
+                };
                 fields.push(quote! {
                     /// Additional properties matching the spec's
                     /// `additionalProperties` value schema.
-                    #[serde(flatten)]
+                    #serde_flatten
                     pub additional_properties:
                         std::collections::BTreeMap<String, #value_tokens>,
                 });
@@ -2310,12 +2326,10 @@ impl CodeGenerator {
         // fields, and one of these shapes". The union rides in a flattened
         // field so both halves round-trip: serde reads the declared properties
         // and hands the remaining keys to the variant enum.
-        if let Some(variant) = variant {
+        if let (Some(variant), Some(variant_field)) = (variant, variant_field_ident.as_ref()) {
             let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
-            let variant_field = format_ident!("{}", self.variant_field_name(properties));
             fields.push(quote! {
                 /// The variant this value takes, alongside the fields above.
-                #[serde(flatten)]
                 pub #variant_field: #variant_type,
             });
         }
@@ -2338,21 +2352,168 @@ impl CodeGenerator {
         // Generate derives with optional Specta support
         // Note: We use snake_case everywhere (matching the OpenAPI spec) for consistency
         // between Rust, JSON API, and TypeScript
-        let derives = match (self.config.enable_specta, can_derive_default) {
-            (true, true) => quote! {
+        let derives = match (
+            self.config.enable_specta,
+            can_derive_default,
+            variant.is_some(),
+        ) {
+            (true, _, true) => quote! {
+                #[derive(Debug, Clone)]
+                #[cfg_attr(feature = "specta", derive(specta::Type))]
+            },
+            (false, _, true) => quote! {
+                #[derive(Debug, Clone)]
+            },
+            (true, true, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
-            (true, false) => quote! {
+            (true, false, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
                 #[cfg_attr(feature = "specta", derive(specta::Type))]
             },
-            (false, true) => quote! {
+            (false, true, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
             },
-            (false, false) => quote! {
+            (false, false, false) => quote! {
                 #[derive(Debug, Clone, Deserialize, Serialize)]
             },
+        };
+
+        // `#[serde(flatten)]` removes keys already consumed by sibling fields
+        // before it invokes the flattened value's deserializer. That is wrong
+        // for a sibling-property + oneOf schema when both halves intentionally
+        // share the discriminator. Decode both halves from the complete JSON
+        // object, and merge their serialized maps with duplicate-value checks.
+        let shared_variant_serde = if let (Some(variant), Some(variant_field)) =
+            (variant, variant_field_ident.as_ref())
+        {
+            let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
+            let helper_name = format_ident!("__{}Base", self.to_rust_type_name(&schema.name));
+            let mut helper_fields: Vec<TokenStream> = emitted_properties
+                .iter()
+                .map(|emitted| {
+                    let field_name = emitted.wire_name;
+                    let property = emitted.property;
+                    let field_ident = &emitted.ident;
+                    let field_type = &emitted.field_type;
+                    let serde_attrs = self.generate_serde_field_attrs(
+                        &schema.name,
+                        field_name,
+                        field_ident,
+                        property,
+                        emitted.is_required,
+                        analysis,
+                    );
+                    quote! {
+                        #serde_attrs
+                        #field_ident: #field_type,
+                    }
+                })
+                .collect();
+            let mut base_initializers: Vec<TokenStream> = emitted_properties
+                .iter()
+                .map(|emitted| {
+                    let field_ident = &emitted.ident;
+                    quote! { #field_ident: self.#field_ident.clone(), }
+                })
+                .collect();
+            let mut result_fields: Vec<TokenStream> = emitted_properties
+                .iter()
+                .map(|emitted| {
+                    let field_ident = &emitted.ident;
+                    quote! { #field_ident: base.#field_ident, }
+                })
+                .collect();
+
+            match additional_properties {
+                crate::analysis::ObjectAdditionalProperties::Forbidden => {}
+                crate::analysis::ObjectAdditionalProperties::Untyped => {
+                    helper_fields.push(quote! {
+                        #[serde(flatten)]
+                        additional_properties:
+                            std::collections::BTreeMap<String, serde_json::Value>,
+                    });
+                    base_initializers.push(quote! {
+                        additional_properties: self.additional_properties.clone(),
+                    });
+                    result_fields.push(quote! {
+                        additional_properties: base.additional_properties,
+                    });
+                }
+                crate::analysis::ObjectAdditionalProperties::Typed { value_type } => {
+                    let value_tokens = self.generate_array_item_type(value_type, analysis);
+                    helper_fields.push(quote! {
+                        #[serde(flatten)]
+                        additional_properties:
+                            std::collections::BTreeMap<String, #value_tokens>,
+                    });
+                    base_initializers.push(quote! {
+                        additional_properties: self.additional_properties.clone(),
+                    });
+                    result_fields.push(quote! {
+                        additional_properties: base.additional_properties,
+                    });
+                }
+            }
+
+            quote! {
+                #[derive(Deserialize, Serialize)]
+                struct #helper_name {
+                    #(#helper_fields)*
+                }
+
+                impl serde::Serialize for #struct_name {
+                    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        let base = #helper_name {
+                            #(#base_initializers)*
+                        };
+                        let mut value = serde_json::to_value(base)
+                            .map_err(serde::ser::Error::custom)?;
+                        let variant = serde_json::to_value(&self.#variant_field)
+                            .map_err(serde::ser::Error::custom)?;
+                        let object = value.as_object_mut().ok_or_else(|| {
+                            serde::ser::Error::custom("shared union base did not serialize as an object")
+                        })?;
+                        let variant_object = variant.as_object().ok_or_else(|| {
+                            serde::ser::Error::custom("shared union variant did not serialize as an object")
+                        })?;
+                        for (key, variant_value) in variant_object {
+                            if let Some(base_value) = object.get(key)
+                                && base_value != variant_value
+                            {
+                                return Err(serde::ser::Error::custom(format!(
+                                    "shared union field `{key}` serialized conflicting values",
+                                )));
+                            }
+                            object.insert(key.clone(), variant_value.clone());
+                        }
+                        serde::Serialize::serialize(&value, serializer)
+                    }
+                }
+
+                impl<'de> serde::Deserialize<'de> for #struct_name {
+                    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        let value = serde_json::Value::deserialize(deserializer)?;
+                        let base = serde_json::from_value::<#helper_name>(value.clone())
+                            .map_err(serde::de::Error::custom)?;
+                        let variant = serde_json::from_value::<#variant_type>(value)
+                            .map_err(serde::de::Error::custom)?;
+                        Ok(Self {
+                            #(#result_fields)*
+                            #variant_field: variant,
+                        })
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
         };
 
         let builder = if type_context.index.request_body_roots.contains(&schema.name)
@@ -2385,6 +2546,7 @@ impl CodeGenerator {
                 #(#fields)*
             }
 
+            #shared_variant_serde
             #builder
         })
     }
