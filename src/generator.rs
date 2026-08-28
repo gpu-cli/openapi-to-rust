@@ -3541,6 +3541,33 @@ impl CodeGenerator {
             let matched_declaration = exclusive.then(|| quote! { let mut matched = None; });
             let preservation_helper = (!exclusive).then(|| {
                 quote! {
+                    fn exact_json_integer(number: &serde_json::Number) -> Option<i128> {
+                        number
+                            .as_i64()
+                            .map(i128::from)
+                            .or_else(|| number.as_u64().map(i128::from))
+                    }
+
+                    fn json_numbers_have_same_value(
+                        encoded: &serde_json::Number,
+                        input: &serde_json::Number,
+                    ) -> bool {
+                        match (exact_json_integer(encoded), exact_json_integer(input)) {
+                            (Some(encoded), Some(input)) => encoded == input,
+                            (Some(encoded), None) => input.as_f64().is_some_and(|input| {
+                                input.is_finite()
+                                    && input.fract() == 0.0
+                                    && input as i128 == encoded
+                            }),
+                            (None, Some(input)) => encoded.as_f64().is_some_and(|encoded| {
+                                encoded.is_finite()
+                                    && encoded.fract() == 0.0
+                                    && encoded as i128 == input
+                            }),
+                            (None, None) => encoded.as_f64() == input.as_f64(),
+                        }
+                    }
+
                     fn preserves_complete_json_input(
                         encoded: &serde_json::Value,
                         input: &serde_json::Value,
@@ -3563,6 +3590,10 @@ impl CodeGenerator {
                                         preserves_complete_json_input(encoded, input)
                                     })
                             }
+                            (
+                                serde_json::Value::Number(encoded),
+                                serde_json::Value::Number(input),
+                            ) => json_numbers_have_same_value(encoded, input),
                             _ => encoded == input,
                         }
                     }

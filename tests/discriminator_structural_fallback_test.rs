@@ -138,6 +138,18 @@ fn structural_fallback_spec() -> Value {
                     { "$ref": "#/components/schemas/PaintWrapper" },
                     { "$ref": "#/components/schemas/OtherWrapper" }
                 ]
+            },
+            "NumberWrapper": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["ttl"],
+                "properties": { "ttl": { "type": "number" } }
+            },
+            "NumericAnyUnion": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/NumberWrapper" },
+                    { "$ref": "#/components/schemas/OtherWrapper" }
+                ]
             }
         } }
     })
@@ -190,7 +202,7 @@ fn generated_discriminator_dispatch_uses_unique_structural_fallbacks() {
 mod structural_fallback_runtime {
     use super::{
         AmbiguousTaglessAnyUnion, AmbiguousTaglessUnion, CanonicalizingAnyUnion, MappedUnion,
-        OptionalTagUnion, TaglessUnion,
+        NumericAnyUnion, OptionalTagUnion, TaglessUnion,
     };
 
     #[test]
@@ -233,6 +245,18 @@ mod structural_fallback_runtime {
         }));
 
         let hydrated_again: CanonicalizingAnyUnion =
+            serde_json::from_value(canonical.clone()).unwrap();
+        assert_eq!(serde_json::to_value(hydrated_again).unwrap(), canonical);
+    }
+
+    #[test]
+    fn object_anyof_treats_integer_and_float_number_encodings_as_equal() {
+        let input = serde_json::json!({"ttl": 1});
+        let hydrated: NumericAnyUnion = serde_json::from_value(input).unwrap();
+        let canonical = serde_json::to_value(hydrated).unwrap();
+        assert_eq!(canonical, serde_json::json!({"ttl": 1.0}));
+
+        let hydrated_again: NumericAnyUnion =
             serde_json::from_value(canonical.clone()).unwrap();
         assert_eq!(serde_json::to_value(hydrated_again).unwrap(), canonical);
     }
