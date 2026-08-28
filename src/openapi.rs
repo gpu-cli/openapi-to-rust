@@ -260,9 +260,9 @@ pub struct SchemaDetails {
 
     // Number-specific
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum: Option<f64>,
+    pub minimum: Option<serde_json::Number>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub maximum: Option<f64>,
+    pub maximum: Option<serde_json::Number>,
 
     // Validation
     #[serde(

@@ -3405,10 +3405,46 @@ impl CodeGenerator {
                 .collect::<Vec<_>>();
             let deserialize_attempts = enum_variants
                 .iter()
-                .map(|(variant_name, variant_type)| {
+                .zip(variants)
+                .map(|((variant_name, variant_type), variant)| {
                     if exclusive {
+                        let constraints = self.union_branch_literal_constraints(
+                            &variant.target,
+                            analysis,
+                            &mut std::collections::HashSet::new(),
+                        );
+                        let constraint_checks =
+                            constraints.iter().map(|(field, (required, allowed))| {
+                                let allowed = allowed
+                                    .iter()
+                                    .map(serde_json::Value::to_string)
+                                    .collect::<Vec<_>>();
+                                if *required {
+                                    quote! {
+                                        object.get(#field).is_some_and(|value| {
+                                            matches!(value.to_string().as_str(), #(#allowed)|*)
+                                        })
+                                    }
+                                } else {
+                                    quote! {
+                                        object.get(#field).is_none_or(|value| {
+                                            matches!(value.to_string().as_str(), #(#allowed)|*)
+                                        })
+                                    }
+                                }
+                            });
+                        let constraints_match = if constraints.is_empty() {
+                            quote! { true }
+                        } else {
+                            quote! {
+                                input.as_object().is_some_and(|object| {
+                                    true #(&& #constraint_checks)*
+                                })
+                            }
+                        };
                         quote! {
-                            if let Ok(candidate) =
+                            if #constraints_match
+                                && let Ok(candidate) =
                                 serde_json::from_value::<#variant_type>(input.clone())
                             {
                                 let preserves_complete_input = serde_json::to_value(&candidate)
@@ -3515,6 +3551,136 @@ impl CodeGenerator {
                 #(#variant_declarations)*
             }
         })
+    }
+
+    fn union_branch_literal_constraints(
+        &self,
+        target: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> BTreeMap<String, (bool, Vec<serde_json::Value>)> {
+        if !visited.insert(target.to_string()) {
+            return BTreeMap::new();
+        }
+        let constraints = analysis
+            .schemas
+            .get(target)
+            .map(|schema| {
+                self.schema_literal_property_constraints(&schema.original, analysis, visited)
+            })
+            .unwrap_or_default();
+        visited.remove(target);
+        constraints
+    }
+
+    fn schema_literal_property_constraints(
+        &self,
+        schema: &serde_json::Value,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> BTreeMap<String, (bool, Vec<serde_json::Value>)> {
+        let Some(object) = schema.as_object() else {
+            return BTreeMap::new();
+        };
+        if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+            && let Some(target) = reference.rsplit('/').next()
+        {
+            return self.union_branch_literal_constraints(target, analysis, visited);
+        }
+
+        let required = object
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        let mut constraints = BTreeMap::new();
+        if let Some(properties) = object
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        {
+            for (field, property) in properties {
+                if let Some(values) = self.schema_literal_domain(
+                    property,
+                    analysis,
+                    &mut std::collections::HashSet::new(),
+                ) && !values.is_empty()
+                {
+                    constraints.insert(field.clone(), (required.contains(field.as_str()), values));
+                }
+            }
+        }
+        if let Some(branches) = object.get("allOf").and_then(serde_json::Value::as_array) {
+            for branch in branches {
+                for (field, (branch_required, values)) in
+                    self.schema_literal_property_constraints(branch, analysis, visited)
+                {
+                    constraints
+                        .entry(field)
+                        .and_modify(|(is_required, existing)| {
+                            *is_required |= branch_required;
+                            existing.retain(|value| values.contains(value));
+                        })
+                        .or_insert((branch_required, values));
+                }
+            }
+        }
+        constraints
+    }
+
+    fn schema_literal_domain(
+        &self,
+        schema: &serde_json::Value,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<serde_json::Value>> {
+        let object = schema.as_object()?;
+        if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str)
+            && let Some(target) = reference.rsplit('/').next()
+        {
+            if !visited.insert(target.to_string()) {
+                return None;
+            }
+            let result = analysis
+                .schemas
+                .get(target)
+                .and_then(|schema| self.schema_literal_domain(&schema.original, analysis, visited));
+            visited.remove(target);
+            return result;
+        }
+        let own = object
+            .get("const")
+            .map(|value| vec![value.clone()])
+            .or_else(|| {
+                object
+                    .get("enum")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+            });
+        let composed = object
+            .get("allOf")
+            .and_then(serde_json::Value::as_array)
+            .map(|branches| {
+                branches.iter().fold(None, |domain, branch| {
+                    let branch_domain = self.schema_literal_domain(branch, analysis, visited);
+                    match (domain, branch_domain) {
+                        (None, other) | (other, None) => other,
+                        (Some(mut left), Some(right)) => {
+                            left.retain(|value| right.contains(value));
+                            Some(left)
+                        }
+                    }
+                })
+            })
+            .flatten();
+        match (own, composed) {
+            (None, other) | (other, None) => other,
+            (Some(mut left), Some(right)) => {
+                left.retain(|value| right.contains(value));
+                Some(left)
+            }
+        }
     }
 
     fn union_target_serializes_as_object(

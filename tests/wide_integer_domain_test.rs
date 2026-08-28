@@ -14,6 +14,11 @@ fn wide_integer_spec() -> Value {
                     "type": "integer", "format": "int64",
                     "minimum": -100, "maximum": 100
                 },
+                "ExactInt64Domain": {
+                    "type": "integer", "format": "int64",
+                    "minimum": -9223372036854775808_i64,
+                    "maximum": 9223372036854775807_i64
+                },
                 "WideInt64": {
                     "type": "integer", "format": "int64",
                     "minimum": 0, "maximum": 1.8446744073709551e19
@@ -98,6 +103,7 @@ fn integer_width_follows_effective_schema_domain() {
         .expect("wide-integer spec should analyze");
     for (name, expected) in [
         ("InRangeInt64", "i64"),
+        ("ExactInt64Domain", "i64"),
         ("WideInt64", "u64"),
         ("WideDefault", "u64"),
         ("ExampleOnly", "i128"),

@@ -761,8 +761,14 @@ impl PropertyConstraints {
             _ => None,
         };
         Self {
-            minimum: details.minimum,
-            maximum: details.maximum,
+            minimum: details
+                .minimum
+                .as_ref()
+                .and_then(serde_json::Number::as_f64),
+            maximum: details
+                .maximum
+                .as_ref()
+                .and_then(serde_json::Number::as_f64),
             exclusive_minimum,
             exclusive_maximum,
             multiple_of: details.multiple_of,
@@ -6693,52 +6699,116 @@ impl SchemaAnalyzer {
     /// plus a maximum above i64 must follow the numeric bounds rather than
     /// rejecting source-valid wire values at hydration time.
     fn integer_rust_type(&self, details: &crate::openapi::SchemaDetails) -> String {
-        fn include_value(value: &Value, minimum: &mut Option<f64>, maximum: &mut Option<f64>) {
-            let Some(value) = value
+        fn integer_value(number: &serde_json::Number) -> Option<i128> {
+            number
                 .as_i64()
-                .map(|value| value as f64)
-                .or_else(|| value.as_u64().map(|value| value as f64))
-                .or_else(|| value.as_f64().filter(|value| value.fract() == 0.0))
-            else {
-                return;
-            };
-            *minimum = Some(minimum.map_or(value, |current| current.min(value)));
-            *maximum = Some(maximum.map_or(value, |current| current.max(value)));
+                .map(i128::from)
+                .or_else(|| number.as_u64().map(i128::from))
+                .or_else(|| {
+                    number.as_f64().and_then(|value| {
+                        (value.fract() == 0.0
+                            && value >= i128::MIN as f64
+                            && value <= i128::MAX as f64)
+                            .then_some(value as i128)
+                    })
+                })
         }
 
-        let explicitly_nonnegative = details.minimum.is_some_and(|value| value >= 0.0)
+        fn below(number: &serde_json::Number, boundary: i128) -> bool {
+            integer_value(number).is_some_and(|value| value < boundary)
+        }
+
+        fn above(number: &serde_json::Number, boundary: i128) -> bool {
+            integer_value(number).is_some_and(|value| value > boundary)
+        }
+
+        let explicitly_nonnegative = details
+            .minimum
+            .as_ref()
+            .and_then(integer_value)
+            .is_some_and(|value| value >= 0)
             || matches!(
                 details.exclusive_minimum,
                 Some(crate::openapi::ExclusiveBound::Number(value)) if value >= 0.0
             );
-        let mut minimum = details.minimum;
-        let mut maximum = details.maximum;
-        if let Some(crate::openapi::ExclusiveBound::Number(value)) = &details.exclusive_minimum {
-            minimum = Some(minimum.map_or(*value, |current| current.min(*value)));
-        }
-        if let Some(crate::openapi::ExclusiveBound::Number(value)) = &details.exclusive_maximum {
-            maximum = Some(maximum.map_or(*value, |current| current.max(*value)));
-        }
-        for value in details
+
+        let annotated_numbers = details
             .const_value
             .iter()
             .chain(details.default.iter())
             .chain(details.example.iter())
             .chain(details.enum_values.iter().flatten())
             .chain(details.examples.iter().flatten())
-        {
-            include_value(value, &mut minimum, &mut maximum);
-        }
-
-        let below_i32 = minimum.is_some_and(|value| value < i32::MIN as f64);
-        let above_i32 = maximum.is_some_and(|value| value > i32::MAX as f64);
-        let below_i64 = minimum.is_some_and(|value| value < i64::MIN as f64);
-        // i64::MAX rounds up when converted to f64. Treat the exact 2^63
-        // boundary as outside i64; this is the spelling used by the affected
-        // Gcore and Datadog constraints.
-        let above_i64 = maximum.is_some_and(|value| value >= 9_223_372_036_854_775_808.0);
-        let below_zero = minimum.is_some_and(|value| value < 0.0);
-        let above_u32 = maximum.is_some_and(|value| value > u32::MAX as f64);
+            .filter_map(Value::as_number)
+            .collect::<Vec<_>>();
+        let below_i32 = details
+            .minimum
+            .as_ref()
+            .is_some_and(|number| below(number, i128::from(i32::MIN)))
+            || annotated_numbers
+                .iter()
+                .any(|number| below(number, i128::from(i32::MIN)))
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value < i32::MIN as f64
+            );
+        let above_i32 = details
+            .maximum
+            .as_ref()
+            .is_some_and(|number| above(number, i128::from(i32::MAX)))
+            || annotated_numbers
+                .iter()
+                .any(|number| above(number, i128::from(i32::MAX)))
+            || matches!(
+                details.exclusive_maximum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value > i32::MAX as f64
+            );
+        let below_i64 = details
+            .minimum
+            .as_ref()
+            .is_some_and(|number| below(number, i128::from(i64::MIN)))
+            || annotated_numbers
+                .iter()
+                .any(|number| below(number, i128::from(i64::MIN)))
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value < i64::MIN as f64
+            );
+        let above_i64 = details
+            .maximum
+            .as_ref()
+            .is_some_and(|number| above(number, i128::from(i64::MAX)))
+            || annotated_numbers
+                .iter()
+                .any(|number| above(number, i128::from(i64::MAX)))
+            || matches!(
+                details.exclusive_maximum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value >= 9_223_372_036_854_775_808.0
+            );
+        let below_zero = details
+            .minimum
+            .as_ref()
+            .and_then(integer_value)
+            .is_some_and(|value| value < 0)
+            || annotated_numbers
+                .iter()
+                .filter_map(|number| integer_value(number))
+                .any(|value| value < 0)
+            || matches!(
+                details.exclusive_minimum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value < 0.0
+            );
+        let above_u32 = details
+            .maximum
+            .as_ref()
+            .is_some_and(|number| above(number, i128::from(u32::MAX)))
+            || annotated_numbers
+                .iter()
+                .any(|number| above(number, i128::from(u32::MAX)))
+            || matches!(
+                details.exclusive_maximum,
+                Some(crate::openapi::ExclusiveBound::Number(value)) if value > u32::MAX as f64
+            );
 
         let configured = self
             .type_mapper

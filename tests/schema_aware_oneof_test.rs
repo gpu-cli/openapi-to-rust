@@ -84,6 +84,28 @@ fn schema_aware_oneof_spec() -> Value {
                     { "$ref": "#/components/schemas/AnyDetailed" }
                 ]
             },
+            "NumericKindA": {
+                "type": "object",
+                "required": ["type", "value"],
+                "properties": {
+                    "type": { "type": "integer", "enum": [1] },
+                    "value": { "type": "string" }
+                }
+            },
+            "NumericKindB": {
+                "type": "object",
+                "required": ["type", "value"],
+                "properties": {
+                    "type": { "type": "integer", "enum": [2] },
+                    "value": { "type": "string" }
+                }
+            },
+            "NumericKind": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/NumericKindA" },
+                    { "$ref": "#/components/schemas/NumericKindB" }
+                ]
+            },
             "RequiredUser": {
                 "type": "object",
                 "required": ["login"],
@@ -142,7 +164,7 @@ fn generated_oneof_selects_one_complete_shape_independent_of_branch_order() {
 mod schema_aware_oneof_runtime {
     use super::{
         Connection, ConnectionReversed, ExclusiveOverlap, LosslessAny,
-        NonExclusiveOverlap, UserOrEmpty,
+        NonExclusiveOverlap, NumericKind, UserOrEmpty,
     };
 
     #[test]
@@ -155,6 +177,13 @@ mod schema_aware_oneof_runtime {
             assert_eq!(serde_json::to_value(forward).unwrap(), input);
             let reversed: ConnectionReversed = serde_json::from_value(input.clone()).unwrap();
             assert_eq!(serde_json::to_value(reversed).unwrap(), input);
+        }
+        for input in [
+            serde_json::json!({"type": 1, "value": "a"}),
+            serde_json::json!({"type": 2, "value": "b"}),
+        ] {
+            let hydrated: NumericKind = serde_json::from_value(input.clone()).unwrap();
+            assert_eq!(serde_json::to_value(hydrated).unwrap(), input);
         }
     }
 
