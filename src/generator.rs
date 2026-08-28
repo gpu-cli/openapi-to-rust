@@ -3467,13 +3467,15 @@ impl CodeGenerator {
                                 } else if *required {
                                     quote! {
                                         object.get(#field).is_some_and(|value| {
-                                            matches!(value.to_string().as_str(), #(#allowed)|*)
+                                            value.is_null()
+                                                || matches!(value.to_string().as_str(), #(#allowed)|*)
                                         })
                                     }
                                 } else {
                                     quote! {
                                         object.get(#field).is_none_or(|value| {
-                                            matches!(value.to_string().as_str(), #(#allowed)|*)
+                                            value.is_null()
+                                                || matches!(value.to_string().as_str(), #(#allowed)|*)
                                         })
                                     }
                                 }

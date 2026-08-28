@@ -150,6 +150,33 @@ fn schema_aware_oneof_spec() -> Value {
                     { "$ref": "#/components/schemas/ConflictingKindNarrow" },
                     { "$ref": "#/components/schemas/Marker" }
                 ]
+            },
+            "NullableWeb": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["call_type"],
+                "properties": {
+                    "call_type": { "type": "string", "enum": ["web"] },
+                    "storage": {
+                        "type": "string",
+                        "enum": ["everything"],
+                        "nullable": true
+                    }
+                }
+            },
+            "NullablePhone": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["call_type"],
+                "properties": {
+                    "call_type": { "type": "string", "enum": ["phone"] }
+                }
+            },
+            "NullableLiteralUnion": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/NullableWeb" },
+                    { "$ref": "#/components/schemas/NullablePhone" }
+                ]
             }
         } }
     })
@@ -193,7 +220,7 @@ fn generated_oneof_selects_one_complete_shape_independent_of_branch_order() {
 mod schema_aware_oneof_runtime {
     use super::{
         Connection, ConnectionReversed, EmptyDomainUnion, ExclusiveOverlap, LosslessAny,
-        NonExclusiveOverlap, NumericKind, UserOrEmpty,
+        NonExclusiveOverlap, NullableLiteralUnion, NumericKind, UserOrEmpty,
     };
 
     #[test]
@@ -252,6 +279,11 @@ mod schema_aware_oneof_runtime {
         let marker = serde_json::json!({"marker": "valid"});
         let hydrated: EmptyDomainUnion = serde_json::from_value(marker.clone()).unwrap();
         assert_eq!(serde_json::to_value(hydrated).unwrap(), marker);
+
+        let nullable = serde_json::json!({"call_type": "web", "storage": null});
+        let hydrated: NullableLiteralUnion =
+            serde_json::from_value(nullable.clone()).unwrap();
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), nullable);
     }
 }
 "#,
