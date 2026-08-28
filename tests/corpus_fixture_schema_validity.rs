@@ -313,6 +313,16 @@ fn corpus_discriminator_mappings_match_target_tag_constraints() {
 
     let meta_llama = load_fixture("specs/meta-llama.yaml");
     assert_discriminator_mapping_matches_tag(&meta_llama, "UserMessageContentItem");
+
+    let storyden = load_fixture("specs/storyden.yaml");
+    for union in [
+        "AuditEventTypeProps",
+        "DatagraphItem",
+        "PluginModeUnion",
+        "PluginInitialProps",
+    ] {
+        assert_discriminator_mapping_matches_tag(&storyden, union);
+    }
 }
 
 #[test]
