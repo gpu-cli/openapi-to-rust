@@ -574,6 +574,18 @@ where
 
 #[test]
 fn generated_models_preserve_schema_valid_json() {{
+    let outcome = std::thread::Builder::new()
+        .name("schema-round-trip".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_generated_models_preserve_schema_valid_json)
+        .unwrap_or_else(|error| panic!("could not start bounded-stack round-trip test: {{error}}"))
+        .join();
+    if let Err(payload) = outcome {{
+        std::panic::resume_unwind(payload);
+    }}
+}}
+
+fn run_generated_models_preserve_schema_valid_json() {{
     let document: Value = serde_json::from_str({document_literal})
         .unwrap_or_else(|error| panic!("invalid embedded schema bundle: {{error}}"));
     let validators = jsonschema::options()
@@ -2352,6 +2364,8 @@ mod tests {
         assert!(first_call < second_call);
         assert!(second_call < aggregate_panic);
         assert!(source[aggregate_panic..].contains("failures.join(\"\\n\\n\")"));
+        assert!(source.contains(".stack_size(64 * 1024 * 1024)"));
+        assert!(source.contains("std::panic::resume_unwind(payload)"));
         assert!(!source.contains("assert_model"));
     }
 
