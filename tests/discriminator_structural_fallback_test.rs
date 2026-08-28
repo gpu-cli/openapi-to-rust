@@ -86,6 +86,13 @@ fn structural_fallback_spec() -> Value {
                     { "$ref": "#/components/schemas/TaglessTwin" }
                 ],
                 "discriminator": { "propertyName": "kind" }
+            },
+            "AmbiguousTaglessAnyUnion": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/TaglessOnly" },
+                    { "$ref": "#/components/schemas/TaglessTwin" }
+                ],
+                "discriminator": { "propertyName": "kind" }
             }
         } }
     })
@@ -114,6 +121,13 @@ fn analysis_marks_declared_and_required_discriminator_fields() {
     };
     assert!(!variants[0].discriminator_field_declared);
     assert!(!variants[0].discriminator_field_required);
+
+    let SchemaType::DiscriminatedUnion { exclusive, .. } =
+        &analysis.schemas["AmbiguousTaglessAnyUnion"].schema_type
+    else {
+        panic!("AmbiguousTaglessAnyUnion should be discriminated");
+    };
+    assert!(!exclusive);
 }
 
 #[test]
@@ -129,7 +143,10 @@ fn generated_discriminator_dispatch_uses_unique_structural_fallbacks() {
         r#"
 #[cfg(test)]
 mod structural_fallback_runtime {
-    use super::{AmbiguousTaglessUnion, MappedUnion, OptionalTagUnion, TaglessUnion};
+    use super::{
+        AmbiguousTaglessAnyUnion, AmbiguousTaglessUnion, MappedUnion, OptionalTagUnion,
+        TaglessUnion,
+    };
 
     #[test]
     fn mapped_fast_path_and_unique_fallback_both_round_trip() {
@@ -154,6 +171,11 @@ mod structural_fallback_runtime {
         let tagless = serde_json::json!({"raw": "wire"});
         let hydrated: TaglessUnion = serde_json::from_value(tagless.clone()).unwrap();
         assert_eq!(serde_json::to_value(hydrated).unwrap(), tagless);
+
+        let ambiguous_any = serde_json::json!({"raw": "matches-both"});
+        let hydrated: AmbiguousTaglessAnyUnion =
+            serde_json::from_value(ambiguous_any.clone()).unwrap();
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), ambiguous_any);
     }
 
     #[test]

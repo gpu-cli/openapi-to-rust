@@ -621,10 +621,14 @@ pub enum SchemaType {
         /// halves survive; `None` for a plain object.
         variant: Option<SchemaRef>,
     },
-    /// Discriminated union (oneOf + discriminator)
+    /// Discriminated union (`oneOf`/`anyOf` + discriminator).
     DiscriminatedUnion {
         discriminator_field: String,
         variants: Vec<UnionVariant>,
+        /// `oneOf` requires a unique structural match; `anyOf` permits a
+        /// deterministic first match when the discriminator is absent or its
+        /// preferred branch does not fit.
+        exclusive: bool,
     },
     /// Simple union. Exclusive unions originate from `oneOf` and require
     /// exactly one branch to preserve the complete input shape; non-exclusive
@@ -5009,6 +5013,7 @@ impl SchemaAnalyzer {
         Ok(SchemaType::DiscriminatedUnion {
             discriminator_field,
             variants,
+            exclusive: matches!(union_kind, InlineUnionKind::OneOf),
         })
     }
 

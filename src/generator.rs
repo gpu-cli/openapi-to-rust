@@ -1794,6 +1794,7 @@ impl CodeGenerator {
             SchemaType::DiscriminatedUnion {
                 discriminator_field,
                 variants,
+                exclusive,
             } => {
                 // Check if this discriminated union should be untagged due to being nested
                 if self.should_use_untagged_discriminated_union(schema, analysis) {
@@ -1805,12 +1806,13 @@ impl CodeGenerator {
                             nullable: false,
                         })
                         .collect();
-                    self.generate_union_enum(schema, &schema_refs, false, analysis)
+                    self.generate_union_enum(schema, &schema_refs, *exclusive, analysis)
                 } else {
                     self.generate_discriminated_enum(
                         schema,
                         discriminator_field,
                         variants,
+                        *exclusive,
                         analysis,
                     )
                 }
@@ -2892,6 +2894,7 @@ impl CodeGenerator {
         schema: &crate::analysis::AnalyzedSchema,
         discriminator_field: &str,
         variants: &[crate::analysis::UnionVariant],
+        exclusive: bool,
         analysis: &crate::analysis::SchemaAnalysis,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
@@ -2918,7 +2921,7 @@ impl CodeGenerator {
                     nullable: false,
                 })
                 .collect();
-            return self.generate_union_enum(schema, &schema_refs, false, analysis);
+            return self.generate_union_enum(schema, &schema_refs, exclusive, analysis);
         }
 
         let enclosing = self.to_rust_type_name(&schema.name);
@@ -3003,39 +3006,59 @@ impl CodeGenerator {
                         if fallback_index == primary_index {
                             return None;
                         }
-                        Some(quote! {
-                            if let Ok(payload) =
-                                serde_json::from_value::<#fallback_payload>(value.clone())
-                            {
-                                if let Some((_, first_name)) = &structural_match {
-                                    return Err(serde::de::Error::custom(format!(
-                                        "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
-                                        #discriminator_field,
-                                        #tag,
-                                        first_name,
+                        if exclusive {
+                            Some(quote! {
+                                if let Ok(payload) =
+                                    serde_json::from_value::<#fallback_payload>(value.clone())
+                                {
+                                    if let Some((_, first_name)) = &structural_match {
+                                        return Err(serde::de::Error::custom(format!(
+                                            "discriminator `{}` value `{}` did not fit its mapped branch and structurally matched both `{}` and `{}`",
+                                            #discriminator_field,
+                                            #tag,
+                                            first_name,
+                                            stringify!(#fallback_name),
+                                        )));
+                                    }
+                                    structural_match = Some((
+                                        Self::#fallback_name(payload),
                                         stringify!(#fallback_name),
-                                    )));
+                                    ));
                                 }
-                                structural_match = Some((
-                                    Self::#fallback_name(payload),
-                                    stringify!(#fallback_name),
-                                ));
-                            }
-                        })
+                            })
+                        } else {
+                            Some(quote! {
+                                if let Ok(payload) =
+                                    serde_json::from_value::<#fallback_payload>(value.clone())
+                                {
+                                    return Ok(Self::#fallback_name(payload));
+                                }
+                            })
+                        }
                     },
                 );
-                deserialize_arms.push(quote! {
-                    #tag => {
-                        let primary_error = match serde_json::from_value::<#payload>(value.clone()) {
-                            Ok(payload) => return Ok(Self::#variant_name(payload)),
-                            Err(error) => error,
-                        };
+                let structural_fallback = if exclusive {
+                    quote! {
                         let mut structural_match: Option<(Self, &'static str)> = None;
                         #(#fallback_attempts)*
                         match structural_match {
                             Some((payload, _)) => Ok(payload),
                             None => Err(serde::de::Error::custom(primary_error)),
                         }
+                    }
+                } else {
+                    quote! {
+                        #(#fallback_attempts)*
+                        Err(serde::de::Error::custom(primary_error))
+                    }
+                };
+                deserialize_arms.push(quote! {
+                    #tag => {
+                        let primary_error = match serde_json::from_value::<#payload>(value.clone()) {
+                            Ok(payload) => return Ok(Self::#variant_name(payload)),
+                            Err(error) => error,
+                        };
+                        #structural_fallback
                     }
                 });
             }
@@ -3045,28 +3068,36 @@ impl CodeGenerator {
                 if variant.discriminator_field_required {
                     return None;
                 }
-                Some(quote! {
-                    if let Ok(payload) = serde_json::from_value::<#payload>(value.clone()) {
-                        if let Some((_, first_name)) = &structural_match {
-                            return Err(serde::de::Error::custom(format!(
-                                "missing discriminator `{}` structurally matched both `{}` and `{}`",
-                                #discriminator_field,
-                                first_name,
+                if exclusive {
+                    Some(quote! {
+                        if let Ok(payload) = serde_json::from_value::<#payload>(value.clone()) {
+                            if let Some((_, first_name)) = &structural_match {
+                                return Err(serde::de::Error::custom(format!(
+                                    "missing discriminator `{}` structurally matched both `{}` and `{}`",
+                                    #discriminator_field,
+                                    first_name,
+                                    stringify!(#variant_name),
+                                )));
+                            }
+                            structural_match = Some((
+                                Self::#variant_name(payload),
                                 stringify!(#variant_name),
-                            )));
+                            ));
                         }
-                        structural_match = Some((
-                            Self::#variant_name(payload),
-                            stringify!(#variant_name),
-                        ));
-                    }
-                })
+                    })
+                } else {
+                    Some(quote! {
+                        if let Ok(payload) = serde_json::from_value::<#payload>(value.clone()) {
+                            return Ok(Self::#variant_name(payload));
+                        }
+                    })
+                }
             },
         );
         let has_missing_discriminator_candidates = variants
             .iter()
             .any(|variant| !variant.discriminator_field_required);
-        let missing_discriminator_fallback = if has_missing_discriminator_candidates {
+        let missing_discriminator_fallback = if has_missing_discriminator_candidates && exclusive {
             quote! {
                 let mut structural_match: Option<(Self, &'static str)> = None;
                 #(#missing_discriminator_attempts)*
@@ -3077,6 +3108,15 @@ impl CodeGenerator {
                         #discriminator_field,
                         "` and no tagless branch matched",
                     )))
+            }
+        } else if has_missing_discriminator_candidates {
+            quote! {
+                #(#missing_discriminator_attempts)*
+                Err(serde::de::Error::custom(concat!(
+                    "missing string discriminator `",
+                    #discriminator_field,
+                    "` and no tagless branch matched",
+                )))
             }
         } else {
             quote! {
@@ -3177,6 +3217,7 @@ impl CodeGenerator {
             if let crate::analysis::SchemaType::DiscriminatedUnion {
                 variants,
                 discriminator_field: _,
+                ..
             } = &other_schema.schema_type
             {
                 for variant in variants {
