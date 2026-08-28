@@ -3490,22 +3490,23 @@ impl CodeGenerator {
                             }
                         };
                         quote! {
-                            if #constraints_match
-                                && let Ok(candidate) =
-                                serde_json::from_value::<#variant_type>(input.clone())
-                            {
-                                let preserves_complete_input = serde_json::to_value(&candidate)
-                                    .map(|encoded| encoded == input)
-                                    .unwrap_or(false);
-                                if preserves_complete_input {
-                                    if matched.is_some() {
-                                        return Err(serde::de::Error::custom(concat!(
-                                            "ambiguous oneOf value for ",
-                                            stringify!(#enum_name),
-                                            ": more than one branch preserved the complete input",
-                                        )));
+                            if #constraints_match {
+                                if let Ok(candidate) =
+                                    serde_json::from_value::<#variant_type>(input.clone())
+                                {
+                                    let preserves_complete_input = serde_json::to_value(&candidate)
+                                        .map(|encoded| encoded == input)
+                                        .unwrap_or(false);
+                                    if preserves_complete_input {
+                                        if matched.is_some() {
+                                            return Err(serde::de::Error::custom(concat!(
+                                                "ambiguous oneOf value for ",
+                                                stringify!(#enum_name),
+                                                ": more than one branch preserved the complete input",
+                                            )));
+                                        }
+                                        matched = Some(Self::#variant_name(candidate));
                                     }
-                                    matched = Some(Self::#variant_name(candidate));
                                 }
                             }
                         }

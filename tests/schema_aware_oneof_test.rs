@@ -295,7 +295,7 @@ mod schema_aware_oneof_runtime {
         r#"[package]
 name = "schema-aware-oneof-smoke"
 version = "0.0.0"
-edition = "2024"
+edition = "2021"
 publish = false
 
 [dependencies]
