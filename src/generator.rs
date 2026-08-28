@@ -3353,7 +3353,15 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        if exclusive {
+        let object_only = variants.iter().all(|variant| {
+            self.union_target_serializes_as_object(
+                &variant.target,
+                analysis,
+                &mut std::collections::HashSet::new(),
+            )
+        });
+
+        if exclusive || object_only {
             let derives = if self.config.enable_specta {
                 quote! {
                     #[derive(Debug, Clone)]
@@ -3373,27 +3381,60 @@ impl CodeGenerator {
             let deserialize_attempts = enum_variants
                 .iter()
                 .map(|(variant_name, variant_type)| {
-                    quote! {
-                        if let Ok(candidate) =
-                            serde_json::from_value::<#variant_type>(input.clone())
-                        {
-                            let preserves_complete_input = serde_json::to_value(&candidate)
-                                .map(|encoded| encoded == input)
-                                .unwrap_or(false);
-                            if preserves_complete_input {
-                                if matched.is_some() {
-                                    return Err(serde::de::Error::custom(concat!(
-                                        "ambiguous oneOf value for ",
-                                        stringify!(#enum_name),
-                                        ": more than one branch preserved the complete input",
-                                    )));
+                    if exclusive {
+                        quote! {
+                            if let Ok(candidate) =
+                                serde_json::from_value::<#variant_type>(input.clone())
+                            {
+                                let preserves_complete_input = serde_json::to_value(&candidate)
+                                    .map(|encoded| encoded == input)
+                                    .unwrap_or(false);
+                                if preserves_complete_input {
+                                    if matched.is_some() {
+                                        return Err(serde::de::Error::custom(concat!(
+                                            "ambiguous oneOf value for ",
+                                            stringify!(#enum_name),
+                                            ": more than one branch preserved the complete input",
+                                        )));
+                                    }
+                                    matched = Some(Self::#variant_name(candidate));
                                 }
-                                matched = Some(Self::#variant_name(candidate));
+                            }
+                        }
+                    } else {
+                        quote! {
+                            if let Ok(candidate) =
+                                serde_json::from_value::<#variant_type>(input.clone())
+                            {
+                                let preserves_complete_input = serde_json::to_value(&candidate)
+                                    .map(|encoded| encoded == input)
+                                    .unwrap_or(false);
+                                if preserves_complete_input {
+                                    return Ok(Self::#variant_name(candidate));
+                                }
                             }
                         }
                     }
                 })
                 .collect::<Vec<_>>();
+            let no_match = if exclusive {
+                quote! {
+                    matched.ok_or_else(|| serde::de::Error::custom(concat!(
+                        "no oneOf branch for ",
+                        stringify!(#enum_name),
+                        " preserved the complete input",
+                    )))
+                }
+            } else {
+                quote! {
+                    Err(serde::de::Error::custom(concat!(
+                        "no anyOf branch for ",
+                        stringify!(#enum_name),
+                        " preserved the complete input",
+                    )))
+                }
+            };
+            let matched_declaration = exclusive.then(|| quote! { let mut matched = None; });
 
             return Ok(quote! {
                 #doc_comment
@@ -3419,13 +3460,9 @@ impl CodeGenerator {
                         D: serde::Deserializer<'de>,
                     {
                         let input = <serde_json::Value as Deserialize>::deserialize(deserializer)?;
-                        let mut matched = None;
+                        #matched_declaration
                         #(#deserialize_attempts)*
-                        matched.ok_or_else(|| serde::de::Error::custom(concat!(
-                            "no oneOf branch for ",
-                            stringify!(#enum_name),
-                            " preserved the complete input",
-                        )))
+                        #no_match
                     }
                 }
             });
@@ -3453,6 +3490,36 @@ impl CodeGenerator {
                 #(#variant_declarations)*
             }
         })
+    }
+
+    fn union_target_serializes_as_object(
+        &self,
+        target: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !visited.insert(target.to_string()) {
+            return false;
+        }
+        let result = analysis
+            .schemas
+            .get(target)
+            .is_some_and(|schema| match &schema.schema_type {
+                crate::analysis::SchemaType::Object { .. }
+                | crate::analysis::SchemaType::Composition { .. }
+                | crate::analysis::SchemaType::DiscriminatedUnion { .. } => true,
+                crate::analysis::SchemaType::Reference { target } => {
+                    self.union_target_serializes_as_object(target, analysis, visited)
+                }
+                crate::analysis::SchemaType::Union { variants, .. } => {
+                    variants.iter().all(|variant| {
+                        self.union_target_serializes_as_object(&variant.target, analysis, visited)
+                    })
+                }
+                _ => false,
+            });
+        visited.remove(target);
+        result
     }
 
     /// Walk a chain of type-alias `Reference`s starting from `target` and

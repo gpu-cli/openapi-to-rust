@@ -65,6 +65,25 @@ fn schema_aware_oneof_spec() -> Value {
                     { "$ref": "#/components/schemas/OverlapB" }
                 ]
             },
+            "AnyPermissive": {
+                "type": "object",
+                "required": ["id"],
+                "properties": { "id": { "type": "string" } }
+            },
+            "AnyDetailed": {
+                "type": "object",
+                "required": ["id", "detail"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "detail": { "type": "string" }
+                }
+            },
+            "LosslessAny": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/AnyPermissive" },
+                    { "$ref": "#/components/schemas/AnyDetailed" }
+                ]
+            },
             "RequiredUser": {
                 "type": "object",
                 "required": ["login"],
@@ -121,7 +140,10 @@ fn generated_oneof_selects_one_complete_shape_independent_of_branch_order() {
         r#"
 #[cfg(test)]
 mod schema_aware_oneof_runtime {
-    use super::{Connection, ConnectionReversed, ExclusiveOverlap, NonExclusiveOverlap, UserOrEmpty};
+    use super::{
+        Connection, ConnectionReversed, ExclusiveOverlap, LosslessAny,
+        NonExclusiveOverlap, UserOrEmpty,
+    };
 
     #[test]
     fn complete_shape_wins_regardless_of_branch_order() {
@@ -156,6 +178,10 @@ mod schema_aware_oneof_runtime {
         let input = serde_json::json!({"shared": "either"});
         let hydrated: NonExclusiveOverlap = serde_json::from_value(input.clone()).unwrap();
         assert_eq!(serde_json::to_value(hydrated).unwrap(), input);
+
+        let detailed = serde_json::json!({"id": "one", "detail": "preserved"});
+        let hydrated: LosslessAny = serde_json::from_value(detailed.clone()).unwrap();
+        assert_eq!(serde_json::to_value(hydrated).unwrap(), detailed);
     }
 
     #[test]
