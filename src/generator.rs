@@ -2393,6 +2393,19 @@ impl CodeGenerator {
         {
             let variant_type = format_ident!("{}", self.to_rust_type_name(&variant.target));
             let helper_name = format_ident!("__{}Base", self.to_rust_type_name(&schema.name));
+            let variant_properties = self.union_declared_properties(
+                &variant.target,
+                analysis,
+                &mut std::collections::HashSet::new(),
+            );
+            let variant_projection_removals = emitted_properties
+                .iter()
+                .filter(|emitted| !variant_properties.contains(emitted.wire_name))
+                .map(|emitted| {
+                    let wire_name = emitted.wire_name;
+                    quote! { object.remove(#wire_name); }
+                })
+                .collect::<Vec<_>>();
             let mut helper_fields: Vec<TokenStream> = emitted_properties
                 .iter()
                 .map(|emitted| {
@@ -2506,8 +2519,20 @@ impl CodeGenerator {
                         let value = serde_json::Value::deserialize(deserializer)?;
                         let base = serde_json::from_value::<#helper_name>(value.clone())
                             .map_err(serde::de::Error::custom)?;
-                        let variant = serde_json::from_value::<#variant_type>(value)
-                            .map_err(serde::de::Error::custom)?;
+                        let variant = match serde_json::from_value::<#variant_type>(value.clone()) {
+                            Ok(variant) => variant,
+                            Err(complete_error) => {
+                                let mut variant_input = value;
+                                if let Some(object) = variant_input.as_object_mut() {
+                                    #(#variant_projection_removals)*
+                                }
+                                serde_json::from_value::<#variant_type>(variant_input).map_err(
+                                    |projected_error| serde::de::Error::custom(format!(
+                                        "complete shared-union input failed: {complete_error}; projected input failed: {projected_error}",
+                                    )),
+                                )?
+                            }
+                        };
                         Ok(Self {
                             #(#result_fields)*
                             #variant_field: variant,
@@ -4376,6 +4401,61 @@ impl CodeGenerator {
                 #(#fields)*
             }
         })
+    }
+
+    fn union_declared_properties(
+        &self,
+        target: &str,
+        analysis: &crate::analysis::SchemaAnalysis,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
+        if !visited.insert(target.to_string()) {
+            return std::collections::HashSet::new();
+        }
+        let mut properties = std::collections::HashSet::new();
+        if let Some(schema) = analysis.schemas.get(target) {
+            match &schema.schema_type {
+                crate::analysis::SchemaType::Object {
+                    properties: own,
+                    variant,
+                    ..
+                } => {
+                    properties.extend(own.keys().cloned());
+                    if let Some(variant) = variant {
+                        properties.extend(self.union_declared_properties(
+                            &variant.target,
+                            analysis,
+                            visited,
+                        ));
+                    }
+                }
+                crate::analysis::SchemaType::DiscriminatedUnion { variants, .. } => {
+                    for variant in variants {
+                        properties.extend(self.union_declared_properties(
+                            &variant.type_name,
+                            analysis,
+                            visited,
+                        ));
+                    }
+                }
+                crate::analysis::SchemaType::Union { variants, .. }
+                | crate::analysis::SchemaType::Composition { schemas: variants } => {
+                    for variant in variants {
+                        properties.extend(self.union_declared_properties(
+                            &variant.target,
+                            analysis,
+                            visited,
+                        ));
+                    }
+                }
+                crate::analysis::SchemaType::Reference { target } => {
+                    properties.extend(self.union_declared_properties(target, analysis, visited));
+                }
+                _ => {}
+            }
+        }
+        visited.remove(target);
+        properties
     }
 
     #[allow(dead_code)]

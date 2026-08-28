@@ -224,8 +224,9 @@ fn generated_allof_objects_round_trip_union_fields_and_required_nulls_exactly() 
     .generate(&mut analysis)
     .expect("object union allOf types should generate");
     assert!(
-        code.contains("#[serde(flatten)]"),
-        "allOf unions need a flattened carrier. Code:\n{code}"
+        code.contains("struct __CustomFieldFilterBase")
+            && code.contains("let mut variant_input = value"),
+        "allOf unions need complete-object base/variant decoding. Code:\n{code}"
     );
     let signer_start = code.find("pub struct Signer {").expect("Signer struct");
     let signer_end = code[signer_start..]
