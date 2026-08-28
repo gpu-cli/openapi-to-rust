@@ -1175,7 +1175,9 @@ impl<'a> SyntheticGenerator<'a> {
             if schema_contains_binary_format(&branches[index], self.root) {
                 continue;
             }
-            if let Some(value) = self.generate(&branches[index], seed + offset + 2, depth + 1, refs)
+            let branch = &branches[index];
+            if let Some(value) = self.generate(branch, seed + offset + 2, depth + 1, refs)
+                && self.branch_accepts_candidate(branch, &value)
             {
                 return Some(value);
             }
@@ -2721,6 +2723,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn simple_union_candidates_validate_against_the_selected_ref_branch() {
+        let document = json!({
+            "$schema": Dialect::Draft202012.schema_uri(),
+            "$defs": {
+                "Base": {
+                    "type": "object",
+                    "properties": { "user": { "type": "string" } }
+                },
+                "Composed": {
+                    "allOf": [
+                        { "$ref": "#/$defs/Base" },
+                        { "type": "object", "required": ["user"] }
+                    ]
+                },
+                "OpenFallback": { "type": "object" },
+                "Choice": {
+                    "anyOf": [
+                        { "$ref": "#/$defs/Composed" },
+                        { "$ref": "#/$defs/OpenFallback" }
+                    ]
+                }
+            }
+        });
+        let validators = validator_options(Dialect::Draft202012)
+            .build_map(&document)
+            .expect("validator map");
+        let generator = SyntheticGenerator::with_validators(&document, &validators);
+        let branches = document["$defs"]["Choice"]["anyOf"]
+            .as_array()
+            .expect("anyOf branches");
+
+        // This seed makes the allOf synthesizer produce `user: false`: valid
+        // through the open fallback, but invalid for the referenced branch
+        // that produced it. The union generator must reject that incidental
+        // cross-branch match and move to a branch-valid candidate.
+        let candidate = generator
+            .generate_branch(branches, 6, 0, &mut Vec::new())
+            .expect("branch-valid fallback candidate");
+        assert_ne!(candidate.get("user"), Some(&Value::Bool(false)));
+        assert!(
+            validators["#/$defs/OpenFallback"].is_valid(&candidate)
+                || validators["#/$defs/Composed"].is_valid(&candidate),
+            "candidate must fit the branch that generated it: {candidate}"
+        );
     }
 
     #[test]
