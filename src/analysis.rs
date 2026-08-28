@@ -2562,6 +2562,17 @@ impl SchemaAnalyzer {
         schema: &Schema,
         visited_refs: &mut HashSet<String>,
     ) -> Option<Vec<String>> {
+        let allow_vendor_default =
+            !self.has_standard_string_constraint(schema, &mut HashSet::new());
+        self.string_constraint_domain_inner(schema, visited_refs, allow_vendor_default)
+    }
+
+    fn string_constraint_domain_inner(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+        allow_vendor_default: bool,
+    ) -> Option<Vec<String>> {
         if let Some(reference) = schema.reference() {
             if !visited_refs.insert(reference.to_string()) {
                 return None;
@@ -2569,7 +2580,9 @@ impl SchemaAnalyzer {
             let result = self
                 .extract_schema_name(reference)
                 .and_then(|name| self.schemas.get(name))
-                .and_then(|target| self.string_constraint_domain(target, visited_refs));
+                .and_then(|target| {
+                    self.string_constraint_domain_inner(target, visited_refs, allow_vendor_default)
+                });
             visited_refs.remove(reference);
             return result;
         }
@@ -2594,11 +2607,12 @@ impl SchemaAnalyzer {
                 ),
             );
         }
-        if details
-            .extra
-            .get("x-stainless-const")
-            .and_then(Value::as_bool)
-            == Some(true)
+        if allow_vendor_default
+            && details
+                .extra
+                .get("x-stainless-const")
+                .and_then(Value::as_bool)
+                == Some(true)
             && let Some(default) = details.default.as_ref().and_then(Value::as_str)
         {
             own_domain =
@@ -2611,16 +2625,20 @@ impl SchemaAnalyzer {
                 for member in all_of {
                     domain = Self::intersect_optional_domains(
                         domain,
-                        self.string_constraint_domain(member, visited_refs),
+                        self.string_constraint_domain_inner(
+                            member,
+                            visited_refs,
+                            allow_vendor_default,
+                        ),
                     );
                 }
                 domain
             }
             Schema::AnyOf { any_of, .. } => {
-                self.union_string_constraint_domains(any_of, visited_refs)
+                self.union_string_constraint_domains(any_of, visited_refs, allow_vendor_default)
             }
             Schema::OneOf { one_of, .. } => {
-                self.union_string_constraint_domains(one_of, visited_refs)
+                self.union_string_constraint_domains(one_of, visited_refs, allow_vendor_default)
             }
             Schema::Bool(false) => Some(Vec::new()),
             _ => None,
@@ -2633,18 +2651,56 @@ impl SchemaAnalyzer {
         &self,
         schemas: &[Schema],
         visited_refs: &mut HashSet<String>,
+        allow_vendor_default: bool,
     ) -> Option<Vec<String>> {
         if schemas.is_empty() {
             return Some(Vec::new());
         }
         let mut domain = Vec::new();
         for schema in schemas {
-            let values = self.string_constraint_domain(schema, visited_refs)?;
+            let values =
+                self.string_constraint_domain_inner(schema, visited_refs, allow_vendor_default)?;
             for value in values {
                 Self::push_unique_string(&mut domain, &value);
             }
         }
         Some(domain)
+    }
+
+    fn has_standard_string_constraint(
+        &self,
+        schema: &Schema,
+        visited_refs: &mut HashSet<String>,
+    ) -> bool {
+        if let Some(reference) = schema.reference() {
+            if !visited_refs.insert(reference.to_string()) {
+                return false;
+            }
+            let result = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+                .is_some_and(|target| self.has_standard_string_constraint(target, visited_refs));
+            visited_refs.remove(reference);
+            return result;
+        }
+
+        let details = schema.details();
+        if details.const_value.is_some() || details.enum_values.is_some() {
+            return true;
+        }
+
+        match schema {
+            Schema::AllOf { all_of, .. } => all_of
+                .iter()
+                .any(|member| self.has_standard_string_constraint(member, visited_refs)),
+            Schema::AnyOf { any_of, .. } => any_of
+                .iter()
+                .any(|member| self.has_standard_string_constraint(member, visited_refs)),
+            Schema::OneOf { one_of, .. } => one_of
+                .iter()
+                .any(|member| self.has_standard_string_constraint(member, visited_refs)),
+            _ => false,
+        }
     }
 
     fn intersect_optional_domains(

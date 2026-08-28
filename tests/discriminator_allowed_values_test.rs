@@ -201,6 +201,34 @@ fn discriminator_spec() -> Value {
                     { "$ref": "#/components/schemas/StainlessBeta" }
                 ],
                 "discriminator": { "propertyName": "type" }
+            },
+            "VersionedPreview": {
+                "type": "object",
+                "required": ["type", "preview"],
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["preview", "preview_v2"],
+                        "default": "preview",
+                        "x-stainless-const": true
+                    },
+                    "preview": { "type": "string" }
+                }
+            },
+            "VersionedOther": {
+                "type": "object",
+                "required": ["type", "other"],
+                "properties": {
+                    "type": { "type": "string", "const": "other" },
+                    "other": { "type": "string" }
+                }
+            },
+            "StainlessVersionedEvent": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/VersionedPreview" },
+                    { "$ref": "#/components/schemas/VersionedOther" }
+                ],
+                "discriminator": { "propertyName": "type" }
             }
         } }
     })
@@ -275,6 +303,10 @@ fn discriminator_values_follow_refs_compositions_and_multi_value_enums() {
         union_values(&analysis, "StainlessEvent"),
         vec![vec!["stainless.alpha"], vec!["stainless.beta"]]
     );
+    assert_eq!(
+        union_values(&analysis, "StainlessVersionedEvent"),
+        vec![vec!["preview", "preview_v2"], vec!["other"]]
+    );
 }
 
 #[test]
@@ -292,7 +324,7 @@ fn generated_unions_preserve_every_allowed_discriminator_value() {
 mod discriminator_allowed_value_roundtrip {
     use super::{
         ConflictingMappedUnion, InterpreterOutput, Media, ScalarOrTaggedObject,
-        ScheduledEventResponse, StainlessEvent,
+        ScheduledEventResponse, StainlessEvent, StainlessVersionedEvent,
     };
     use serde::{Serialize, de::DeserializeOwned};
 
@@ -345,6 +377,12 @@ mod discriminator_allowed_value_roundtrip {
         }));
         exact::<StainlessEvent>(serde_json::json!({
             "type": "stainless.beta", "beta": "payload"
+        }));
+        exact::<StainlessVersionedEvent>(serde_json::json!({
+            "type": "preview", "preview": "first"
+        }));
+        exact::<StainlessVersionedEvent>(serde_json::json!({
+            "type": "preview_v2", "preview": "second"
         }));
     }
 }
