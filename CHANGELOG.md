@@ -6,6 +6,26 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-08
+
+### Breaking changes
+
+#### Generated Rust API
+
+- Union members that carry an unconstrained or bare `type: object` schema now
+  generate `BTreeMap<String, serde_json::Value>` instead of
+  `serde_json::Value` or an empty struct, and a struct whose schema states
+  `additionalProperties: false` rejects undeclared keys when it appears as a
+  union branch. Both correct payloads the previous output silently dropped or
+  routed to the wrong variant; regenerate and update the affected field types
+  and constructors. See the *Fixed* entries below for what changed and why.
+
+#### Library API
+
+- `analysis::SchemaAnalysis` gained `untagged_union_branches`, the set of
+  schemas reachable as a branch of an untagged union. Downstream public-struct
+  literals must include the new field.
+
 ### Added
 
 - `scripts/gen-diff.sh <base-ref>` shows what a generator change does to the
@@ -634,7 +654,8 @@ would have passed any amount of spec-diffing.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.12.3...v0.13.0
