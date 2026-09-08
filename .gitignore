@@ -2,6 +2,8 @@
 **/target/
 # Build outputs from spec-compile.sh and ad-hoc generator runs.
 /tmp/spec-compile/
+/tmp/gen-diff/
+/tmp/corpus-manifest/
 /tmp/spec-compile-target/
 /tmp/gen-anthropic/
 /tmp/gen-openai/
