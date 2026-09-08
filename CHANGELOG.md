@@ -8,6 +8,16 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- A struct whose schema states `additionalProperties: false` rejects undeclared
+  keys when it is a branch of an untagged union. `#[serde(untagged)]` takes the
+  first branch that deserializes, so a closed struct whose fields are all
+  optional matched *any* object, won the branch ahead of the one that actually
+  accepts the value, and dropped the extra keys — `{"free": "shape"}` came back
+  as `{}`. Only a stated `additionalProperties: false` in union-branch position
+  is tightened: an omitted keyword leaves the object open in JSON Schema, and a
+  closed struct outside any union has no branch to lose, so both stay tolerant
+  of keys they do not declare and generated clients keep working when a server
+  adds a field. Across six large corpus specs this affects 83 of 19,369 structs.
 - A union branch that declares `type: object` no longer claims values that
   belong to a later branch. `serde_json::Value` matches every JSON shape, so
   with `anyOf: [{type: object}, {type: string}]` a JSON string deserialized

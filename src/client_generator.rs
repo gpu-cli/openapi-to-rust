@@ -1003,7 +1003,7 @@ impl CodeGenerator {
         operation: &OperationInfo,
         analysis: &SchemaAnalysis,
     ) -> Option<BodyModelPlan> {
-        use crate::analysis::{ObjectAdditionalProperties, RequestBodyContent, SchemaType};
+        use crate::analysis::{RequestBodyContent, SchemaType};
 
         let request_body = operation.request_body.as_ref()?;
         let (body_name, body_ident) = match request_body {
@@ -1080,7 +1080,7 @@ impl CodeGenerator {
                 if required_fields.is_empty() {
                     RequiredBodyConstruction::Default
                 } else if emitted.iter().any(|field| !field.is_required)
-                    || !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
+                    || additional_properties.is_open()
                 {
                     RequiredBodyConstruction::New(required_fields)
                 } else {
