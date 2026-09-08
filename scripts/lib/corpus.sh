@@ -15,6 +15,13 @@
 #
 # Source this file; it defines functions only.
 
+# Every ordering these scripts produce — the manifest's line order, the spec
+# lists `comm` compares — has to be identical on a contributor's machine and on
+# a CI runner, and `sort` collates by locale. macOS sorts
+# `anthropic/REQUIRED_DEPS.toml` after `anthropic/client.rs`; a C-locale runner
+# sorts it before. Byte order everywhere, so the two agree.
+export LC_ALL=C
+
 # Emit "name|relative-spec-path" per spec, sorted. Args, when given, whitelist
 # spec names.
 corpus_specs() {
@@ -35,6 +42,26 @@ corpus_specs() {
     fi
     printf '%s|%s\n' "$name" "$spec"
   done < <(find specs -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.json' \) | sort)
+}
+
+# corpus_config <spec-path> <output-dir> <module-name> — the generator config
+# the corpus is built with. Both this file and scripts/spec-compile.sh emit it,
+# so it lives in one place: if they drift, the manifest stops describing the
+# code the compile gate actually checks.
+corpus_config() {
+  cat <<EOF
+[generator]
+spec_path = "$1"
+output_dir = "$2"
+module_name = "$3"
+
+[features]
+enable_async_client = true
+
+[http_client]
+base_url = "https://example.invalid"
+timeout_seconds = 60
+EOF
 }
 
 # corpus_normalize <dir> — strip the version/source stamp from every generated
@@ -76,19 +103,7 @@ corpus_generate() {
     dir="$out_root/$name"
     mkdir -p "$dir"
     module="$(echo "$name" | tr '-' '_')"
-    cat >"$dir/openapi-to-rust.toml" <<EOF
-[generator]
-spec_path = "$PWD/$spec"
-output_dir = "$dir"
-module_name = "$module"
-
-[features]
-enable_async_client = true
-
-[http_client]
-base_url = "https://example.invalid"
-timeout_seconds = 60
-EOF
+    corpus_config "$PWD/$spec" "$dir" "$module" >"$dir/openapi-to-rust.toml"
     if ! "$gen_bin" generate --config "$dir/openapi-to-rust.toml" --quiet \
          >"$dir/generate.log" 2>&1; then
       echo "GEN-FAIL $name" >&2
