@@ -8,6 +8,14 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- A union branch that declares `type: object` no longer claims values that
+  belong to a later branch. `serde_json::Value` matches every JSON shape, so
+  with `anyOf: [{type: object}, {type: string}]` a JSON string deserialized
+  into the object branch and never reached `String(String)`. Such a branch now
+  carries a `BTreeMap<String, serde_json::Value>`, which is equally lossless
+  and matches only objects. A branch that declares no type at all (`{}`,
+  `true`, `{nullable: true}`) genuinely admits any JSON and still generates
+  `serde_json::Value`.
 - The `object` member of a `type: [...]` union keeps arbitrary keys. All members
   of such a union share one schema, so the object member may carry no object
   shape at all; it was projected as a closed, empty struct, which deserialized

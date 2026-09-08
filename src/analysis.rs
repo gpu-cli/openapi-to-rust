@@ -5374,7 +5374,30 @@ impl SchemaAnalyzer {
             discriminator,
             schema,
         );
-        self.add_allocated_inline_schema(allocated_name, schema, dependencies)
+        let branch_name = self.add_allocated_inline_schema(allocated_name, schema, dependencies)?;
+        self.narrow_opaque_object_branch(&branch_name);
+        Ok(branch_name)
+    }
+
+    /// `serde_json::Value` matches every JSON shape, so an untagged union
+    /// branch typed that way claims values that belong to a later branch:
+    /// with `anyOf: [{type: object}, {type: string}]` a JSON string
+    /// deserializes into the object branch. A branch that *declares*
+    /// `type: object` is not "any JSON" — narrow it to a map, which is
+    /// equally lossless and matches only objects.
+    ///
+    /// Only [`UntypedReason::OpaqueObject`] is narrowed. A branch that
+    /// declares no type at all (`{}`, `true`, `{nullable: true}`) really does
+    /// admit any JSON and must keep `serde_json::Value`.
+    fn narrow_opaque_object_branch(&mut self, branch_name: &str) {
+        if let Some(cached) = self.resolved_cache.get_mut(branch_name)
+            && let SchemaType::Untyped {
+                shape: shape @ UntypedShape::Value,
+                reason: UntypedReason::OpaqueObject,
+            } = &mut cached.schema_type
+        {
+            *shape = UntypedShape::ValueMap;
+        }
     }
 
     fn add_allocated_inline_schema(
