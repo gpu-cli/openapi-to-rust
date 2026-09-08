@@ -11,6 +11,9 @@
 # Usage:
 #   scripts/corpus-manifest.sh            # regenerate the manifest in place
 #   scripts/corpus-manifest.sh --check    # fail if the manifest is out of date
+#   scripts/corpus-manifest.sh --check --from tmp/gen-diff/head
+#                                         # hash a corpus that is already on
+#                                         # disk instead of generating one
 #
 # Env:
 #   CORPUS_PROFILE=debug   build the generator without --release (slower to run)
@@ -20,7 +23,15 @@ source scripts/lib/corpus.sh
 
 MANIFEST="tests/corpus-manifest.txt"
 CHECK=0
-[ "${1:-}" = "--check" ] && CHECK=1
+FROM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --from) FROM="${2:?--from needs a directory}"; shift ;;
+    *) echo "usage: $0 [--check] [--from <corpus-dir>]" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 WORK="tmp/corpus-manifest"
 rm -rf "$WORK"
@@ -29,7 +40,7 @@ mkdir -p "$WORK"
 # generator log for the spec that broke.
 cleanup() {
   local code=$?
-  if [ "$code" -eq 0 ]; then
+  if [ "$code" -eq 0 ] || [ ! -d "$WORK/out" ]; then
     rm -rf "$WORK"
   else
     echo "[corpus-manifest] work dir kept: $WORK" >&2
@@ -37,11 +48,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[corpus-manifest] building generator..." >&2
-GEN_BIN="$(corpus_build "$PWD" "$PWD/target" "${CORPUS_PROFILE:-release}")"
+if [ -n "$FROM" ]; then
+  # Reuse a corpus another script already generated (scripts/gen-diff.sh leaves
+  # one at tmp/gen-diff/head) rather than generating a third copy. It must be
+  # complete, or missing specs would read as deletions.
+  SRC="$FROM"
+  expected=$(corpus_specs | wc -l | tr -d ' ')
+  found=$(find "$SRC" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ')
+  if [ "$expected" != "$found" ]; then
+    echo "[corpus-manifest] $SRC holds $found of $expected specs; refusing a partial manifest" >&2
+    exit 2
+  fi
+else
+  SRC="$WORK/out"
+  echo "[corpus-manifest] building generator..." >&2
+  GEN_BIN="$(corpus_build "$PWD" "$PWD/target" "${CORPUS_PROFILE:-release}")"
 
-echo "[corpus-manifest] generating corpus..." >&2
-corpus_generate "$GEN_BIN" "$WORK/out"
+  echo "[corpus-manifest] generating corpus..." >&2
+  corpus_generate "$GEN_BIN" "$SRC"
+fi
 
 OUT="$WORK/manifest.txt"
 {
@@ -62,15 +87,15 @@ OUT="$WORK/manifest.txt"
 files=0
 bytes=0
 while IFS= read -r f; do
-  rel="${f#"$WORK/out/"}"
+  rel="${f#"$SRC/"}"
   b=$(wc -c <"$f" | tr -d ' ')
   l=$(wc -l <"$f" | tr -d ' ')
   printf '%-52s %10s %8s %s\n' "$rel" "$b" "$l" "$(corpus_hash "$f")" >>"$OUT"
   files=$((files + 1))
   bytes=$((bytes + b))
-done < <(find "$WORK/out" -type f | sort)
+done < <(find "$SRC" -type f | sort)
 
-specs=$(find "$WORK/out" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ')
+specs=$(find "$SRC" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ')
 printf '#\n# specs: %s   files: %s   bytes: %s\n' "$specs" "$files" "$bytes" >>"$OUT"
 
 if [ "$CHECK" = "1" ]; then
