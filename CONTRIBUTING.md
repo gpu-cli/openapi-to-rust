@@ -67,9 +67,16 @@ Run the standard gate before opening a pull request:
 ```bash
 cargo fmt --check
 cargo clippy --all-features -- -D warnings
-cargo test --all-features
+cargo nextest run --all-features
+cargo test --doc --all-features
 RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features
 ```
+
+The suite runs under [nextest](https://nexte.st)
+(`cargo install cargo-nextest --locked`), which runs each test in its own
+process. It cannot run doctests, so those keep going through the built-in
+harness in the second command — running only `cargo nextest run` silently skips
+them.
 
 Also run the relevant distribution or corpus gate when touching these areas:
 

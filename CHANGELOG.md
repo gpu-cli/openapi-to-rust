@@ -28,6 +28,16 @@ when correcting output that was wrong or incomplete on the wire.
   manifest on its own. Both cover types and client output; server scaffolding
   has no uniform corpus pass yet.
 
+### Changed
+
+- The test suite runs under [nextest](https://nexte.st): `cargo nextest run
+  --all-features`, which cut a warm local run from 11m40s to 7m25s by running
+  each test in its own process rather than one process per test binary.
+  Contributors need `cargo install cargo-nextest --locked`. Doctests keep going
+  through the built-in harness (`cargo test --doc --all-features`) because
+  nextest cannot run them — `cargo nextest run` alone would skip all seven
+  without saying so.
+
 ### Fixed
 
 - A struct whose schema states `additionalProperties: false` rejects undeclared

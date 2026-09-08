@@ -21,10 +21,14 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --profile ci --all-features
+      # nextest runs each test in its own process and cannot run doctests, so
+      # the crate's doctests still go through the built-in harness.
+      - run: cargo test --doc --all-features
       - name: Verify checked-in conformance reports
         run: |
-          CONFORMANCE_REPORT=1 cargo test --test conformance --test conformance_json_schema
+          CONFORMANCE_REPORT=1 cargo nextest run --test conformance --test conformance_json_schema
           git diff --exit-code -- tests/conformance/coverage-report.md tests/conformance/json-schema-2020-12-report.md
 
   openai-sdk-compat:
