@@ -6,6 +6,36 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- A struct whose schema states `additionalProperties: false` rejects undeclared
+  keys when it is a branch of an untagged union. `#[serde(untagged)]` takes the
+  first branch that deserializes, so a closed struct whose fields are all
+  optional matched *any* object, won the branch ahead of the one that actually
+  accepts the value, and dropped the extra keys — `{"free": "shape"}` came back
+  as `{}`. Only a stated `additionalProperties: false` in union-branch position
+  is tightened: an omitted keyword leaves the object open in JSON Schema, and a
+  closed struct outside any union has no branch to lose, so both stay tolerant
+  of keys they do not declare and generated clients keep working when a server
+  adds a field. Across six large corpus specs this affects 83 of 19,369 structs.
+- A union branch that declares `type: object` no longer claims values that
+  belong to a later branch. `serde_json::Value` matches every JSON shape, so
+  with `anyOf: [{type: object}, {type: string}]` a JSON string deserialized
+  into the object branch and never reached `String(String)`. Such a branch now
+  carries a `BTreeMap<String, serde_json::Value>`, which is equally lossless
+  and matches only objects. A branch that declares no type at all (`{}`,
+  `true`, `{nullable: true}`) genuinely admits any JSON and still generates
+  `serde_json::Value`.
+- The `object` member of a `type: [...]` union keeps arbitrary keys. All members
+  of such a union share one schema, so the object member may carry no object
+  shape at all; it was projected as a closed, empty struct, which deserialized
+  any object and then serialized it back as `{}`. An unconstrained member now
+  generates a `BTreeMap<String, serde_json::Value>` carrier, which still
+  matches only objects, so the other members keep their own variants. Members
+  the spec does shape (`properties`, `required`, `additionalProperties`,
+  `minProperties`/`maxProperties`, and the rest) keep their generated structs
+  (#70).
+
 ## [0.15.0] - 2026-08-28
 
 ### Breaking changes

@@ -92,7 +92,7 @@ fn constraints_and_examples_promote_omitted_additional_properties_to_a_carrier()
     }
     assert!(matches!(
         additional_properties(&analysis, "Closed"),
-        ObjectAdditionalProperties::Forbidden
+        ObjectAdditionalProperties::Denied
     ));
     assert!(matches!(
         additional_properties(&analysis, "Typed"),

@@ -71,6 +71,12 @@ fn odata_nullable_reference_union_keeps_its_literal_object_branch() {
     // object-or-null; it does not turn it into a null-only marker. Keeping the
     // dynamic branch lets generated models hydrate every value the schema
     // actually admits.
+    //
+    // The branch declares `type: object`, so its carrier is a map rather than
+    // `serde_json::Value`: an untagged branch typed as `Value` also matches
+    // strings, numbers and arrays that belong to a different branch. The
+    // explicit `null` the branch admits is still carried by the field's own
+    // `Option`.
     assert_types(
         spec_with_schemas(json!({
             "User": { "type": "object", "additionalProperties": false,
@@ -85,7 +91,7 @@ fn odata_nullable_reference_union_keeps_its_literal_object_branch() {
         &[
             "pub user: Option<MemberUser>",
             "pub enum MemberUser",
-            "pub type MemberVariant2 = serde_json::Value",
+            "pub type MemberVariant2 = std::collections::BTreeMap<",
         ],
     );
 }

@@ -692,7 +692,7 @@ impl<'a> ServerCodegen<'a> {
                 reason: "only flat object schemas are supported".to_string(),
             });
         };
-        if !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
+        if additional_properties.is_open()
             || properties.values().any(|property| {
                 !self.query_property_is_scalar(
                     &property.schema_type,
@@ -998,7 +998,7 @@ impl<'a> ServerCodegen<'a> {
                 )));
             }
         };
-        if !matches!(additional_properties, ObjectAdditionalProperties::Forbidden) {
+        if additional_properties.is_open() {
             return Err(error(
                 "styled object parameters with additionalProperties have an ambiguous wire namespace"
                     .to_string(),

@@ -2296,7 +2296,8 @@ impl CodeGenerator {
         // surfaces the actual schema-declared type, e.g.
         // BTreeMap<String, MyValue>. `Forbidden` emits no field.
         match additional_properties {
-            crate::analysis::ObjectAdditionalProperties::Forbidden => {}
+            crate::analysis::ObjectAdditionalProperties::Denied
+            | crate::analysis::ObjectAdditionalProperties::Closed => {}
             crate::analysis::ObjectAdditionalProperties::Untyped => {
                 let serde_flatten = if variant.is_none() {
                     quote! { #[serde(flatten)] }
@@ -2385,6 +2386,30 @@ impl CodeGenerator {
             },
         };
 
+        // `#[serde(untagged)]` takes the first branch that deserializes, so a
+        // branch accepting more than its schema allows claims values that
+        // belong to a later one: with `anyOf: [Closed, {type: object}]` and a
+        // `Closed` whose fields are all optional, `{"other": 1}` matches
+        // `Closed` — which the document forbids — and the key is dropped
+        // instead of reaching the open branch.
+        //
+        // Only a *stated* `additionalProperties: false` earns this. An omitted
+        // keyword leaves the object open in JSON Schema (the generator merely
+        // projects it closed), and tightening those would make every generated
+        // client fail the first time a server adds a field.
+        //
+        // Serde rejects `deny_unknown_fields` alongside `flatten` at compile
+        // time; `Denied` emits no catch-all field, and a flattened variant is
+        // excluded here as well.
+        let denies_unknown_fields = variant.is_none()
+            && additional_properties.denies_unknown_keys()
+            && analysis.untagged_union_branches.contains(&schema.name);
+        let deny_unknown_fields = if denies_unknown_fields {
+            quote! { #[serde(deny_unknown_fields)] }
+        } else {
+            TokenStream::new()
+        };
+
         // `#[serde(flatten)]` removes keys already consumed by sibling fields
         // before it invokes the flattened value's deserializer. That is wrong
         // for a sibling-property + oneOf schema when both halves intentionally
@@ -2445,7 +2470,8 @@ impl CodeGenerator {
                 .collect();
 
             match additional_properties {
-                crate::analysis::ObjectAdditionalProperties::Forbidden => {}
+                crate::analysis::ObjectAdditionalProperties::Denied
+                | crate::analysis::ObjectAdditionalProperties::Closed => {}
                 crate::analysis::ObjectAdditionalProperties::Untyped => {
                     helper_fields.push(quote! {
                         #[serde(flatten)]
@@ -2554,10 +2580,8 @@ impl CodeGenerator {
             && (emitted_properties
                 .iter()
                 .any(|property| !property.is_required)
-                || !matches!(
-                    additional_properties,
-                    crate::analysis::ObjectAdditionalProperties::Forbidden
-                )) {
+                || additional_properties.is_open())
+        {
             self.generate_request_model_builder(
                 schema,
                 &emitted_properties,
@@ -2572,6 +2596,7 @@ impl CodeGenerator {
         Ok(quote! {
             #doc_comment
             #derives
+            #deny_unknown_fields
             pub struct #struct_name {
                 #(#fields)*
             }
@@ -2597,10 +2622,7 @@ impl CodeGenerator {
         sorted_properties.sort_by_key(|(name, _)| name.as_str());
 
         let mut used_field_idents = std::collections::HashSet::new();
-        if !matches!(
-            additional_properties,
-            crate::analysis::ObjectAdditionalProperties::Forbidden
-        ) {
+        if additional_properties.is_open() {
             used_field_idents.insert("additional_properties".to_string());
         }
 
@@ -2708,7 +2730,8 @@ impl CodeGenerator {
             .collect();
 
         let additional_initializer = match additional_properties {
-            crate::analysis::ObjectAdditionalProperties::Forbidden => TokenStream::new(),
+            crate::analysis::ObjectAdditionalProperties::Denied
+            | crate::analysis::ObjectAdditionalProperties::Closed => TokenStream::new(),
             crate::analysis::ObjectAdditionalProperties::Untyped
             | crate::analysis::ObjectAdditionalProperties::Typed { .. } => quote! {
                 additional_properties: ::std::collections::BTreeMap::new(),
@@ -2717,10 +2740,7 @@ impl CodeGenerator {
 
         let mut used_builder_methods =
             std::collections::HashSet::from(["new".to_string(), "build".to_string()]);
-        if !matches!(
-            additional_properties,
-            crate::analysis::ObjectAdditionalProperties::Forbidden
-        ) {
+        if additional_properties.is_open() {
             used_builder_methods.insert("additional_properties".to_string());
         }
         let optional_setters: Vec<TokenStream> = properties
@@ -2812,7 +2832,8 @@ impl CodeGenerator {
             .collect();
 
         let additional_setter = match additional_properties {
-            crate::analysis::ObjectAdditionalProperties::Forbidden => TokenStream::new(),
+            crate::analysis::ObjectAdditionalProperties::Denied
+            | crate::analysis::ObjectAdditionalProperties::Closed => TokenStream::new(),
             crate::analysis::ObjectAdditionalProperties::Untyped => quote! {
                 /// Replace the request's additional properties.
                 #[must_use]

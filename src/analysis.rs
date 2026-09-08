@@ -3,7 +3,7 @@ use crate::type_mapping::TypeMapper;
 use crate::{GeneratorError, Result};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 /// Q2.6 — pull `x-enum-varnames` / `x-enum-descriptions` arrays off
@@ -101,6 +101,48 @@ pub struct SchemaAnalysis {
     /// This is deliberately independent of `schemas`, which model pruning may
     /// mutate before server artifacts are emitted.
     pub validation_context: ValidationContext,
+    /// Schemas reachable as a branch of an untagged union.
+    ///
+    /// `#[serde(untagged)]` tries branches in order and takes the first that
+    /// deserializes, so a branch that accepts more than its schema allows
+    /// claims values belonging to a later branch. A struct in this set whose
+    /// document states `additionalProperties: false` must therefore reject
+    /// undeclared keys; elsewhere leniency costs nothing and keeps generated
+    /// clients working when a server adds a field.
+    ///
+    /// Populated at the end of [`SchemaAnalyzer::analyze`], after inline
+    /// branch schemas exist. Side-channel keyed by analyzed-schema name so no
+    /// object constructor has to carry it.
+    pub untagged_union_branches: BTreeSet<String>,
+}
+
+/// Every schema reachable as a branch of a [`SchemaType::Union`], which the
+/// generator always renders `#[serde(untagged)]`.
+///
+/// A branch target may name a type alias rather than the struct itself
+/// (`pub type Foo = Bar`), so [`SchemaType::Reference`] hops are followed —
+/// the struct at the end is the one serde actually tries.
+fn collect_untagged_union_branches(analysis: &SchemaAnalysis) -> BTreeSet<String> {
+    let mut branches = BTreeSet::new();
+    for schema in analysis.schemas.values() {
+        let SchemaType::Union { variants, .. } = &schema.schema_type else {
+            continue;
+        };
+        for variant in variants {
+            let mut target = variant.target.clone();
+            // A malformed document can point an alias at itself; the visited
+            // set keeps that from spinning.
+            let mut seen = BTreeSet::new();
+            while seen.insert(target.clone()) {
+                branches.insert(target.clone());
+                match analysis.schemas.get(&target).map(|s| &s.schema_type) {
+                    Some(SchemaType::Reference { target: next }) => target = next.clone(),
+                    _ => break,
+                }
+            }
+        }
+    }
+    branches
 }
 
 impl SchemaType {
@@ -345,7 +387,7 @@ fn collect_untyped(
                     findings,
                     depth + 1,
                 ),
-                ObjectAdditionalProperties::Forbidden => {}
+                ObjectAdditionalProperties::Denied | ObjectAdditionalProperties::Closed => {}
             }
         }
         SchemaType::Array { item_type } => {
@@ -676,11 +718,17 @@ pub enum SchemaType {
 /// value-type schema instead of degrading to `serde_json::Value`.
 #[derive(Debug, Clone)]
 pub enum ObjectAdditionalProperties {
-    /// No catch-all field is emitted. This is exact for
-    /// `additionalProperties: false`; for an omitted keyword it is the
-    /// generator's historical closed-model projection and is used only while
-    /// no required unknown member forces an open carrier.
-    Forbidden,
+    /// `additionalProperties: false`: the document itself forbids extra keys.
+    /// No catch-all field is emitted, and because the rule is stated rather
+    /// than assumed the generated struct may also *reject* extra keys — which
+    /// it must, to stay distinguishable as an untagged union branch.
+    Denied,
+    /// The keyword is omitted. JSON Schema leaves such an object open; the
+    /// generator projects it closed (no catch-all field) while no required
+    /// unknown member forces an open carrier. Unlike [`Self::Denied`] this is
+    /// the generator's projection, not a rule the document stated, so the
+    /// struct stays tolerant of keys it does not declare.
+    Closed,
     /// `additionalProperties: true` — extra keys captured as
     /// `BTreeMap<String, serde_json::Value>`.
     Untyped,
@@ -693,7 +741,14 @@ impl ObjectAdditionalProperties {
     /// True when extra keys are accepted (regardless of typing).
     /// Used by callers that only care whether the field exists.
     pub fn is_open(&self) -> bool {
-        !matches!(self, Self::Forbidden)
+        !matches!(self, Self::Denied | Self::Closed)
+    }
+
+    /// True when the *document* forbids extra keys, as opposed to the
+    /// generator merely projecting a closed struct. Only this case may
+    /// tighten the generated struct's own deserialization.
+    pub fn denies_unknown_keys(&self) -> bool {
+        matches!(self, Self::Denied)
     }
 }
 
@@ -1759,6 +1814,16 @@ impl SchemaAnalyzer {
         }
     }
 
+    /// As [`Self::untyped_value`], for an object whose members are entirely
+    /// unconstrained. Unlike [`Self::untyped_value`] this only ever matches a
+    /// JSON object, which is what makes it usable as an untagged union member.
+    fn untyped_value_map(&self, _context: impl Into<String>, reason: UntypedReason) -> SchemaType {
+        SchemaType::Untyped {
+            shape: UntypedShape::ValueMap,
+            reason,
+        }
+    }
+
     /// The schema currently being analyzed, for finding context.
     fn untyped_context(&self, detail: &str) -> String {
         match (&self.current_schema_name, detail) {
@@ -2069,6 +2134,7 @@ impl SchemaAnalyzer {
             used_type_features: crate::type_mapping::UsedFeatures::default(),
             enum_extensions: BTreeMap::new(),
             validation_context,
+            untagged_union_branches: BTreeSet::new(),
         };
 
         // First pass: detect patterns
@@ -2172,6 +2238,8 @@ impl SchemaAnalyzer {
                 analysis.enum_extensions.insert(name.clone(), ext);
             }
         }
+
+        analysis.untagged_union_branches = collect_untagged_union_branches(&analysis);
 
         for schema in analysis.schemas.values_mut() {
             normalize_untyped(&mut schema.schema_type, 0);
@@ -3465,7 +3533,7 @@ impl SchemaAnalyzer {
                     false,
                 ),
                 Some(crate::openapi::AdditionalProperties::Boolean(false)) => {
-                    (ObjectAdditionalProperties::Forbidden, None, true)
+                    (ObjectAdditionalProperties::Denied, None, true)
                 }
                 Some(crate::openapi::AdditionalProperties::Schema(value_schema))
                     if typed_enabled =>
@@ -3514,7 +3582,7 @@ impl SchemaAnalyzer {
                     false,
                 ),
                 None => (
-                    ObjectAdditionalProperties::Forbidden,
+                    ObjectAdditionalProperties::Closed,
                     Some(untyped_required_property()),
                     false,
                 ),
@@ -3609,7 +3677,7 @@ impl SchemaAnalyzer {
             properties.insert(name, required_additional_property.clone());
         }
 
-        if matches!(additional_properties, ObjectAdditionalProperties::Forbidden) {
+        if !additional_properties.is_open() {
             *additional_properties = ObjectAdditionalProperties::Untyped;
         }
         Ok(())
@@ -3668,6 +3736,36 @@ impl SchemaAnalyzer {
                     "typed-multi-object",
                     schema,
                 );
+                // The shared `SchemaDetails` may say nothing at all about an
+                // object's members (`type: [string, object]` and nothing else).
+                // Projecting that as a struct yields a closed, empty one, which
+                // deserializes any object and then serializes it back as `{}`.
+                // A map carrier keeps the keys, and unlike `serde_json::Value`
+                // it still matches only objects, so the untagged enum keeps
+                // routing arrays and scalars to their own members.
+                if Self::object_shape_is_unconstrained(schema.details()) {
+                    let schema_type = self.untyped_value_map(
+                        self.untyped_context(&object_type_name),
+                        UntypedReason::OpaqueObject,
+                    );
+                    self.resolved_cache.insert(
+                        object_type_name.clone(),
+                        AnalyzedSchema {
+                            name: object_type_name.clone(),
+                            original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                            schema_type,
+                            dependencies: HashSet::new(),
+                            nullable: false,
+                            description: Some("Object variant in union".to_string()),
+                            default: None,
+                        },
+                    );
+                    dependencies.insert(object_type_name.clone());
+                    return Ok(SchemaRef {
+                        target: object_type_name,
+                        nullable: false,
+                    });
+                }
                 let object_type = self.add_allocated_object_schema(
                     object_type_name.clone(),
                     schema,
@@ -4320,7 +4418,7 @@ impl SchemaAnalyzer {
             {
                 ObjectAdditionalProperties::Untyped
             } else {
-                ObjectAdditionalProperties::Forbidden
+                ObjectAdditionalProperties::Closed
             };
             self.finalize_required_object_members(
                 &mut merged_properties,
@@ -5334,7 +5432,30 @@ impl SchemaAnalyzer {
             discriminator,
             schema,
         );
-        self.add_allocated_inline_schema(allocated_name, schema, dependencies)
+        let branch_name = self.add_allocated_inline_schema(allocated_name, schema, dependencies)?;
+        self.narrow_opaque_object_branch(&branch_name);
+        Ok(branch_name)
+    }
+
+    /// `serde_json::Value` matches every JSON shape, so an untagged union
+    /// branch typed that way claims values that belong to a later branch:
+    /// with `anyOf: [{type: object}, {type: string}]` a JSON string
+    /// deserializes into the object branch. A branch that *declares*
+    /// `type: object` is not "any JSON" — narrow it to a map, which is
+    /// equally lossless and matches only objects.
+    ///
+    /// Only [`UntypedReason::OpaqueObject`] is narrowed. A branch that
+    /// declares no type at all (`{}`, `true`, `{nullable: true}`) really does
+    /// admit any JSON and must keep `serde_json::Value`.
+    fn narrow_opaque_object_branch(&mut self, branch_name: &str) {
+        if let Some(cached) = self.resolved_cache.get_mut(branch_name)
+            && let SchemaType::Untyped {
+                shape: shape @ UntypedShape::Value,
+                reason: UntypedReason::OpaqueObject,
+            } = &mut cached.schema_type
+        {
+            *shape = UntypedShape::ValueMap;
+        }
     }
 
     fn add_allocated_inline_schema(
@@ -7375,13 +7496,22 @@ impl SchemaAnalyzer {
             return false;
         }
 
-        let details = schema.details();
+        Self::object_shape_is_unconstrained(schema.details())
+    }
 
+    /// Whether the schema's object-shape keywords leave an object's members
+    /// entirely unconstrained, ignoring the `type` keyword itself.
+    ///
+    /// Split out of [`Self::is_dynamic_object_pattern`] so the `object` member
+    /// of a `type: […]` union can ask the same question: `schema_type()`
+    /// reports only the first non-null member there, so the type check in that
+    /// caller cannot be reused.
+    fn object_shape_is_unconstrained(details: &crate::openapi::SchemaDetails) -> bool {
         // An explicit additionalProperties policy is structural even when no
         // named properties exist. `true`/a schema needs a map carrier, while
         // `false` is a closed empty object (GitHub's `empty-object`) and must
         // not become `serde_json::Value`, which would match every oneOf branch.
-        if self.has_explicit_additional_properties(schema) {
+        if details.additional_properties.is_some() {
             return false;
         }
 
@@ -7414,12 +7544,6 @@ impl SchemaAnalyzer {
         }
 
         false
-    }
-
-    /// Check whether the object declares any explicit additional-properties policy.
-    fn has_explicit_additional_properties(&self, schema: &Schema) -> bool {
-        let details = schema.details();
-        details.additional_properties.is_some()
     }
 
     /// Analyze OpenAPI operations to extract request/response schemas
@@ -8600,9 +8724,7 @@ impl SchemaAnalyzer {
         else {
             return None;
         };
-        if properties.is_empty()
-            || !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
-        {
+        if properties.is_empty() || additional_properties.is_open() {
             return None;
         }
         let mut projected = Vec::with_capacity(properties.len());
@@ -8698,9 +8820,7 @@ impl SchemaAnalyzer {
         else {
             return None;
         };
-        if properties.is_empty()
-            || !matches!(additional_properties, ObjectAdditionalProperties::Forbidden)
-        {
+        if properties.is_empty() || additional_properties.is_open() {
             return None;
         }
         properties

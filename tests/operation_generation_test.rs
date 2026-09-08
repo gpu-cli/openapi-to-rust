@@ -34,6 +34,7 @@ fn create_test_analysis_with_operations(operations: Vec<OperationInfo>) -> Schem
         used_type_features: Default::default(),
         enum_extensions: BTreeMap::new(),
         validation_context: Default::default(),
+        untagged_union_branches: Default::default(),
     }
 }
 
