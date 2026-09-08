@@ -1,0 +1,12 @@
+# Many tests here generate a crate and compile it, so multi-minute runtimes are
+# expected rather than a symptom; raise the slow threshold so the ones worth
+# looking at stand out.
+[profile.default]
+slow-timeout = { period = "120s" }
+
+# CI reports every failure in one run: re-queuing a pull request to discover the
+# second broken test wastes more than finishing the suite does.
+[profile.ci]
+slow-timeout = { period = "120s" }
+fail-fast = false
+failure-output = "immediate-final"

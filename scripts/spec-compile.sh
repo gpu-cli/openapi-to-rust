@@ -33,6 +33,7 @@
 #                              cold build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/lib/corpus.sh
 
 OFFLINE=""
 if [ "${SPEC_COMPILE_OFFLINE:-}" = "1" ]; then
@@ -166,19 +167,10 @@ EOF
   # Sanitize module name (replace - with _).
   module_name="$(echo "$name" | tr '-' '_')"
 
-  cat >"$dir/openapi-to-rust.toml" <<EOF
-[generator]
-spec_path = "$WORKSPACE/$spec_path"
-output_dir = "src/generated"
-module_name = "$module_name"
-
-[features]
-enable_async_client = true
-
-[http_client]
-base_url = "https://example.invalid"
-timeout_seconds = 60
-EOF
+  # Shared with the corpus manifest and gen-diff, so the code hashed there is
+  # the code checked here.
+  corpus_config "$WORKSPACE/$spec_path" "src/generated" "$module_name" \
+    >"$dir/openapi-to-rust.toml"
 
   # Generator step
   log="$dir/generate.log"

@@ -21,10 +21,14 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --profile ci --all-features
+      # nextest runs each test in its own process and cannot run doctests, so
+      # the crate's doctests still go through the built-in harness.
+      - run: cargo test --doc --all-features
       - name: Verify checked-in conformance reports
         run: |
-          CONFORMANCE_REPORT=1 cargo test --test conformance --test conformance_json_schema
+          CONFORMANCE_REPORT=1 cargo nextest run --test conformance --test conformance_json_schema
           git diff --exit-code -- tests/conformance/coverage-report.md tests/conformance/json-schema-2020-12-report.md
 
   openai-sdk-compat:
@@ -137,6 +141,63 @@ jobs:
   # Fast tier: every supported corpus document must generate, while the two
   # production-target specs must also compile from their exact dependency
   # fragments. The full compile tier runs separately on a schedule/manual run.
+  # Hash every file the generator emits for the pinned corpus and compare it
+  # with tests/corpus-manifest.txt. A change here means real-world output moved.
+  # Pull requests get this gate from corpus-diff instead, which generates the
+  # same corpus anyway and can also say what moved.
+  corpus-manifest:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/corpus-manifest.sh --check
+
+  # Show the reviewer what a generator change does to real-world output, rather
+  # than only that something changed: regenerate the corpus at the base of the
+  # pull request and at its head, and diff the two. The manifest gate then runs
+  # off the head corpus this already produced.
+  corpus-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gen-diff.sh builds the base ref in a worktree, so its history has
+          # to be present.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Diff generated corpus against the pull request base
+        # `shell: bash` for pipefail: without it the pipe would report tee's
+        # status and hide a failed run.
+        shell: bash
+        run: |
+          scripts/gen-diff.sh "${{ github.event.pull_request.base.sha }}" \
+            | tee "$RUNNER_TEMP/gen-diff-summary.txt"
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo '## Generated corpus diff'
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/gen-diff-summary.txt" 2>/dev/null \
+              || echo '(gen-diff did not complete)'
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-diff
+          path: tmp/gen-diff/report/
+          if-no-files-found: ignore
+      - name: Verify tests/corpus-manifest.txt matches the generated corpus
+        run: scripts/corpus-manifest.sh --check --from tmp/gen-diff/head
+
   spec-compile:
     if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
