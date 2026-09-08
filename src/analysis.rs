@@ -1759,6 +1759,16 @@ impl SchemaAnalyzer {
         }
     }
 
+    /// As [`Self::untyped_value`], for an object whose members are entirely
+    /// unconstrained. Unlike [`Self::untyped_value`] this only ever matches a
+    /// JSON object, which is what makes it usable as an untagged union member.
+    fn untyped_value_map(&self, _context: impl Into<String>, reason: UntypedReason) -> SchemaType {
+        SchemaType::Untyped {
+            shape: UntypedShape::ValueMap,
+            reason,
+        }
+    }
+
     /// The schema currently being analyzed, for finding context.
     fn untyped_context(&self, detail: &str) -> String {
         match (&self.current_schema_name, detail) {
@@ -3668,6 +3678,36 @@ impl SchemaAnalyzer {
                     "typed-multi-object",
                     schema,
                 );
+                // The shared `SchemaDetails` may say nothing at all about an
+                // object's members (`type: [string, object]` and nothing else).
+                // Projecting that as a struct yields a closed, empty one, which
+                // deserializes any object and then serializes it back as `{}`.
+                // A map carrier keeps the keys, and unlike `serde_json::Value`
+                // it still matches only objects, so the untagged enum keeps
+                // routing arrays and scalars to their own members.
+                if Self::object_shape_is_unconstrained(schema.details()) {
+                    let schema_type = self.untyped_value_map(
+                        self.untyped_context(&object_type_name),
+                        UntypedReason::OpaqueObject,
+                    );
+                    self.resolved_cache.insert(
+                        object_type_name.clone(),
+                        AnalyzedSchema {
+                            name: object_type_name.clone(),
+                            original: serde_json::to_value(schema).unwrap_or(Value::Null),
+                            schema_type,
+                            dependencies: HashSet::new(),
+                            nullable: false,
+                            description: Some("Object variant in union".to_string()),
+                            default: None,
+                        },
+                    );
+                    dependencies.insert(object_type_name.clone());
+                    return Ok(SchemaRef {
+                        target: object_type_name,
+                        nullable: false,
+                    });
+                }
                 let object_type = self.add_allocated_object_schema(
                     object_type_name.clone(),
                     schema,
@@ -7375,13 +7415,22 @@ impl SchemaAnalyzer {
             return false;
         }
 
-        let details = schema.details();
+        Self::object_shape_is_unconstrained(schema.details())
+    }
 
+    /// Whether the schema's object-shape keywords leave an object's members
+    /// entirely unconstrained, ignoring the `type` keyword itself.
+    ///
+    /// Split out of [`Self::is_dynamic_object_pattern`] so the `object` member
+    /// of a `type: […]` union can ask the same question: `schema_type()`
+    /// reports only the first non-null member there, so the type check in that
+    /// caller cannot be reused.
+    fn object_shape_is_unconstrained(details: &crate::openapi::SchemaDetails) -> bool {
         // An explicit additionalProperties policy is structural even when no
         // named properties exist. `true`/a schema needs a map carrier, while
         // `false` is a closed empty object (GitHub's `empty-object`) and must
         // not become `serde_json::Value`, which would match every oneOf branch.
-        if self.has_explicit_additional_properties(schema) {
+        if details.additional_properties.is_some() {
             return false;
         }
 
@@ -7414,12 +7463,6 @@ impl SchemaAnalyzer {
         }
 
         false
-    }
-
-    /// Check whether the object declares any explicit additional-properties policy.
-    fn has_explicit_additional_properties(&self, schema: &Schema) -> bool {
-        let details = schema.details();
-        details.additional_properties.is_some()
     }
 
     /// Analyze OpenAPI operations to extract request/response schemas

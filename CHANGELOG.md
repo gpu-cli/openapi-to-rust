@@ -6,6 +6,18 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `object` member of a `type: [...]` union keeps arbitrary keys. All members
+  of such a union share one schema, so the object member may carry no object
+  shape at all; it was projected as a closed, empty struct, which deserialized
+  any object and then serialized it back as `{}`. An unconstrained member now
+  generates a `BTreeMap<String, serde_json::Value>` carrier, which still
+  matches only objects, so the other members keep their own variants. Members
+  the spec does shape (`properties`, `required`, `additionalProperties`,
+  `minProperties`/`maxProperties`, and the rest) keep their generated structs
+  (#70).
+
 ## [0.15.0] - 2026-08-28
 
 ### Breaking changes
