@@ -137,6 +137,18 @@ jobs:
   # Fast tier: every supported corpus document must generate, while the two
   # production-target specs must also compile from their exact dependency
   # fragments. The full compile tier runs separately on a schedule/manual run.
+  # Hash every file the generator emits for the pinned corpus and compare it
+  # with tests/corpus-manifest.txt. A change here means real-world output moved;
+  # scripts/gen-diff.sh <base-ref> shows exactly how.
+  corpus-manifest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/corpus-manifest.sh --check
+
   spec-compile:
     if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
