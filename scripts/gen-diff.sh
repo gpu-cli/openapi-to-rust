@@ -16,6 +16,7 @@
 # Env:
 #   GEN_DIFF_SPECS="anthropic openai"   restrict to these specs
 #   GEN_DIFF_PROFILE=debug              build without --release
+#   GEN_DIFF_MAX_DIFF_BYTES=0           do not truncate per-spec diffs (5MB cap)
 #   GEN_DIFF_REFRESH=1                  ignore the cached base corpus
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,6 +24,7 @@ source scripts/lib/corpus.sh
 
 ROOT="tmp/gen-diff"
 PROFILE="${GEN_DIFF_PROFILE:-release}"
+MAX_DIFF_BYTES="${GEN_DIFF_MAX_DIFF_BYTES:-5000000}"
 read -r -a SPEC_FILTER <<<"${GEN_DIFF_SPECS:-}"
 
 BASE_REF="${1:-}"
@@ -42,7 +44,21 @@ mkdir -p "$HEAD_OUT" "$REPORT"
 if [ "${GEN_DIFF_REFRESH:-}" = "1" ]; then
   rm -rf "$BASE_OUT"
 fi
-if [ -f "$BASE_OUT/.corpus-complete" ]; then
+# What the run needs to compare. Taking the spec list from corpus_specs rather
+# than from whatever directories exist keeps a cached wider base corpus from
+# reading as deletions against a filtered head.
+WANT_SPECS="$(corpus_specs "${SPEC_FILTER[@]}" | cut -d'|' -f1 | sort)"
+
+# The cache marker records which specs the cached corpus actually holds: keyed
+# on the commit alone, a corpus left behind by an earlier GEN_DIFF_SPECS run
+# would be reused for a wider run and every spec it lacks would look new.
+CACHE_OK=0
+if [ -f "$BASE_OUT/.corpus-specs" ] \
+   && [ -z "$(comm -23 <(echo "$WANT_SPECS") <(sort "$BASE_OUT/.corpus-specs"))" ]; then
+  CACHE_OK=1
+fi
+
+if [ "$CACHE_OK" = "1" ]; then
   echo "[gen-diff] reusing cached base corpus ($BASE_OUT)"
 else
   rm -rf "$BASE_OUT"
@@ -54,10 +70,16 @@ else
   # trips over a stale registration.
   trap 'git worktree remove --force "$WT" >/dev/null 2>&1 || true' EXIT
   echo "[gen-diff] building generator at $BASE_SHA..."
-  BASE_BIN="$(corpus_build "$PWD/$WT" "$PWD/$ROOT/target-base" "$PROFILE")"
+  # Both sides build into the workspace target dir: the dependency graph is
+  # identical, so reqwest and friends compile once instead of twice. Only the
+  # crate itself is rebuilt per side, and the base binary is stashed first
+  # because the head build overwrites it in place.
+  BASE_BIN="$(corpus_build "$PWD/$WT" "$PWD/target" "$PROFILE")"
+  cp "$BASE_BIN" "$ROOT/openapi-to-rust-$BASE_SHA"
+  BASE_BIN="$PWD/$ROOT/openapi-to-rust-$BASE_SHA"
   echo "[gen-diff] generating base corpus..."
   corpus_generate "$BASE_BIN" "$BASE_OUT" "${SPEC_FILTER[@]}" || true
-  touch "$BASE_OUT/.corpus-complete"
+  echo "$WANT_SPECS" >"$BASE_OUT/.corpus-specs"
   git worktree remove --force "$WT" >/dev/null 2>&1 || true
   trap - EXIT
 fi
@@ -79,15 +101,10 @@ items() {
     | awk '{print $2, $3}' | sort -u
 }
 
-names="$(
-  { find "$BASE_OUT" -maxdepth 1 -mindepth 1 -type d -exec basename {} \;
-    find "$HEAD_OUT" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; ; } | sort -u
-)"
-
 rows=""
 changed=0
 : >"$REPORT/items.txt"
-for name in $names; do
+for name in $WANT_SPECS; do
   b="$BASE_OUT/$name"
   h="$HEAD_OUT/$name"
   mkdir -p "$b" "$h"
@@ -108,6 +125,15 @@ for name in $names; do
   [ "$files" -eq 0 ] && continue
   changed=$((changed + 1))
   git diff --no-index "$b" "$h" >"$REPORT/$name.diff" 2>/dev/null || true
+  # A sweeping change can diff hundreds of megabytes; keep a report a reviewer
+  # (and an artifact upload) can actually handle.
+  if [ "$MAX_DIFF_BYTES" -gt 0 ] \
+     && [ "$(wc -c <"$REPORT/$name.diff")" -gt "$MAX_DIFF_BYTES" ]; then
+    head -c "$MAX_DIFF_BYTES" "$REPORT/$name.diff" >"$REPORT/$name.diff.cut"
+    mv "$REPORT/$name.diff.cut" "$REPORT/$name.diff"
+    echo "... [truncated at $MAX_DIFF_BYTES bytes; rerun with" \
+         "GEN_DIFF_SPECS=$name GEN_DIFF_MAX_DIFF_BYTES=0]" >>"$REPORT/$name.diff"
+  fi
   rows+="$((added + removed))|$name|$files|$added|$removed|$n_new|$n_gone"$'\n'
   if [ -n "$new_items$gone_items" ]; then
     {
