@@ -6,6 +6,19 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-25
+
+### Breaking changes
+
+#### Generated Rust API
+
+- Properties with nullable `anyOf` branches, or a `oneOf` with exactly one
+  nullable branch, now preserve that nullability in generated Rust types. A
+  required field may change from `T` to `Option<T>`; an optional field may
+  change from `Option<T>` to `Option<Option<T>>` so missing and explicit `null`
+  remain distinct. Regenerate clients and update affected constructors and
+  field access.
+
 ### Fixed
 
 - Generated union deserializers no longer reject a branch whose re-encoding
@@ -14,6 +27,8 @@ when correcting output that was wrong or incomplete on the wire.
   optional field that is skipped on output. Exact matches still take
   precedence, so values that decoded before keep their branch. This
   unblocks every record of the Cloudflare DNS API.
+- Required nullable union properties now accept an explicit JSON `null`,
+  including Cloudflare responses with a nullable `result` field.
 
 ## [0.17.0] - 2026-09-14
 
@@ -721,7 +736,8 @@ would have passed any amount of spec-diffing.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.14.0...v0.15.0
