@@ -223,6 +223,11 @@ jobs:
     timeout-minutes: 240
     env:
       SPEC_COMPILE_TARGET_DIR: ${{ github.workspace }}/target/spec-compile
+      # Cloudflare's generated roundtrip test exceeds runner memory with
+      # default debug artifacts; these checks do not need debug symbols.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
