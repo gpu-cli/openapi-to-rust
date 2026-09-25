@@ -94,6 +94,15 @@ fn spec() -> Value {
                     { "$ref": "#/components/schemas/DefaultedBranch" },
                     { "$ref": "#/components/schemas/OtherBranch" }
                 ]
+            },
+            "NullableAnyResponse": {
+                "type": "object", "required": ["result"],
+                "properties": { "result": {
+                    "anyOf": [
+                        { "type": "object", "nullable": true },
+                        { "type": "string", "nullable": true }
+                    ]
+                } }
             }
         } }
     })
@@ -140,7 +149,7 @@ publish = false
 
 #[cfg(test)]
 mod tests {
-    use super::generated::{Count, DefaultedAny, DefaultedUnion, Record, RecordResponse};
+    use super::generated::{Count, DefaultedAny, DefaultedUnion, NullableAnyResponse, Record, RecordResponse};
     use serde_json::json;
 
     #[test]
@@ -217,6 +226,15 @@ mod tests {
         let exact: DefaultedUnion = serde_json::from_value(json!({"mode": "active"}))
             .expect("an exact defaulted branch still decodes");
         assert!(matches!(exact, DefaultedUnion::DefaultedBranch(_)));
+    }
+
+    #[test]
+    fn a_required_nullable_anyof_property_roundtrips_null() {
+        let input = json!({"result": null});
+        let response: NullableAnyResponse = serde_json::from_value(input.clone())
+            .expect("a nullable anyOf branch admits null");
+        assert!(response.result.is_none());
+        assert_eq!(serde_json::to_value(response).unwrap(), input);
     }
 }
 "#,
