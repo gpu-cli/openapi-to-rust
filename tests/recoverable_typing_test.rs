@@ -75,8 +75,8 @@ fn odata_nullable_reference_union_keeps_its_literal_object_branch() {
     // The branch declares `type: object`, so its carrier is a map rather than
     // `serde_json::Value`: an untagged branch typed as `Value` also matches
     // strings, numbers and arrays that belong to a different branch. The
-    // explicit `null` the branch admits is still carried by the field's own
-    // `Option`.
+    // explicit `null` the branch admits is still carried by the field's
+    // `Option<Option<_>>`, separately from an absent property.
     assert_types(
         spec_with_schemas(json!({
             "User": { "type": "object", "additionalProperties": false,
@@ -89,7 +89,7 @@ fn odata_nullable_reference_union_keeps_its_literal_object_branch() {
             }}
         })),
         &[
-            "pub user: Option<MemberUser>",
+            "pub user: Option<Option<MemberUser>>",
             "pub enum MemberUser",
             "pub type MemberVariant2 = std::collections::BTreeMap<",
         ],

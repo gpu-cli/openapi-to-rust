@@ -6,6 +6,15 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- Generated union deserializers no longer reject a branch whose re-encoding
+  differs from the input only by wire-equivalent forms: an integer in a
+  `number` field (`1` re-encoded as `1.0`) or an explicit `null` for an
+  optional field that is skipped on output. Exact matches still take
+  precedence, so values that decoded before keep their branch. This
+  unblocks every record of the Cloudflare DNS API.
+
 ## [0.17.0] - 2026-09-14
 
 ### Breaking changes

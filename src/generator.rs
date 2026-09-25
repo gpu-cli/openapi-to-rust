@@ -3512,18 +3512,26 @@ impl CodeGenerator {
                                 if let Ok(candidate) =
                                     serde_json::from_value::<#variant_type>(input.clone())
                                 {
-                                    let preserves_complete_input = serde_json::to_value(&candidate)
-                                        .map(|encoded| encoded == input)
-                                        .unwrap_or(false);
-                                    if preserves_complete_input {
-                                        if matched.is_some() {
-                                            return Err(serde::de::Error::custom(concat!(
-                                                "ambiguous oneOf value for ",
-                                                stringify!(#enum_name),
-                                                ": more than one branch preserved the complete input",
-                                            )));
+                                    match serde_json::to_value(&candidate) {
+                                        Ok(encoded) if encoded == input => {
+                                            if matched.is_some() {
+                                                return Err(serde::de::Error::custom(concat!(
+                                                    "ambiguous oneOf value for ",
+                                                    stringify!(#enum_name),
+                                                    ": more than one branch preserved the complete input",
+                                                )));
+                                            }
+                                            matched = Some(Self::#variant_name(candidate));
                                         }
-                                        matched = Some(Self::#variant_name(candidate));
+                                        Ok(encoded)
+                                            if preserves_complete_json_input(
+                                                &encoded, &input, true, false,
+                                            ) =>
+                                        {
+                                            equivalent_matches += 1;
+                                            equivalent.get_or_insert(Self::#variant_name(candidate));
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -3533,22 +3541,46 @@ impl CodeGenerator {
                             if let Ok(candidate) =
                                 serde_json::from_value::<#variant_type>(input.clone())
                             {
-                                let preserves_complete_input = serde_json::to_value(&candidate)
-                                    .map(|encoded| {
-                                        preserves_complete_json_input(&encoded, &input)
-                                    })
-                                    .unwrap_or(false);
-                                if preserves_complete_input {
-                                    return Ok(Self::#variant_name(candidate));
+                                match serde_json::to_value(&candidate) {
+                                    Ok(encoded)
+                                        if preserves_complete_json_input(
+                                            &encoded, &input, false, true,
+                                        ) =>
+                                    {
+                                        return Ok(Self::#variant_name(candidate));
+                                    }
+                                    Ok(encoded)
+                                        if equivalent.is_none()
+                                            && preserves_complete_json_input(
+                                                &encoded, &input, true, false,
+                                            ) =>
+                                    {
+                                        equivalent = Some(Self::#variant_name(candidate));
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                     }
                 })
                 .collect::<Vec<_>>();
+            // A branch that reproduces the input exactly always wins. Only when
+            // none does is a branch accepted whose encoding differs solely by
+            // wire-equivalent forms: `1.0` for `1`, or an omitted key for an
+            // input `null`. Inputs that decoded before keep their branch.
             let no_match = if exclusive {
                 quote! {
-                    matched.ok_or_else(|| serde::de::Error::custom(concat!(
+                    if let Some(matched) = matched {
+                        return Ok(matched);
+                    }
+                    if equivalent_matches > 1 {
+                        return Err(serde::de::Error::custom(concat!(
+                            "ambiguous oneOf value for ",
+                            stringify!(#enum_name),
+                            ": more than one branch preserved an equivalent input",
+                        )));
+                    }
+                    equivalent.ok_or_else(|| serde::de::Error::custom(concat!(
                         "no oneOf branch for ",
                         stringify!(#enum_name),
                         " preserved the complete input",
@@ -3556,15 +3588,23 @@ impl CodeGenerator {
                 }
             } else {
                 quote! {
-                    Err(serde::de::Error::custom(concat!(
+                    equivalent.ok_or_else(|| serde::de::Error::custom(concat!(
                         "no anyOf branch for ",
                         stringify!(#enum_name),
                         " preserved the complete input",
                     )))
                 }
             };
-            let matched_declaration = exclusive.then(|| quote! { let mut matched = None; });
-            let preservation_helper = (!exclusive).then(|| {
+            let matched_declaration = if exclusive {
+                quote! {
+                    let mut matched = None;
+                    let mut equivalent = None;
+                    let mut equivalent_matches = 0usize;
+                }
+            } else {
+                quote! { let mut equivalent = None; }
+            };
+            let preservation_helper = {
                 quote! {
                     fn exact_json_integer(number: &serde_json::Number) -> Option<i128> {
                         number
@@ -3593,26 +3633,44 @@ impl CodeGenerator {
                         }
                     }
 
+                    /// `nulls_may_be_absent` also accepts an input `null` that the
+                    /// branch omits, as a skipped `None` does. Extra encoded
+                    /// keys are allowed only by the pre-existing anyOf match.
                     fn preserves_complete_json_input(
                         encoded: &serde_json::Value,
                         input: &serde_json::Value,
+                        nulls_may_be_absent: bool,
+                        encoded_keys_may_be_extra: bool,
                     ) -> bool {
                         match (encoded, input) {
                             (
                                 serde_json::Value::Object(encoded),
                                 serde_json::Value::Object(input),
-                            ) => input.iter().all(|(key, value)| {
-                                encoded.get(key).is_some_and(|encoded_value| {
-                                    preserves_complete_json_input(encoded_value, value)
-                                })
-                            }),
+                            ) => {
+                                (encoded_keys_may_be_extra
+                                    || encoded.keys().all(|key| input.contains_key(key)))
+                                    && input.iter().all(|(key, value)| match encoded.get(key) {
+                                        Some(encoded_value) => preserves_complete_json_input(
+                                            encoded_value,
+                                            value,
+                                            nulls_may_be_absent,
+                                            encoded_keys_may_be_extra,
+                                        ),
+                                        None => nulls_may_be_absent && value.is_null(),
+                                    })
+                            }
                             (
                                 serde_json::Value::Array(encoded),
                                 serde_json::Value::Array(input),
                             ) => {
                                 encoded.len() == input.len()
                                     && encoded.iter().zip(input).all(|(encoded, input)| {
-                                        preserves_complete_json_input(encoded, input)
+                                        preserves_complete_json_input(
+                                            encoded,
+                                            input,
+                                            nulls_may_be_absent,
+                                            encoded_keys_may_be_extra,
+                                        )
                                     })
                             }
                             (
@@ -3623,7 +3681,7 @@ impl CodeGenerator {
                         }
                     }
                 }
-            });
+            };
 
             return Ok(quote! {
                 #doc_comment

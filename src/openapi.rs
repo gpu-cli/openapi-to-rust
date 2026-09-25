@@ -831,7 +831,7 @@ impl Schema {
 
     /// True when the schema is nullable in any form OpenAPI allows:
     /// 3.0's `nullable: true`, 3.1's `type: ["X", "null"]`, or an
-    /// `anyOf`/`oneOf` carrying a `null` branch.
+    /// `anyOf`/`oneOf` carrying a `null` branch or a nullable branch.
     ///
     /// Property nullability must be decided through this, not through any
     /// single one of the three checks. Each form was added separately and each
@@ -844,7 +844,22 @@ impl Schema {
         self.reference_siblings_are_nullable()
             || self.details().is_nullable()
             || self.type_array_contains_null()
-            || self.has_explicit_null_variant()
+            || match self {
+                // A nullable branch also admits null even when the union has
+                // no separate null-only branch (common in OpenAPI 3.0).
+                Schema::AnyOf { any_of, .. } => any_of
+                    .iter()
+                    .any(|branch| branch.is_explicit_null_only() || branch.is_nullable_any()),
+                // `oneOf` admits null only when exactly one branch does.
+                Schema::OneOf { one_of, .. } => {
+                    one_of
+                        .iter()
+                        .filter(|branch| branch.is_explicit_null_only() || branch.is_nullable_any())
+                        .count()
+                        == 1
+                }
+                _ => false,
+            }
     }
 
     /// Reference nodes retain siblings in `extra` because OpenAPI 3.0-era
@@ -1849,6 +1864,27 @@ mod tests {
                 !non_nullable.is_nullable_any(),
                 "{reference_keyword} nullable:false must stay non-nullable"
             );
+        }
+    }
+
+    #[test]
+    fn nullable_union_branches_preserve_union_nullability() {
+        for (schema, expected) in [
+            (
+                json!({"anyOf": [{"type": "object", "nullable": true}, {"type": "string", "nullable": true}]}),
+                true,
+            ),
+            (
+                json!({"oneOf": [{"type": "object", "nullable": true}, {"type": "string"}]}),
+                true,
+            ),
+            (
+                json!({"oneOf": [{"type": "object", "nullable": true}, {"type": "string", "nullable": true}]}),
+                false,
+            ),
+        ] {
+            let schema: Schema = serde_json::from_value(schema.clone()).unwrap();
+            assert_eq!(schema.is_nullable_any(), expected, "{schema:?}");
         }
     }
 
