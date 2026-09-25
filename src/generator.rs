@@ -3524,7 +3524,9 @@ impl CodeGenerator {
                                             matched = Some(Self::#variant_name(candidate));
                                         }
                                         Ok(encoded)
-                                            if preserves_complete_json_input(&encoded, &input, true) =>
+                                            if preserves_complete_json_input(
+                                                &encoded, &input, true, false,
+                                            ) =>
                                         {
                                             equivalent_matches += 1;
                                             equivalent.get_or_insert(Self::#variant_name(candidate));
@@ -3541,13 +3543,17 @@ impl CodeGenerator {
                             {
                                 match serde_json::to_value(&candidate) {
                                     Ok(encoded)
-                                        if preserves_complete_json_input(&encoded, &input, false) =>
+                                        if preserves_complete_json_input(
+                                            &encoded, &input, false, true,
+                                        ) =>
                                     {
                                         return Ok(Self::#variant_name(candidate));
                                     }
                                     Ok(encoded)
                                         if equivalent.is_none()
-                                            && preserves_complete_json_input(&encoded, &input, true) =>
+                                            && preserves_complete_json_input(
+                                                &encoded, &input, true, false,
+                                            ) =>
                                     {
                                         equivalent = Some(Self::#variant_name(candidate));
                                     }
@@ -3628,24 +3634,31 @@ impl CodeGenerator {
                     }
 
                     /// `nulls_may_be_absent` also accepts an input `null` that the
-                    /// branch omits, as a skipped `None` does.
+                    /// branch omits, as a skipped `None` does. Extra encoded
+                    /// keys are allowed only by the pre-existing anyOf match.
                     fn preserves_complete_json_input(
                         encoded: &serde_json::Value,
                         input: &serde_json::Value,
                         nulls_may_be_absent: bool,
+                        encoded_keys_may_be_extra: bool,
                     ) -> bool {
                         match (encoded, input) {
                             (
                                 serde_json::Value::Object(encoded),
                                 serde_json::Value::Object(input),
-                            ) => input.iter().all(|(key, value)| match encoded.get(key) {
-                                Some(encoded_value) => preserves_complete_json_input(
-                                    encoded_value,
-                                    value,
-                                    nulls_may_be_absent,
-                                ),
-                                None => nulls_may_be_absent && value.is_null(),
-                            }),
+                            ) => {
+                                (encoded_keys_may_be_extra
+                                    || encoded.keys().all(|key| input.contains_key(key)))
+                                    && input.iter().all(|(key, value)| match encoded.get(key) {
+                                        Some(encoded_value) => preserves_complete_json_input(
+                                            encoded_value,
+                                            value,
+                                            nulls_may_be_absent,
+                                            encoded_keys_may_be_extra,
+                                        ),
+                                        None => nulls_may_be_absent && value.is_null(),
+                                    })
+                            }
                             (
                                 serde_json::Value::Array(encoded),
                                 serde_json::Value::Array(input),
@@ -3656,6 +3669,7 @@ impl CodeGenerator {
                                             encoded,
                                             input,
                                             nulls_may_be_absent,
+                                            encoded_keys_may_be_extra,
                                         )
                                     })
                             }

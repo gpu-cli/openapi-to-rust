@@ -74,6 +74,26 @@ fn spec() -> Value {
                     { "$ref": "#/components/schemas/IntegerCount" },
                     { "$ref": "#/components/schemas/NumberCount" }
                 ]
+            },
+            "DefaultedBranch": {
+                "type": "object", "required": ["mode"],
+                "properties": { "mode": { "type": "string", "default": "active" } }
+            },
+            "OtherBranch": {
+                "type": "object", "required": ["id"],
+                "properties": { "id": { "type": "string" } }
+            },
+            "DefaultedUnion": {
+                "oneOf": [
+                    { "$ref": "#/components/schemas/DefaultedBranch" },
+                    { "$ref": "#/components/schemas/OtherBranch" }
+                ]
+            },
+            "DefaultedAny": {
+                "anyOf": [
+                    { "$ref": "#/components/schemas/DefaultedBranch" },
+                    { "$ref": "#/components/schemas/OtherBranch" }
+                ]
             }
         } }
     })
@@ -120,7 +140,7 @@ publish = false
 
 #[cfg(test)]
 mod tests {
-    use super::generated::{Count, Record, RecordResponse};
+    use super::generated::{Count, DefaultedAny, DefaultedUnion, Record, RecordResponse};
     use serde_json::json;
 
     #[test]
@@ -173,6 +193,30 @@ mod tests {
             matches!(count, Count::NumberCount(_)),
             "only the `number` branch can hold `1.5`: {count:?}"
         );
+    }
+
+    #[test]
+    fn an_added_output_key_is_not_wire_equivalent() {
+        // A required property with a schema default gets #[serde(default)].
+        // It can deserialize an absent property, then serializes it back as
+        // an added key. That is neither of the wire differences allowed by
+        // the oneOf fallback.
+        let result = serde_json::from_value::<DefaultedUnion>(json!({}));
+        assert!(result.is_err(), "a branch must not add a missing required key: {result:?}");
+
+        let input = json!({"comment": null});
+        assert!(
+            serde_json::from_value::<DefaultedUnion>(input.clone()).is_err(),
+            "a null input field must not hide an added output key in oneOf"
+        );
+        assert!(
+            serde_json::from_value::<DefaultedAny>(input).is_err(),
+            "a null input field must not hide an added output key in anyOf"
+        );
+
+        let exact: DefaultedUnion = serde_json::from_value(json!({"mode": "active"}))
+            .expect("an exact defaulted branch still decodes");
+        assert!(matches!(exact, DefaultedUnion::DefaultedBranch(_)));
     }
 }
 "#,
