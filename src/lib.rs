@@ -45,6 +45,7 @@
 //! with [`CodeGenerator::write_files`].
 
 pub mod analysis;
+pub mod bindings;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod client_generator;
@@ -56,6 +57,7 @@ pub mod http_config;
 #[cfg(feature = "http-error")]
 pub mod http_error;
 pub mod openapi;
+pub mod overlay;
 pub mod patterns;
 pub mod registry_generator;
 #[cfg(feature = "internal-tools")]
@@ -78,6 +80,7 @@ pub mod test_helpers;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use analysis::{SchemaAnalysis, SchemaAnalyzer, merge_schema_extensions};
+pub use bindings::{BindingsMetadata, GenerationWithBindings};
 pub use config::ConfigFile;
 pub use error::GeneratorError;
 pub use generator::{CodeGenerator, GeneratedFile, GenerationResult, GeneratorConfig};

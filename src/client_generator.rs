@@ -147,7 +147,9 @@
 //! 5. Handles query parameters and request bodies
 //! 6. Configures middleware stack based on generator config
 
-use crate::analysis::{OperationInfo, OperationResponseBody, ParameterInfo, SchemaAnalysis};
+use crate::analysis::{
+    OperationInfo, OperationRepresentation, OperationResponseBody, ParameterInfo, SchemaAnalysis,
+};
 use crate::generator::CodeGenerator;
 use heck::{ToPascalCase, ToSnakeCase};
 use proc_macro2::TokenStream;
@@ -183,14 +185,41 @@ enum ClientSuccessBody<'a> {
     Text,
     Binary,
     EventStream,
+    ParsedSse,
     Empty,
 }
 
 #[derive(Clone)]
 struct ClientSuccessSelection<'a> {
     statuses: Vec<&'a str>,
+    excluded_statuses: Vec<&'a str>,
     body: ClientSuccessBody<'a>,
     accept: Option<&'a str>,
+}
+
+/// Final flat client binding shared by rendering, builders and metadata.
+pub(crate) struct ClientMethodPlan<'a> {
+    pub operation: &'a OperationInfo,
+    pub method_ident: syn::Ident,
+    pub request_parameters: TokenStream,
+    pub generics: TokenStream,
+    pub response_type: TokenStream,
+    pub error_type: TokenStream,
+    pub response: ClientResponsePlan,
+    pub multipart_filenames: Option<syn::Ident>,
+    pub filenames_method_ident: Option<syn::Ident>,
+    pub builder_method_ident: Option<syn::Ident>,
+    pub builder_type_ident: Option<syn::Ident>,
+    success: ClientSuccessSelection<'a>,
+    validate_content_type: bool,
+}
+
+pub(crate) struct ClientResponsePlan {
+    pub statuses: Vec<String>,
+    pub excluded_statuses: Vec<String>,
+    pub media_type: Option<String>,
+    pub kind: String,
+    pub consumption: String,
 }
 
 enum RequiredBodyConstruction {
@@ -513,9 +542,13 @@ impl CodeGenerator {
     /// intentionally emits every analyzed operation; use
     /// [`Self::generate_http_client`] or [`Self::generate_all`] to honor the
     /// configured `[client].operations` scope.
+    /// Generate standalone HTTP methods. Declared SSE alternatives return raw
+    /// byte streams; `generate_all` bundles the optional parsed SSE runtime.
     pub fn generate_operation_methods(&self, analysis: &SchemaAnalysis) -> TokenStream {
         let operations: Vec<&OperationInfo> = analysis.operations.values().collect();
-        self.generate_operation_methods_for(analysis, &operations)
+        let mut config = self.config().clone();
+        config.enable_sse_client = false;
+        CodeGenerator::new(config).generate_operation_methods_for(analysis, &operations)
     }
 
     /// Generate every operation-owned client artifact from one resolved
@@ -534,14 +567,13 @@ impl CodeGenerator {
             .filter_map(|op| self.generate_op_error_enum(op))
             .collect();
 
-        let methods: Vec<TokenStream> = operations
+        let plans = self.client_method_plans(analysis, operations);
+        let methods: Vec<TokenStream> = plans
             .iter()
-            .copied()
-            .map(|op| self.generate_single_operation_method(analysis, op))
+            .map(|plan| self.generate_planned_operation_method(analysis, plan))
             .collect();
-
         let (operation_builders, builder_entries) =
-            self.generate_operation_builders(analysis, operations);
+            self.generate_operation_builders(analysis, &plans);
 
         quote! {
             #param_enums
@@ -557,18 +589,376 @@ impl CodeGenerator {
         }
     }
 
-    fn generate_operation_builders(
+    pub(crate) fn client_method_plans<'a>(
+        &self,
+        analysis: &'a SchemaAnalysis,
+        operations: &[&'a OperationInfo],
+    ) -> Vec<ClientMethodPlan<'a>> {
+        // Reserve every real operation before allocating additive bindings.
+        let mut used: std::collections::HashSet<String> = [
+            "new",
+            "with_config",
+            "with_base_url",
+            "with_api_key",
+            "with_max_response_body_bytes",
+            "with_header",
+            "with_headers",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let inherent = used.clone();
+        for operation in operations {
+            let ident = self.get_method_name(operation).to_string();
+            used.insert(ident.strip_prefix("r#").unwrap_or(&ident).to_string());
+        }
+        let mut assigned = std::collections::HashSet::new();
+        let mut base_names = BTreeMap::new();
+        for operation in operations {
+            let ident = self.get_method_name(operation).to_string();
+            let plain = ident.strip_prefix("r#").unwrap_or(&ident);
+            let name = if inherent.contains(plain) || !assigned.insert(plain.to_string()) {
+                Self::allocate_name(&ident, &mut used)
+            } else {
+                ident
+            };
+            base_names.insert(operation.operation_id.as_str(), Self::to_field_ident(&name));
+        }
+        let mut plans = Vec::new();
+        for &operation in operations {
+            let method_ident = base_names[operation.operation_id.as_str()].clone();
+            let success = self.get_success_response(analysis, operation);
+            plans.push(self.make_client_method_plan(
+                operation,
+                method_ident.clone(),
+                success.clone(),
+                "buffered",
+                None,
+                false,
+            ));
+            if !self.multipart_binary_fields(operation, analysis).is_empty() {
+                let base = format!("{method_ident}_with_multipart_filenames");
+                let name = Self::allocate_name(&base, &mut used);
+                let mut arguments: std::collections::HashSet<String> = self
+                    .allocated_operation_params(operation)
+                    .iter()
+                    .map(|p| p.ident.to_string())
+                    .collect();
+                arguments.extend(["request".to_string(), "body".to_string()]);
+                let filename_name = Self::allocate_name("multipart_filenames", &mut arguments);
+                plans.push(self.make_client_method_plan(
+                    operation,
+                    Self::to_field_ident(&name),
+                    success,
+                    "buffered",
+                    Some(Self::to_field_ident(&filename_name)),
+                    false,
+                ));
+            }
+            let Some(responses) = analysis.operation_responses.get(&operation.operation_id) else {
+                continue;
+            };
+            let mut representations: BTreeMap<&str, Vec<(&str, &OperationRepresentation)>> =
+                BTreeMap::new();
+            for (status, response) in responses
+                .iter()
+                .filter(|(status, _)| status.starts_with('2'))
+            {
+                for (media_type, representation) in &response.representations {
+                    representations
+                        .entry(media_type)
+                        .or_default()
+                        .push((status, representation));
+                }
+            }
+            let mut kind_counts = BTreeMap::new();
+            for alternatives in representations.values() {
+                let kind = Self::representation_kind(alternatives[0].1);
+                *kind_counts.entry(kind).or_insert(0usize) += 1;
+            }
+            for (media_type, alternatives) in representations {
+                let representation = alternatives[0].1;
+                let incompatible = alternatives
+                    .iter()
+                    .any(|(_, other)| *other != representation);
+                let groups: Vec<Vec<(&str, &OperationRepresentation)>> = if incompatible {
+                    alternatives
+                        .into_iter()
+                        .map(|alternative| vec![alternative])
+                        .collect()
+                } else {
+                    vec![alternatives]
+                };
+                for alternatives in groups {
+                    let representation = alternatives[0].1;
+                    let kind = Self::representation_kind(representation);
+                    let suffix = if kind_counts[kind] > 1 {
+                        format!("{kind}_{}", media_type.to_snake_case())
+                    } else {
+                        kind.to_string()
+                    };
+                    let suffix = if incompatible {
+                        format!("{suffix}_status_{}", alternatives[0].0.to_ascii_lowercase())
+                    } else {
+                        suffix
+                    };
+                    let body = match representation {
+                        OperationRepresentation::Json { schema_name } => {
+                            ClientSuccessBody::Json(schema_name)
+                        }
+                        OperationRepresentation::Text => ClientSuccessBody::Text,
+                        OperationRepresentation::Binary { .. } => ClientSuccessBody::Binary,
+                        OperationRepresentation::EventStream => ClientSuccessBody::EventStream,
+                    };
+                    let selection = ClientSuccessSelection {
+                        statuses: alternatives.iter().map(|(status, _)| *status).collect(),
+                        excluded_statuses: responses
+                            .keys()
+                            .filter(|status| {
+                                status.len() == 3
+                                    && status.bytes().all(|c| c.is_ascii_digit())
+                                    && !alternatives
+                                        .iter()
+                                        .any(|(selected, _)| selected == &status.as_str())
+                            })
+                            .map(String::as_str)
+                            .collect(),
+                        body,
+                        accept: Some(media_type),
+                    };
+                    let default = self.get_success_response(analysis, operation);
+                    let equivalent =
+                        Self::success_bodies_are_compatible(default.body, selection.body)
+                            && default.statuses == selection.statuses
+                            && default.accept == selection.accept;
+                    if !matches!(representation, OperationRepresentation::EventStream)
+                        && !equivalent
+                    {
+                        let name =
+                            Self::allocate_name(&format!("{method_ident}_{suffix}"), &mut used);
+                        plans.push(self.make_client_method_plan(
+                            operation,
+                            Self::to_field_ident(&name),
+                            selection.clone(),
+                            "buffered",
+                            None,
+                            true,
+                        ));
+                    }
+                    if matches!(representation, OperationRepresentation::Binary { .. }) {
+                        let name = Self::allocate_name(
+                            &format!("{method_ident}_{suffix}_stream"),
+                            &mut used,
+                        );
+                        let live_selection = ClientSuccessSelection {
+                            body: ClientSuccessBody::EventStream,
+                            ..selection.clone()
+                        };
+                        let mut plan = self.make_client_method_plan(
+                            operation,
+                            Self::to_field_ident(&name),
+                            live_selection,
+                            "binary_stream",
+                            None,
+                            true,
+                        );
+                        plan.response.kind = "binary".to_string();
+                        plans.push(plan);
+                    }
+                    if matches!(representation, OperationRepresentation::EventStream) {
+                        if self.config().enable_sse_client {
+                            let name =
+                                Self::allocate_name(&format!("{method_ident}_sse"), &mut used);
+                            let selection = ClientSuccessSelection {
+                                body: ClientSuccessBody::ParsedSse,
+                                ..selection
+                            };
+                            plans.push(self.make_client_method_plan(
+                                operation,
+                                Self::to_field_ident(&name),
+                                selection,
+                                "parsed_sse",
+                                None,
+                                true,
+                            ));
+                        } else if !equivalent {
+                            let name =
+                                Self::allocate_name(&format!("{method_ident}_{suffix}"), &mut used);
+                            plans.push(self.make_client_method_plan(
+                                operation,
+                                Self::to_field_ident(&name),
+                                selection,
+                                "raw_event_stream",
+                                None,
+                                true,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let response_count = plans.len();
+        for index in 0..response_count {
+            let plan = &plans[index];
+            if !plan.validate_content_type
+                || self
+                    .multipart_binary_fields(plan.operation, analysis)
+                    .is_empty()
+            {
+                continue;
+            }
+            let name = Self::allocate_name(
+                &format!("{}_with_multipart_filenames", plan.method_ident),
+                &mut used,
+            );
+            let mut arguments: std::collections::HashSet<String> = self
+                .allocated_operation_params(plan.operation)
+                .iter()
+                .map(|p| p.ident.to_string())
+                .collect();
+            arguments.extend(["request".to_string(), "body".to_string()]);
+            let argument = Self::allocate_name("multipart_filenames", &mut arguments);
+            let mut filename_plan = self.make_client_method_plan(
+                plan.operation,
+                Self::to_field_ident(&name),
+                plan.success.clone(),
+                &plan.response.consumption,
+                Some(Self::to_field_ident(&argument)),
+                true,
+            );
+            filename_plan.response.kind = plan.response.kind.clone();
+            plans.push(filename_plan);
+        }
+        let mut filename_plans: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (index, plan) in plans.iter().enumerate() {
+            if plan.multipart_filenames.is_some() {
+                filename_plans
+                    .entry(plan.operation.operation_id.as_str())
+                    .or_default()
+                    .push(index);
+            }
+        }
+        for index in 0..plans.len() {
+            if plans[index].multipart_filenames.is_some() {
+                continue;
+            }
+            let target = filename_plans
+                .get(plans[index].operation.operation_id.as_str())
+                .into_iter()
+                .flatten()
+                .map(|candidate| &plans[*candidate])
+                .find(|candidate| {
+                    candidate.response.statuses == plans[index].response.statuses
+                        && candidate.response.media_type == plans[index].response.media_type
+                        && candidate.response.consumption == plans[index].response.consumption
+                })
+                .map(|candidate| candidate.method_ident.clone());
+            plans[index].filenames_method_ident = target;
+        }
+        self.plan_operation_builders(analysis, &mut plans);
+        plans
+    }
+
+    fn representation_kind(representation: &OperationRepresentation) -> &'static str {
+        match representation {
+            OperationRepresentation::Json { .. } => "json",
+            OperationRepresentation::Text => "text",
+            OperationRepresentation::Binary { .. } => "binary",
+            OperationRepresentation::EventStream => "event_stream",
+        }
+    }
+
+    fn make_client_method_plan<'a>(
+        &self,
+        operation: &'a OperationInfo,
+        method_ident: syn::Ident,
+        success: ClientSuccessSelection<'a>,
+        consumption: &str,
+        multipart_filenames: Option<syn::Ident>,
+        validate_content_type: bool,
+    ) -> ClientMethodPlan<'a> {
+        let precise_stream = matches!(success.body, ClientSuccessBody::EventStream)
+            && (validate_content_type || multipart_filenames.is_some());
+        let mut captures = Vec::new();
+        let request = if precise_stream {
+            self.generate_request_param_with_capture(operation, Some(&mut captures))
+        } else {
+            self.generate_request_param(operation)
+        };
+        let generics = if captures.is_empty() {
+            TokenStream::new()
+        } else {
+            quote! { <#(#captures: AsRef<str>),*> }
+        };
+        let request_parameters = if let Some(ident) = &multipart_filenames {
+            if request.is_empty() {
+                quote! { #ident: &[(&str, &str)] }
+            } else {
+                quote! { #request, #ident: &[(&str, &str)] }
+            }
+        } else {
+            request
+        };
+        let response_type = if precise_stream {
+            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + use<#(#captures),*> }
+        } else if consumption == "parsed_sse" {
+            quote! { super::sse::BoxSseStream<Result<super::sse::SseEvent<String>, super::sse::StreamingError>> }
+        } else {
+            self.response_type_for_body(success.body)
+        };
+        let kind = match success.body {
+            ClientSuccessBody::Json(_) => "json",
+            ClientSuccessBody::Text => "text",
+            ClientSuccessBody::Binary => "binary",
+            ClientSuccessBody::EventStream | ClientSuccessBody::ParsedSse => "event_stream",
+            ClientSuccessBody::Empty => "empty",
+        };
+        let consumption = if matches!(success.body, ClientSuccessBody::EventStream)
+            && consumption == "buffered"
+        {
+            "raw_event_stream"
+        } else {
+            consumption
+        };
+        ClientMethodPlan {
+            operation,
+            method_ident,
+            request_parameters,
+            generics,
+            response_type,
+            error_type: self.op_error_type_token(operation),
+            response: ClientResponsePlan {
+                statuses: success.statuses.iter().map(|s| (*s).to_string()).collect(),
+                excluded_statuses: success
+                    .excluded_statuses
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                media_type: success.accept.map(str::to_owned),
+                kind: kind.to_string(),
+                consumption: consumption.to_string(),
+            },
+            multipart_filenames,
+            filenames_method_ident: None,
+            builder_method_ident: None,
+            builder_type_ident: None,
+            success,
+            validate_content_type,
+        }
+    }
+
+    fn plan_operation_builders(
         &self,
         analysis: &SchemaAnalysis,
-        operations: &[&OperationInfo],
-    ) -> (Vec<TokenStream>, Vec<TokenStream>) {
+        plans: &mut [ClientMethodPlan<'_>],
+    ) {
         if !self.config().builders.enabled {
-            return (Vec::new(), Vec::new());
+            return;
         }
 
-        let mut used_entry_methods: std::collections::HashSet<String> = operations
+        let mut used_entry_methods: std::collections::HashSet<String> = plans
             .iter()
-            .map(|operation| self.get_method_name(operation).to_string())
+            .map(|plan| plan.method_ident.to_string())
             .collect();
         let mut used_type_names = std::collections::HashSet::new();
         for schema_name in analysis.schemas.keys() {
@@ -592,7 +982,8 @@ impl CodeGenerator {
             .into_iter()
             .map(str::to_string),
         );
-        for operation in operations {
+        for plan in plans.iter() {
+            let operation = plan.operation;
             used_type_names.insert(self.op_error_enum_ident(operation).to_string());
             used_type_names.extend(
                 operation
@@ -603,9 +994,8 @@ impl CodeGenerator {
             );
         }
 
-        let mut definitions = Vec::new();
-        let mut entries = Vec::new();
-        for operation in operations {
+        for plan in plans.iter_mut() {
+            let operation = plan.operation;
             let allocated_params = self.allocated_operation_params(operation);
             let body_plan = self.body_model_plan(operation, analysis);
             let optional_param_count = allocated_params
@@ -629,7 +1019,7 @@ impl CodeGenerator {
                 continue;
             }
 
-            let flat_method = self.get_method_name(operation);
+            let flat_method = plan.method_ident.clone();
             let entry_base = format!("{flat_method}_builder");
             let entry_name = Self::allocate_name(&entry_base, &mut used_entry_methods);
             let entry_ident = Self::to_field_ident(&entry_name);
@@ -638,32 +1028,53 @@ impl CodeGenerator {
             let builder_name = Self::allocate_type_name(&builder_base, &mut used_type_names);
             let builder_ident = format_ident!("{builder_name}");
 
+            plan.builder_method_ident = Some(entry_ident);
+            plan.builder_type_ident = Some(builder_ident);
+        }
+    }
+
+    fn generate_operation_builders(
+        &self,
+        analysis: &SchemaAnalysis,
+        plans: &[ClientMethodPlan<'_>],
+    ) -> (Vec<TokenStream>, Vec<TokenStream>) {
+        let mut definitions = Vec::new();
+        let mut entries = Vec::new();
+        for plan in plans {
+            let (Some(entry_ident), Some(builder_ident)) =
+                (&plan.builder_method_ident, &plan.builder_type_ident)
+            else {
+                continue;
+            };
+            let operation = plan.operation;
+            let allocated_params = self.allocated_operation_params(operation);
             let (definition, entry) = self.generate_single_operation_builder(
                 analysis,
                 operation,
                 &allocated_params,
-                body_plan,
-                &flat_method,
-                &entry_ident,
-                &builder_ident,
+                self.body_model_plan(operation, analysis),
+                &plan.method_ident,
+                entry_ident,
+                builder_ident,
+                plan,
             );
             definitions.push(definition);
             entries.push(entry);
         }
-
         (definitions, entries)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn generate_single_operation_builder(
         &self,
-        analysis: &SchemaAnalysis,
+        _analysis: &SchemaAnalysis,
         operation: &OperationInfo,
         allocated_params: &[AllocatedOperationParam<'_>],
         body_plan: Option<BodyModelPlan>,
         flat_method: &syn::Ident,
         entry_ident: &syn::Ident,
         builder_ident: &syn::Ident,
+        plan: &ClientMethodPlan<'_>,
     ) -> (TokenStream, TokenStream) {
         let mut fields = vec![quote! { client: &'a HttpClient }];
         let mut entry_parameters = Vec::new();
@@ -884,9 +1295,63 @@ impl CodeGenerator {
             call_arguments.push(quote! { self.#body_ident });
         }
 
-        let response_type = self.get_response_type(analysis, operation);
-        let error_type = self.op_error_type_token(operation);
+        let mut filename_field = None;
+        if plan.multipart_filenames.is_some() || plan.filenames_method_ident.is_some() {
+            let mut used_fields: std::collections::HashSet<String> = allocated_params
+                .iter()
+                .map(|p| p.ident.to_string())
+                .collect();
+            used_fields.extend([
+                "request".to_string(),
+                "body".to_string(),
+                "client".to_string(),
+            ]);
+            let field = Self::to_field_ident(&Self::allocate_name(
+                "multipart_filenames",
+                &mut used_fields,
+            ));
+            fields.push(quote! { #field: Vec<(String, String)> });
+            initializers.push(quote! { #field: Vec::new() });
+            let setter = Self::allocate_builder_method("multipart_filenames", &mut used_methods);
+            setters.push(quote! {
+                /// Set request-local filenames by declared binary field wire name.
+                #[must_use]
+                pub fn #setter(mut self, filenames: &[(&str, &str)]) -> Self {
+                    self.#field = filenames.iter().map(|(key, value)| ((*key).to_string(), (*value).to_string())).collect();
+                    self
+                }
+            });
+            if plan.multipart_filenames.is_some() {
+                call_arguments.push(quote! { &self.#field.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect::<Vec<_>>() });
+            }
+            filename_field = Some(field);
+        }
+        let response_type = self.response_type_for_body(plan.success.body);
+        let error_type = &plan.error_type;
         let operation_id = &operation.operation_id;
+        let send = if let (Some(field), Some(method)) =
+            (&filename_field, &plan.filenames_method_ident)
+        {
+            if matches!(plan.success.body, ClientSuccessBody::EventStream) {
+                quote! {
+                    if self.#field.is_empty() { self.client.#flat_method(#(#call_arguments),*).await.map(futures_util::future::Either::Left) }
+                    else {
+                        let filenames: Vec<_> = self.#field.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+                        self.client.#method(#(#call_arguments,)* &filenames).await.map(futures_util::future::Either::Right)
+                    }
+                }
+            } else {
+                quote! {
+                    if self.#field.is_empty() { self.client.#flat_method(#(#call_arguments),*).await }
+                    else {
+                        let filenames: Vec<_> = self.#field.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
+                        self.client.#method(#(#call_arguments,)* &filenames).await
+                    }
+                }
+            }
+        } else {
+            quote! { self.client.#flat_method(#(#call_arguments),*).await }
+        };
         let definition = quote! {
             #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
             #[must_use]
@@ -899,7 +1364,7 @@ impl CodeGenerator {
 
                 /// Send the request through the existing flat operation method.
                 pub async fn send(self) -> Result<#response_type, ApiOpError<#error_type>> {
-                    self.client.#flat_method(#(#call_arguments),*).await
+                    #send
                 }
             }
         };
@@ -918,13 +1383,20 @@ impl CodeGenerator {
     }
 
     fn allocate_name(base: &str, used: &mut std::collections::HashSet<String>) -> String {
+        let raw = base.starts_with("r#");
+        let base = base.strip_prefix("r#").unwrap_or(base);
         let mut candidate = base.to_string();
         let mut suffix = 2;
-        while !used.insert(candidate.clone()) {
+        while used.contains(&candidate) || used.contains(&format!("r#{candidate}")) {
             candidate = format!("{base}_{suffix}");
             suffix += 1;
         }
-        candidate
+        used.insert(candidate.clone());
+        if raw {
+            format!("r#{candidate}")
+        } else {
+            candidate
+        }
     }
 
     fn allocate_type_name(base: &str, used: &mut std::collections::HashSet<String>) -> String {
@@ -960,15 +1432,13 @@ impl CodeGenerator {
         &self,
         operation: &'a OperationInfo,
     ) -> Vec<AllocatedOperationParam<'a>> {
-        // Builder-internal storage uses these names. Operation parameters are
-        // positional when delegated to the flat method, so suffixing only the
-        // builder field is safe and prevents duplicate struct fields.
-        let mut used = std::collections::HashSet::from([
-            "client".to_string(),
-            "request".to_string(),
-            "form".to_string(),
-            "body".to_string(),
-        ]);
+        // Analyzer resolves parameter collisions once. Every request path and
+        // flat/builder signature uses those identifiers.
+        let mut used: std::collections::HashSet<String> =
+            ["request", "body", "req", "request_url", "client", "form"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
         let mut allocated = Vec::new();
         for location in ["path", "query", "header", "cookie"] {
             for parameter in &operation.parameters {
@@ -984,6 +1454,18 @@ impl CodeGenerator {
             }
         }
         allocated
+    }
+
+    fn operation_param_ident(
+        &self,
+        operation: &OperationInfo,
+        parameter: &ParameterInfo,
+    ) -> String {
+        self.allocated_operation_params(operation)
+            .into_iter()
+            .find(|allocated| std::ptr::eq(allocated.param, parameter))
+            .map(|allocated| allocated.ident.to_string())
+            .unwrap_or_else(|| self.param_ident_str(parameter))
     }
 
     fn builder_param_is_required(parameter: &ParameterInfo) -> bool {
@@ -1414,25 +1896,41 @@ impl CodeGenerator {
     }
 
     /// Generate a single operation method
-    fn generate_single_operation_method(
+    fn generate_planned_operation_method(
         &self,
         analysis: &SchemaAnalysis,
-        op: &OperationInfo,
+        plan: &ClientMethodPlan<'_>,
     ) -> TokenStream {
-        let method_name = self.get_method_name(op);
+        let op = plan.operation;
+        let method_name = &plan.method_ident;
         let http_method_call = self.http_method_call(op);
         let path = &op.path;
-        let request_param = self.generate_request_param(op);
-        let request_body = self.generate_request_body(op, analysis);
+        let request_param = &plan.request_parameters;
+        let generics = &plan.generics;
+        let request_body = self.generate_request_body_with_filenames(
+            op,
+            analysis,
+            plan.multipart_filenames.as_ref(),
+        );
+        let filename_validation = self.generate_multipart_filename_validation(
+            op,
+            analysis,
+            plan.multipart_filenames.as_ref(),
+        );
         let query_params = self.generate_query_params(op);
         let header_params = self.generate_header_params(op);
         let cookie_params = self.generate_cookie_params(op);
         let auth_application = self.generate_auth_application();
-        let success = self.get_success_response(analysis, op);
-        let response_type = self.get_response_type(analysis, op);
-        let op_error_type = self.op_error_type_token(op);
+        let success = plan.success.clone();
+        let response_type = &plan.response_type;
+        let op_error_type = &plan.error_type;
         let accept = success.accept;
-        let error_handling = self.generate_error_handling(op, success);
+        let error_handling = self.generate_error_handling(op, success.clone());
+        let content_validation = if plan.validate_content_type {
+            self.generate_response_content_type_validation(op, &success)
+        } else {
+            TokenStream::new()
+        };
         let (custom_headers, accept_header) = if let Some(media_type) = accept {
             (
                 quote! {
@@ -1458,13 +1956,38 @@ impl CodeGenerator {
         };
         let url_construction = self.generate_url_construction(path, op);
         let doc_comment = self.generate_operation_doc_comment(op);
+        let variant_doc = if plan.validate_content_type {
+            let description = format!(
+                "Select `{}` as {}; accepts response statuses {}. Other successful statuses and mismatched Content-Type values are returned as inspectable API errors.",
+                plan.response.media_type.as_deref().unwrap_or("no body"),
+                plan.response.consumption,
+                plan.response.statuses.join(", ")
+            );
+            quote! { #[doc = #description] }
+        } else {
+            TokenStream::new()
+        };
+        let filename_doc = if plan.multipart_filenames.is_some() {
+            quote! { #[doc = "Override filenames by binary field wire name for this request. Unknown or duplicate keys are configuration errors; absent fields stay absent."] }
+        } else {
+            TokenStream::new()
+        };
+        let stream_doc = if plan.response.consumption == "binary_stream" {
+            quote! { #[doc = "Success chunks are returned live without a total body-size limit. Error responses use the configured buffered body-size limit."] }
+        } else {
+            TokenStream::new()
+        };
 
         quote! {
             #doc_comment
-            pub async fn #method_name(
+            #variant_doc
+            #filename_doc
+            #stream_doc
+            pub async fn #method_name #generics(
                 &self,
                 #request_param
             ) -> Result<#response_type, ApiOpError<#op_error_type>> {
+                #filename_validation
                 #url_construction
 
                 let mut req = #http_method_call;
@@ -1486,6 +2009,7 @@ impl CodeGenerator {
                 #accept_header
 
                 let response = req.send().await?;
+                #content_validation
                 #error_handling
             }
         }
@@ -1561,7 +2085,7 @@ impl CodeGenerator {
         }
         let mut emit = Vec::new();
         for param in header_params {
-            let param_name_snake = self.param_ident_str(param);
+            let param_name_snake = self.operation_param_ident(op, param);
             let param_ident = Self::to_field_ident(&param_name_snake);
             let header_name = &param.name;
             if matches!(
@@ -1625,7 +2149,7 @@ impl CodeGenerator {
         }
         let mut emit = Vec::new();
         for parameter in cookie_params {
-            let ident = Self::to_field_ident(&self.param_ident_str(parameter));
+            let ident = Self::to_field_ident(&self.operation_param_ident(op, parameter));
             let wire_name = parameter.name.as_str();
             if parameter.required {
                 emit.push(quote! {
@@ -1670,7 +2194,7 @@ impl CodeGenerator {
             use crate::analysis::QuerySerialization;
 
             // Use snake_case for Rust variable name with keyword escaping
-            let param_name_snake = self.param_ident_str(param);
+            let param_name_snake = self.operation_param_ident(op, param);
             let param_name = Self::to_field_ident(&param_name_snake);
 
             // Use the original parameter name from OpenAPI spec as the query string key
@@ -2296,7 +2820,7 @@ impl CodeGenerator {
             .to_snake_case()
         };
 
-        syn::Ident::new(&name, proc_macro2::Span::call_site())
+        Self::to_field_ident(&self.escape_keyword_ident(&name))
     }
 
     /// Build the request-builder expression for the operation's HTTP method.
@@ -2336,78 +2860,32 @@ impl CodeGenerator {
 
     /// Generate request parameters including path, query, header, and request body.
     fn generate_request_param(&self, op: &OperationInfo) -> TokenStream {
+        self.generate_request_param_with_capture(op, None)
+    }
+
+    fn generate_request_param_with_capture(
+        &self,
+        op: &OperationInfo,
+        mut captures: Option<&mut Vec<syn::Ident>>,
+    ) -> TokenStream {
         let mut params = Vec::new();
-        // Dedup parameter Rust idents within this method signature. Real-world
-        // specs sometimes declare two parameters that sanitize to the same
-        // snake_case name (modern-treasury declared `name` twice across
-        // different param objects). Suffixing with `_2`, `_3`, … keeps each
-        // parameter accessible while preserving the original wire-level name
-        // (which is used elsewhere as the query/path/header key).
-        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut unique_param_ident = |raw: String| -> syn::Ident {
-            let mut chosen = raw.clone();
-            let mut suffix = 2;
-            while !used.insert(chosen.clone()) {
-                chosen = format!("{raw}_{suffix}");
-                suffix += 1;
-            }
-            Self::to_field_ident(&chosen)
-        };
-
-        // Add path parameters
-        for param in &op.parameters {
-            if param.location == "path" {
-                let param_name_snake = self.param_ident_str(param);
-                let param_name = unique_param_ident(param_name_snake);
-                let param_type = self.get_param_rust_type(param);
+        for allocated in self.allocated_operation_params(op) {
+            let param_name = allocated.ident;
+            let param_type = if Self::param_has_impl_as_ref_type(allocated.param) {
+                if let Some(captures) = captures.as_deref_mut() {
+                    let ident = format_ident!("__Param{}", captures.len());
+                    captures.push(ident.clone());
+                    quote! { #ident }
+                } else {
+                    self.get_param_rust_type(allocated.param)
+                }
+            } else {
+                self.get_param_rust_type(allocated.param)
+            };
+            if Self::builder_param_is_required(allocated.param) {
                 params.push(quote! { #param_name: #param_type });
-            }
-        }
-
-        // Add query parameters (all as Option<T>)
-        for param in &op.parameters {
-            if param.location == "query" {
-                let param_name_snake = self.param_ident_str(param);
-                let param_name = unique_param_ident(param_name_snake);
-                let param_type = self.get_param_rust_type(param);
-
-                // Query parameters should be Option unless explicitly required
-                if param.required {
-                    params.push(quote! { #param_name: #param_type });
-                } else {
-                    params.push(quote! { #param_name: Option<#param_type> });
-                }
-            }
-        }
-
-        // Add header parameters. Required headers are bare; optional ones are
-        // Option<T>. Per OAS 3.x §"Parameter Object", header names matching
-        // `Accept`, `Content-Type`, and `Authorization` are forbidden — those
-        // are described by other mechanisms — but we leave that validation to
-        // analysis.
-        for param in &op.parameters {
-            if param.location == "header" {
-                let param_name_snake = self.param_ident_str(param);
-                let param_name = unique_param_ident(param_name_snake);
-                let param_type = self.get_param_rust_type(param);
-                if param.required {
-                    params.push(quote! { #param_name: #param_type });
-                } else {
-                    params.push(quote! { #param_name: Option<#param_type> });
-                }
-            }
-        }
-
-        for param in &op.parameters {
-            if param.location == "cookie" {
-                let param_name_snake = self.param_ident_str(param);
-                let param_name = unique_param_ident(param_name_snake);
-                let param_type = self.get_param_rust_type(param);
-                if param.required {
-                    params.push(quote! { #param_name: #param_type });
-                } else {
-                    params.push(quote! { #param_name: Option<#param_type> });
-                }
+            } else {
+                params.push(quote! { #param_name: Option<#param_type> });
             }
         }
 
@@ -2546,6 +3024,24 @@ impl CodeGenerator {
         visited: &mut std::collections::HashSet<String>,
     ) -> Option<&'a serde_json::Value> {
         let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
+            for keyword in ["anyOf", "oneOf"] {
+                if let Some(branches) = schema.get(keyword).and_then(serde_json::Value::as_array) {
+                    let concrete: Vec<_> = branches
+                        .iter()
+                        .filter(|branch| {
+                            branch.get("type").and_then(serde_json::Value::as_str) != Some("null")
+                        })
+                        .collect();
+                    if concrete.len() == 1 && concrete.len() < branches.len() {
+                        return Self::resolve_multipart_wire_schema(concrete[0], analysis, visited);
+                    }
+                }
+            }
+            if let Some(branches) = schema.get("allOf").and_then(serde_json::Value::as_array) {
+                if branches.len() == 1 {
+                    return Self::resolve_multipart_wire_schema(&branches[0], analysis, visited);
+                }
+            }
             return Some(schema);
         };
         let name = reference.strip_prefix("#/components/schemas/")?;
@@ -2600,11 +3096,162 @@ impl CodeGenerator {
         }
     }
 
+    fn multipart_binary_fields(
+        &self,
+        operation: &OperationInfo,
+        analysis: &SchemaAnalysis,
+    ) -> Vec<String> {
+        let Some(crate::analysis::RequestBodyContent::Multipart {
+            validation_schema, ..
+        }) = &operation.request_body
+        else {
+            return Vec::new();
+        };
+        let Some(schema) = Self::resolve_multipart_wire_schema(
+            validation_schema,
+            analysis,
+            &mut std::collections::HashSet::new(),
+        ) else {
+            return Vec::new();
+        };
+        schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|p| p.iter())
+            .filter_map(|(name, schema)| {
+                let schema = Self::resolve_multipart_wire_schema(
+                    schema,
+                    analysis,
+                    &mut std::collections::HashSet::new(),
+                )?;
+                (schema.get("format").and_then(serde_json::Value::as_str) == Some("binary"))
+                    .then(|| name.clone())
+            })
+            .collect()
+    }
+
+    fn generate_multipart_filename_validation(
+        &self,
+        operation: &OperationInfo,
+        analysis: &SchemaAnalysis,
+        filenames: Option<&syn::Ident>,
+    ) -> TokenStream {
+        let Some(filenames) = filenames else {
+            return TokenStream::new();
+        };
+        let keys = self.multipart_binary_fields(operation, analysis);
+        quote! { {
+            let mut seen = std::collections::HashSet::new();
+            for &(key, _) in #filenames {
+                if ![#(#keys),*].contains(&key) {
+                    return Err(HttpError::Config(format!("multipart filename key `{}` is unknown or is not a binary field", key)).into());
+                }
+                if !seen.insert(key) {
+                    return Err(HttpError::Config(format!("duplicate multipart filename key `{}`", key)).into());
+                }
+            }
+        } }
+    }
+
+    fn generate_response_content_type_validation(
+        &self,
+        operation: &OperationInfo,
+        success: &ClientSuccessSelection<'_>,
+    ) -> TokenStream {
+        let Some(expected) = success.accept else {
+            return TokenStream::new();
+        };
+        let guard = self.success_selection_guard(operation, success);
+        let errors = self.generate_error_match_arms(operation);
+        let error_type = self.op_error_type_token(operation);
+        let raw_body = if matches!(
+            success.body,
+            ClientSuccessBody::EventStream | ClientSuccessBody::ParsedSse
+        ) {
+            quote! { Vec::new() }
+        } else {
+            quote! { __read_bounded_response_body(response, self.max_response_body_bytes).await? }
+        };
+        quote! {
+            let status = response.status();
+            let status_code = status.as_u16();
+            if #guard {
+                let actual = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("").to_string();
+                let expected = #expected;
+                let parse_media = |value: &str| {
+                    let mut parts = Vec::new();
+                    let mut start = 0;
+                    let mut quoted = false;
+                    let mut escaped = false;
+                    for (index, character) in value.char_indices() {
+                        if escaped { escaped = false; continue }
+                        if character == '\\' && quoted { escaped = true; continue }
+                        if character == '"' { quoted = !quoted; }
+                        if character == ';' && !quoted { parts.push(&value[start..index]); start = index + 1; }
+                    }
+                    if quoted || escaped { return None }
+                    parts.push(&value[start..]);
+                    let essence = parts.first().copied().unwrap_or("").trim().to_ascii_lowercase();
+                    let mut parameters = std::collections::BTreeMap::new();
+                    for part in parts.into_iter().skip(1) {
+                        let (name, value) = part.split_once('=')?;
+                        let name = name.trim().to_ascii_lowercase();
+                        if name.is_empty() { return None }
+                        let value = value.trim();
+                        let value = if let Some(quoted) = value.strip_prefix('"') {
+                            let inner = quoted.strip_suffix('"')?;
+                            let mut decoded = String::new();
+                            let mut escaped = false;
+                            for character in inner.chars() {
+                                if escaped { decoded.push(character); escaped = false; }
+                                else if character == '\\' { escaped = true; }
+                                else if character == '"' { return None }
+                                else { decoded.push(character); }
+                            }
+                            if escaped { return None }
+                            decoded
+                        } else {
+                            if value.contains('"') { return None }
+                            value.to_string()
+                        };
+                        if parameters.insert(name, value).is_some() { return None }
+                    }
+                    Some((essence, parameters))
+                };
+                let matches = match (parse_media(&actual), parse_media(expected)) {
+                    (Some((actual_essence, actual_parameters)), Some((expected_essence, expected_parameters))) => {
+                        let essence_matches = if expected_essence == "*/*" { actual_essence.contains('/') }
+                            else if let Some(prefix) = expected_essence.strip_suffix("/*") { actual_essence.split('/').next() == Some(prefix) }
+                            else { actual_essence == expected_essence };
+                        essence_matches && expected_parameters.iter().all(|(name, value)| actual_parameters.get(name).is_some_and(|actual|
+                            if name == "charset" { actual.eq_ignore_ascii_case(value) } else { actual == value }))
+                    }
+                    _ => false,
+                };
+                if !matches {
+                    let headers = response.headers().clone();
+                    let raw_body = #raw_body;
+                    let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+                    let typed: Option<#error_type>;
+                    let parse_error: Option<String>;
+                    #errors
+                    let _ = parse_error;
+                    return Err(ApiOpError::Api(ApiError {
+                        status: status_code, headers, body: body_text, raw_body, typed,
+                        parse_error: Some(format!("unexpected response Content-Type `{}`; expected `{}`", actual, expected)),
+                    }));
+                }
+            }
+        }
+    }
+
     fn generate_typed_multipart_form(
         &self,
         schema_name: &str,
         validation_schema: &serde_json::Value,
         analysis: &SchemaAnalysis,
+        filenames: Option<&syn::Ident>,
     ) -> TokenStream {
         use crate::analysis::{ObjectAdditionalProperties, SchemaType};
 
@@ -2701,30 +3348,40 @@ impl CodeGenerator {
                     return Err(HttpError::Config(#message.to_string()).into());
                 };
             };
-            let add_value = match kind {
-                MultipartClientFieldKind::RawBytes => quote! {
-                    form = form.part(
-                        #wire_name,
-                        reqwest::multipart::Part::bytes(value.to_vec()),
-                    );
-                },
-                MultipartClientFieldKind::Base64 => quote! {
-                    use base64::Engine as _;
-                    form = form.text(
-                        #wire_name,
-                        base64::engine::general_purpose::STANDARD.encode(value),
-                    );
-                },
-                MultipartClientFieldKind::Base64UrlUnpadded => quote! {
-                    use base64::Engine as _;
-                    form = form.text(
-                        #wire_name,
-                        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value),
-                    );
-                },
-                MultipartClientFieldKind::Text => quote! {
-                    form = form.text(#wire_name, value.to_string());
-                },
+            let filename_assignment = filenames.map(|filenames| quote! {
+                if let Some((_, filename)) = #filenames.iter().find(|(key, _)| *key == #wire_name) {
+                    part = part.file_name((*filename).to_string());
+                }
+            }).unwrap_or_default();
+            let add_value = if wire_format == Some("binary") && filenames.is_some() {
+                let part = match kind {
+                    MultipartClientFieldKind::RawBytes => {
+                        quote! { reqwest::multipart::Part::bytes(value.to_vec()) }
+                    }
+                    _ => quote! { reqwest::multipart::Part::text(value.to_string()) },
+                };
+                quote! {
+                    let mut part = #part;
+                    #filename_assignment
+                    form = form.part(#wire_name, part);
+                }
+            } else {
+                match kind {
+                    MultipartClientFieldKind::RawBytes => quote! {
+                        form = form.part(#wire_name, reqwest::multipart::Part::bytes(value.to_vec()));
+                    },
+                    MultipartClientFieldKind::Base64 => quote! {
+                        use base64::Engine as _;
+                        form = form.text(#wire_name, base64::engine::general_purpose::STANDARD.encode(value));
+                    },
+                    MultipartClientFieldKind::Base64UrlUnpadded => quote! {
+                        use base64::Engine as _;
+                        form = form.text(#wire_name, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value));
+                    },
+                    MultipartClientFieldKind::Text => {
+                        quote! { form = form.text(#wire_name, value.to_string()); }
+                    }
+                }
             };
             parts.push(if is_tri_state {
                 // Multipart has no representation for a JSON null part. A
@@ -2767,7 +3424,12 @@ impl CodeGenerator {
     /// explicit zero-length framing for bodyless POST, PUT, and PATCH requests.
     /// Optional bodies (T11) gate the application on `Some(_)`; required bodies
     /// apply unconditionally.
-    fn generate_request_body(&self, op: &OperationInfo, analysis: &SchemaAnalysis) -> TokenStream {
+    fn generate_request_body_with_filenames(
+        &self,
+        op: &OperationInfo,
+        analysis: &SchemaAnalysis,
+        filenames: Option<&syn::Ident>,
+    ) -> TokenStream {
         let empty_request_framing = Self::generate_empty_request_framing(op);
         let Some(rb) = op.request_body.as_ref() else {
             return empty_request_framing;
@@ -2797,7 +3459,12 @@ impl CodeGenerator {
                 ..
             } => (
                 quote! { request },
-                self.generate_typed_multipart_form(schema_name, validation_schema, analysis),
+                self.generate_typed_multipart_form(
+                    schema_name,
+                    validation_schema,
+                    analysis,
+                    filenames,
+                ),
             ),
             RequestBodyContent::OctetStream { media_type } => (
                 quote! { body },
@@ -2955,7 +3622,7 @@ impl CodeGenerator {
 
             if let Some((_, response)) = selected {
                 let body = Self::response_body(response);
-                let statuses = candidates
+                let statuses: Vec<&str> = candidates
                     .iter()
                     .filter_map(|(status, candidate)| {
                         Self::success_bodies_are_compatible(body, Self::response_body(candidate))
@@ -2975,8 +3642,18 @@ impl CodeGenerator {
                     None if response.supports_streaming => Some("text/event-stream"),
                     None => None,
                 };
+                let excluded_statuses = responses
+                    .keys()
+                    .filter(|status| {
+                        status.len() == 3
+                            && status.bytes().all(|c| c.is_ascii_digit())
+                            && !statuses.contains(&status.as_str())
+                    })
+                    .map(String::as_str)
+                    .collect();
                 return ClientSuccessSelection {
                     statuses,
+                    excluded_statuses,
                     body,
                     accept,
                 };
@@ -2994,18 +3671,21 @@ impl CodeGenerator {
                 .collect();
             ClientSuccessSelection {
                 statuses,
+                excluded_statuses: Vec::new(),
                 body: ClientSuccessBody::Json(schema_name),
                 accept: Some("application/json"),
             }
         } else if Self::returns_raw_event_stream(op) {
             ClientSuccessSelection {
                 statuses: Vec::new(),
+                excluded_statuses: Vec::new(),
                 body: ClientSuccessBody::EventStream,
                 accept: Some("text/event-stream"),
             }
         } else {
             ClientSuccessSelection {
                 statuses: Vec::new(),
+                excluded_statuses: Vec::new(),
                 body: ClientSuccessBody::Empty,
                 accept: None,
             }
@@ -3043,9 +3723,8 @@ impl CodeGenerator {
         }
     }
 
-    /// Get response type
-    fn get_response_type(&self, analysis: &SchemaAnalysis, op: &OperationInfo) -> TokenStream {
-        match self.get_success_response(analysis, op).body {
+    fn response_type_for_body(&self, body: ClientSuccessBody<'_>) -> TokenStream {
+        match body {
             ClientSuccessBody::Json(response_type) => {
                 // Convert schema name to Rust type name (handles underscores, etc.)
                 let rust_type_name = self.to_rust_type_name(response_type);
@@ -3057,6 +3736,9 @@ impl CodeGenerator {
             ClientSuccessBody::Binary => quote! { bytes::Bytes },
             ClientSuccessBody::EventStream => {
                 quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> }
+            }
+            ClientSuccessBody::ParsedSse => {
+                quote! { super::sse::BoxSseStream<Result<super::sse::SseEvent<String>, super::sse::StreamingError>> }
             }
             ClientSuccessBody::Empty => quote! { () },
         }
@@ -3070,6 +3752,27 @@ impl CodeGenerator {
             .iter()
             .map(|status| Self::single_status_guard(status));
         quote! { false #( || #guards )* }
+    }
+
+    fn success_selection_guard(
+        &self,
+        _operation: &OperationInfo,
+        success: &ClientSuccessSelection<'_>,
+    ) -> TokenStream {
+        let guard = Self::success_status_guard(&success.statuses);
+        if !success
+            .statuses
+            .iter()
+            .any(|status| status.eq_ignore_ascii_case("2XX"))
+        {
+            return guard;
+        }
+        let exact: Vec<_> = success
+            .excluded_statuses
+            .iter()
+            .map(|status| Self::single_status_guard(status))
+            .collect();
+        quote! { (#guard) && !(false #( || #exact )*) }
     }
 
     fn single_status_guard(status: &str) -> TokenStream {
@@ -3116,7 +3819,7 @@ impl CodeGenerator {
     ) -> TokenStream {
         let op_error_type = self.op_error_type_token(op);
         let success_body = success.body;
-        let success_status_guard = Self::success_status_guard(&success.statuses);
+        let success_status_guard = self.success_selection_guard(op, &success);
         let selected_status = if success.statuses.is_empty() {
             "any declared 2xx response".to_string()
         } else {
@@ -3150,7 +3853,9 @@ impl CodeGenerator {
                 let _ = headers;
                 Ok(())
             },
-            ClientSuccessBody::Binary | ClientSuccessBody::EventStream => quote! {},
+            ClientSuccessBody::Binary
+            | ClientSuccessBody::EventStream
+            | ClientSuccessBody::ParsedSse => quote! {},
         };
 
         let error_match_arms = self.generate_error_match_arms(op);
@@ -3159,14 +3864,22 @@ impl CodeGenerator {
         // buffering it. Reading an SSE body to a string blocks until the server
         // closes the connection, which is precisely what it will not do.
         // The error path still buffers — an error response is finite.
-        if matches!(success_body, ClientSuccessBody::EventStream) {
+        if matches!(
+            success_body,
+            ClientSuccessBody::EventStream | ClientSuccessBody::ParsedSse
+        ) {
+            let stream = if matches!(success_body, ClientSuccessBody::ParsedSse) {
+                quote! { super::sse::parse_sse_response(response) }
+            } else {
+                quote! { response.bytes_stream() }
+            };
             return quote! {
                 let status = response.status();
                 let status_code = status.as_u16();
                 let headers = response.headers().clone();
 
                 if #success_status_guard {
-                    Ok(response.bytes_stream())
+                    Ok(#stream)
                 } else {
                     if status.is_success() {
                         return Err(ApiOpError::Api(ApiError {
@@ -3477,7 +4190,7 @@ impl CodeGenerator {
                 continue;
             };
             format_string.push_str("{}");
-            let param_name_snake = self.param_ident_str(param);
+            let param_name_snake = self.operation_param_ident(op, param);
             let param_ident = Self::to_field_ident(&param_name_snake);
             if Self::param_uses_as_ref_str(param) {
                 format_args.push(quote! {

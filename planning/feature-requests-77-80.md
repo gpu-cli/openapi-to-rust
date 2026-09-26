@@ -1,8 +1,12 @@
 # Investigation of feature requests #77–#80
 
 Reviewed against `36660a728e3c57d521bbf18a42994827c07d1d39` (0.18.0) on 2026-09-25.
-This is an implementation recommendation, not an implemented feature contract.
-Implementation work is tracked in Beads; the upstream requests remain open.
+This records the original investigation and recommendations. The subsequent
+implementation follows these scopes: multipart filename variants, complete
+supported response representations with live binary/raw or parsed SSE streams,
+Overlay 1.1 preprocessing, and metadata v1 for models and HTTP clients. See the
+[README](../README.md) for the delivered APIs and coverage boundaries. The Beads
+identifiers below track the implementation and its verification.
 
 ## Recommendation and order
 
@@ -222,7 +226,7 @@ metadata; production extraction should still use the shared emission plans.
 Keep metadata-off output byte-identical, check CLI stale-output behavior, and
 validate distinct method variants against their common source operation.
 
-## Validation performed
+## Investigation baseline validation
 
 The scratch CLI generation above succeeded. All 24 existing
 `operation_generation_test` cases and the generated-client runtime test in
@@ -234,5 +238,6 @@ the compiler wrapper, used cached dependencies, and allowed the local HTTP serve
 RUSTC_WRAPPER= CARGO_NET_OFFLINE=true cargo test --test operation_generation_test --test non_json_response_test
 ```
 
-These verify the existing baseline, not the proposed features. No generator
-implementation was changed.
+These checks verified the baseline during the investigation, before generator
+implementation began. Feature verification is tracked on the implementation
+Beads listed above.

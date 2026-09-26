@@ -47,6 +47,15 @@ enum Commands {
         /// the TOML config.
         #[arg(long)]
         types_conservative: bool,
+        /// Apply an Overlay 1.1 file; repeat for ordered overlays after configured overlays.
+        #[arg(long = "overlay")]
+        overlays: Vec<PathBuf>,
+        /// Materialize the effective OpenAPI document as output-relative JSON.
+        #[arg(long)]
+        effective_spec: Option<PathBuf>,
+        /// Emit binding metadata at this output-relative filename.
+        #[arg(long)]
+        bindings_metadata: Option<String>,
         /// Analyze and render in memory without writing files.
         #[arg(long, conflicts_with = "check")]
         dry_run: bool,
@@ -212,6 +221,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             module_name,
             types_only,
             types_conservative,
+            overlays,
+            effective_spec,
+            bindings_metadata,
             dry_run,
             check,
             report_untyped,
@@ -224,6 +236,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             module_name,
             types_only,
             types_conservative,
+            overlays,
+            effective_spec,
+            bindings_metadata,
             dry_run,
             check,
             report_untyped,
@@ -284,6 +299,9 @@ struct GenerateArgs {
     module_name: Option<String>,
     types_only: bool,
     types_conservative: bool,
+    overlays: Vec<PathBuf>,
+    effective_spec: Option<PathBuf>,
+    bindings_metadata: Option<String>,
     dry_run: bool,
     check: bool,
     report_untyped: bool,
@@ -414,24 +432,71 @@ fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn std::error::Error>> {
         generator_config.types = openapi_to_rust::TypeMappingConfig::conservative();
     }
 
+    generator_config.overlays.extend(args.overlays);
+    if let Some(path) = args.effective_spec {
+        generator_config.effective_spec = Some(path);
+    }
+    if let Some(path) = args.bindings_metadata {
+        generator_config.bindings_metadata = Some(path);
+    }
+    for path in [
+        generator_config.effective_spec.as_deref(),
+        generator_config
+            .bindings_metadata
+            .as_deref()
+            .map(std::path::Path::new),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        openapi_to_rust::overlay::validate_artifact_path(path)?;
+    }
     let spec_content = load_spec(&load_source)?;
-    let spec_value = parse_spec(&spec_content, &load_source)?;
+    let spec_value = openapi_to_rust::overlay::preprocess_spec(
+        parse_spec(&spec_content, &load_source)?,
+        &generator_config.schema_extensions,
+        &generator_config.overlays,
+    )?;
     let warning = openapi_to_rust::spec_source::validate_oas_document(&spec_value)?;
     generator_config.apply_spec_server_default(&spec_value);
+    let effective_spec = generator_config
+        .effective_spec
+        .as_ref()
+        .map(|path| {
+            openapi_to_rust::overlay::effective_spec_json(&spec_value)
+                .map(|content| (path.clone(), content))
+        })
+        .transpose()?;
     let mapper = openapi_to_rust::TypeMapper::new(generator_config.types.clone());
-    let mut analyzer = if generator_config.schema_extensions.is_empty() {
-        SchemaAnalyzer::with_type_mapper(spec_value, mapper)?
-    } else {
-        SchemaAnalyzer::new_with_extensions_and_type_mapper(
-            spec_value,
-            &generator_config.schema_extensions,
-            mapper,
-        )?
-    };
+    let mut analyzer = SchemaAnalyzer::with_type_mapper(spec_value, mapper)?;
     let mut analysis = analyzer.analyze()?;
     let generator = CodeGenerator::new(generator_config).with_source_provenance(provenance.clone());
     let result = generator.generate_all(&mut analysis)?;
-    let artifacts = generator.output_artifacts(&result);
+    let mut artifacts = generator.output_artifacts(&result);
+    if let Some((path, content)) = effective_spec {
+        if artifacts.contains_key(&path) {
+            return Err(format!(
+                "effective-spec artifact '{}' collides with another generated artifact",
+                path.display()
+            )
+            .into());
+        }
+        artifacts.insert(path, content);
+    }
+
+    // Detect file/directory conflicts before any output can be written.
+    for path in artifacts.keys() {
+        for other in artifacts.keys() {
+            if path != other && path.starts_with(other) {
+                return Err(format!(
+                    "generated artifact '{}' conflicts with artifact '{}' used as its parent",
+                    path.display(),
+                    other.display()
+                )
+                .into());
+            }
+        }
+    }
 
     let status = if args.check {
         check_artifacts(generator.config().output_dir.as_path(), &artifacts)?;
@@ -713,14 +778,24 @@ fn starter_module_name(source: &str) -> String {
     }
 }
 
+struct AnalysisInput {
+    spec_path: PathBuf,
+    schema_extensions: Vec<PathBuf>,
+    overlays: Vec<PathBuf>,
+}
+
 fn resolve_server_spec(
     spec: Option<PathBuf>,
     config: &std::path::Path,
-) -> Result<(PathBuf, Vec<PathBuf>), Box<dyn std::error::Error>> {
+) -> Result<AnalysisInput, Box<dyn std::error::Error>> {
     match spec {
         // An explicit spec is intentionally analyzed as-is. Schema extensions
         // belong to config mode and must not affect a caller that bypasses it.
-        Some(path) => Ok((path, Vec::new())),
+        Some(path) => Ok(AnalysisInput {
+            spec_path: path,
+            schema_extensions: Vec::new(),
+            overlays: Vec::new(),
+        }),
         None => {
             let cf = ConfigFile::load(config).map_err(|e| {
                 format!(
@@ -730,7 +805,11 @@ fn resolve_server_spec(
                 )
             })?;
             let generator = cf.into_generator_config();
-            Ok((generator.spec_path, generator.schema_extensions))
+            Ok(AnalysisInput {
+                spec_path: generator.spec_path,
+                schema_extensions: generator.schema_extensions,
+                overlays: generator.overlays,
+            })
         }
     }
 }
@@ -738,15 +817,17 @@ fn resolve_server_spec(
 fn load_analysis(
     spec_path: &std::path::Path,
     schema_extensions: &[PathBuf],
+    overlays: &[PathBuf],
 ) -> Result<openapi_to_rust::SchemaAnalysis, Box<dyn std::error::Error>> {
     let source = spec_path.to_string_lossy();
     let spec_content = load_spec(&source)?;
-    let spec_value = parse_spec(&spec_content, &source)?;
-    let mut analyzer = if schema_extensions.is_empty() {
-        SchemaAnalyzer::new(spec_value)?
-    } else {
-        SchemaAnalyzer::new_with_extensions(spec_value, schema_extensions)?
-    };
+    let spec_value = openapi_to_rust::overlay::preprocess_spec(
+        parse_spec(&spec_content, &source)?,
+        schema_extensions,
+        overlays,
+    )?;
+    openapi_to_rust::spec_source::validate_oas_document(&spec_value)?;
+    let mut analyzer = SchemaAnalyzer::new(spec_value)?;
     Ok(analyzer.analyze()?)
 }
 
@@ -758,8 +839,12 @@ fn run_server_list(
     grep: Option<String>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (spec_path, schema_extensions) = resolve_server_spec(spec, &config)?;
-    let analysis = load_analysis(&spec_path, &schema_extensions)?;
+    let AnalysisInput {
+        spec_path,
+        schema_extensions,
+        overlays,
+    } = resolve_server_spec(spec, &config)?;
+    let analysis = load_analysis(&spec_path, &schema_extensions, &overlays)?;
     let index = OperationIndex::from_analysis(&analysis);
 
     let filter = ListFilter { tag, method, grep };
@@ -781,8 +866,12 @@ fn run_server_add(
     dry_run: bool,
     regenerate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (spec_path, schema_extensions) = resolve_server_spec(spec, &config)?;
-    let analysis = load_analysis(&spec_path, &schema_extensions)?;
+    let AnalysisInput {
+        spec_path,
+        schema_extensions,
+        overlays,
+    } = resolve_server_spec(spec, &config)?;
+    let analysis = load_analysis(&spec_path, &schema_extensions, &overlays)?;
     let index = OperationIndex::from_analysis(&analysis);
 
     // Determine which selectors to add. --all-tag expands; otherwise

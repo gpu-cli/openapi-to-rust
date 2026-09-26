@@ -205,6 +205,15 @@ pub struct GeneratorSection {
     /// Relative paths are resolved from the configuration file's directory.
     #[serde(default)]
     pub schema_extensions: Vec<PathBuf>,
+    /// Ordered OpenAPI Overlay 1.1 files, relative to the configuration file.
+    #[serde(default)]
+    pub overlays: Vec<PathBuf>,
+    /// Optional JSON effective document artifact, relative to output_dir.
+    #[serde(default)]
+    pub effective_spec: Option<PathBuf>,
+    /// Optional binding metadata artifact, relative to output_dir.
+    #[serde(default)]
+    pub bindings_metadata: Option<String>,
     /// Additive operation-builder generation policy.
     #[serde(default)]
     pub builders: BuildersSection,
@@ -479,6 +488,12 @@ struct GeneratorSectionWire {
     #[serde(default)]
     schema_extensions: Vec<PathBuf>,
     #[serde(default)]
+    overlays: Vec<PathBuf>,
+    #[serde(default)]
+    effective_spec: Option<PathBuf>,
+    #[serde(default)]
+    bindings_metadata: Option<String>,
+    #[serde(default)]
     builders: BuildersSection,
     #[serde(default)]
     types: Option<crate::type_mapping::TypeMappingConfig>,
@@ -505,6 +520,9 @@ impl TryFrom<ConfigFileWire> for ConfigFile {
                 output_dir: wire.generator.output_dir,
                 module_name: wire.generator.module_name,
                 schema_extensions: wire.generator.schema_extensions,
+                overlays: wire.generator.overlays,
+                effective_spec: wire.generator.effective_spec,
+                bindings_metadata: wire.generator.bindings_metadata,
                 builders: wire.generator.builders,
             },
             features: wire.features,
@@ -554,6 +572,11 @@ struct GeneratorSectionRef<'a> {
     output_dir: &'a Path,
     module_name: &'a str,
     schema_extensions: &'a [PathBuf],
+    overlays: &'a [PathBuf],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_spec: Option<&'a Path>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bindings_metadata: Option<&'a str>,
     builders: &'a BuildersSection,
     types: &'a crate::type_mapping::TypeMappingConfig,
 }
@@ -569,6 +592,9 @@ impl Serialize for ConfigFile {
                 output_dir: &self.generator.output_dir,
                 module_name: &self.generator.module_name,
                 schema_extensions: &self.generator.schema_extensions,
+                overlays: &self.generator.overlays,
+                effective_spec: self.generator.effective_spec.as_deref(),
+                bindings_metadata: self.generator.bindings_metadata.as_deref(),
                 builders: &self.generator.builders,
                 types: &self.types,
             },
@@ -620,7 +646,7 @@ fn inspect_type_config_layout(value: &toml::Value) -> Result<(), GeneratorError>
 impl ConfigFile {
     /// Load and validate configuration from a TOML file.
     ///
-    /// Relative `spec_path`, `output_dir`, and `schema_extensions` values are
+    /// Relative `spec_path`, `output_dir`, `schema_extensions`, and `overlays` values are
     /// resolved against the directory containing `path`, independent of the
     /// process's current working directory.
     pub fn load(path: &Path) -> Result<Self, GeneratorError> {
@@ -667,6 +693,10 @@ impl ConfigFile {
             resolve_relative_path(config_dir, extension);
         }
 
+        for overlay in &mut config.generator.overlays {
+            resolve_relative_path(config_dir, overlay);
+        }
+
         config.validate()?;
 
         Ok(config)
@@ -674,6 +704,27 @@ impl ConfigFile {
 
     fn validate(&self) -> Result<(), GeneratorError> {
         let mut errors = Vec::new();
+        for (field, path) in [
+            ("effective_spec", self.generator.effective_spec.as_deref()),
+            (
+                "bindings_metadata",
+                self.generator.bindings_metadata.as_deref().map(Path::new),
+            ),
+        ] {
+            if let Some(path) = path {
+                if let Err(error) = crate::overlay::validate_artifact_path(path) {
+                    errors.push(format!("generator.{field}: {error}"));
+                }
+            }
+        }
+        for path in &self.generator.overlays {
+            if !path.is_file() {
+                errors.push(format!(
+                    "generator.overlays: Overlay file not found: {}",
+                    path.display()
+                ));
+            }
+        }
 
         let spec_source = self.generator.spec_path.to_string_lossy();
         if crate::spec_source::is_remote_spec(&spec_source) {
@@ -963,6 +1014,9 @@ impl ConfigFile {
             nullable_field_overrides: self.nullable_overrides,
             extensible_enum_overrides: self.extensible_enums,
             schema_extensions: self.generator.schema_extensions,
+            overlays: self.generator.overlays,
+            effective_spec: self.generator.effective_spec,
+            bindings_metadata: self.generator.bindings_metadata,
             http_client_config,
             retry_config,
             tracing_enabled,

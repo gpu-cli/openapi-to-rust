@@ -85,6 +85,19 @@ pub fn reachable_schemas_with_roots(
         for ty in op.response_schemas.values() {
             seed(ty, &mut queue, &mut keep);
         }
+        // Alternate JSON media types may have their own inline schemas. They
+        // are just as reachable as the historical preferred response body.
+        if let Some(responses) = analysis.operation_responses.get(&op.operation_id) {
+            for response in responses.values() {
+                for representation in response.representations.values() {
+                    if let crate::analysis::OperationRepresentation::Json { schema_name } =
+                        representation
+                    {
+                        seed(schema_name, &mut queue, &mut keep);
+                    }
+                }
+            }
+        }
         for p in &op.parameters {
             if let Some(name) = &p.schema_ref {
                 seed(name, &mut queue, &mut keep);
@@ -3285,6 +3298,7 @@ impl<'a> ServerCodegen<'a> {
                             supports_streaming: false,
                             has_content: true,
                             unsupported_media_types: Vec::new(),
+                            representations: BTreeMap::new(),
                         },
                     )
                 })

@@ -30,6 +30,7 @@ fn create_test_analysis_with_operations(operations: Vec<OperationInfo>) -> Schem
         },
         operations: ops_map,
         operation_responses: BTreeMap::new(),
+        operation_sources: BTreeMap::new(),
         operation_id_aliases: BTreeMap::new(),
         used_type_features: Default::default(),
         enum_extensions: BTreeMap::new(),

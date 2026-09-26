@@ -488,6 +488,9 @@ fn generator_section_retains_standalone_serde_compatibility() {
         output_dir: "src/generated".into(),
         module_name: "api".into(),
         schema_extensions: vec!["overlay.yaml".into()],
+        overlays: vec![],
+        effective_spec: None,
+        bindings_metadata: None,
         builders: BuildersSection::default(),
     };
 

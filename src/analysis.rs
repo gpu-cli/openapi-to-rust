@@ -76,6 +76,8 @@ pub struct SchemaAnalysis {
     /// Unlike `OperationInfo::response_schemas`, this retains responses with
     /// no body as well as their selected JSON media type and SSE declaration.
     pub operation_responses: BTreeMap<String, BTreeMap<String, OperationResponse>>,
+    /// Original effective-document locations, before Rust naming/path normalization.
+    pub operation_sources: BTreeMap<String, OperationSource>,
     /// Source operationId to emitted operation IDs. Duplicate or
     /// Rust-identifier-colliding IDs are renamed during analysis; retaining
     /// this mapping lets selector resolution report ambiguity or renaming.
@@ -586,6 +588,27 @@ pub struct OperationResponse {
     pub has_content: bool,
     /// Declared response media types the server generator cannot emit.
     pub unsupported_media_types: Vec<String>,
+    /// Every supported representation, keyed by exact declared media type.
+    pub representations: BTreeMap<String, OperationRepresentation>,
+}
+
+/// Stable identity of an operation in the effective OpenAPI document.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct OperationSource {
+    pub json_pointer: String,
+    pub method: String,
+    pub path: String,
+    pub operation_id: Option<String>,
+    pub webhook: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OperationRepresentation {
+    Json { schema_name: String },
+    Text,
+    Binary { wildcard: bool },
+    EventStream,
 }
 
 /// Buffered response representation selected from one OpenAPI Response Object.
@@ -2130,6 +2153,7 @@ impl SchemaAnalyzer {
             },
             operations: BTreeMap::new(),
             operation_responses: BTreeMap::new(),
+            operation_sources: BTreeMap::new(),
             operation_id_aliases: BTreeMap::new(),
             used_type_features: crate::type_mapping::UsedFeatures::default(),
             enum_extensions: BTreeMap::new(),
@@ -7560,7 +7584,14 @@ impl SchemaAnalyzer {
                 // H11: Path Item may be a $ref to components/pathItems. Resolve here.
                 let resolved = self.resolve_path_item(path_item, &spec)?;
                 let pi: &crate::openapi::PathItem = resolved.as_ref().unwrap_or(path_item);
-                self.ingest_path_item_operations(path, pi, analysis, &mut canonical_operation_ids)?;
+                self.ingest_path_item_operations(
+                    path,
+                    pi,
+                    analysis,
+                    &mut canonical_operation_ids,
+                    None,
+                    path_item.reference.as_deref(),
+                )?;
             }
         }
         // T4: walk webhooks the same way as paths. Per OAS 3.1+, webhooks are
@@ -7572,11 +7603,15 @@ impl SchemaAnalyzer {
         if let Some(webhooks) = &spec.webhooks {
             for (name, path_item) in webhooks {
                 let synthetic_path = format!("/__webhook__/{name}");
+                let resolved = self.resolve_path_item(path_item, &spec)?;
+                let pi = resolved.as_ref().unwrap_or(path_item);
                 self.ingest_path_item_operations(
                     &synthetic_path,
-                    path_item,
+                    pi,
                     analysis,
                     &mut canonical_operation_ids,
+                    Some(name),
+                    path_item.reference.as_deref(),
                 )?;
             }
         }
@@ -7620,6 +7655,8 @@ impl SchemaAnalyzer {
         path_item: &crate::openapi::PathItem,
         analysis: &mut SchemaAnalysis,
         canonical_operation_ids: &mut HashSet<String>,
+        webhook_name: Option<&str>,
+        path_item_reference: Option<&str>,
     ) -> Result<()> {
         for (method, operation) in path_item.operations() {
             // Generate operation ID if missing.
@@ -7674,6 +7711,38 @@ impl SchemaAnalyzer {
             analysis
                 .operation_responses
                 .insert(operation_id.clone(), responses);
+            let source_path = webhook_name.unwrap_or(path);
+            let escaped = source_path.replace('~', "~0").replace('/', "~1");
+            let collection = if webhook_name.is_some() {
+                "webhooks"
+            } else {
+                "paths"
+            };
+            let base_pointer = path_item_reference
+                .and_then(|reference| reference.strip_prefix('#'))
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("/{collection}/{escaped}"));
+            let operation_pointer = if path_item.additional_operations.as_ref().is_some_and(|map| {
+                map.get(method)
+                    .is_some_and(|candidate| std::ptr::eq(candidate, operation))
+            }) {
+                format!(
+                    "{base_pointer}/additionalOperations/{}",
+                    method.replace('~', "~0").replace('/', "~1")
+                )
+            } else {
+                format!("{base_pointer}/{}", method.to_ascii_lowercase())
+            };
+            analysis.operation_sources.insert(
+                operation_id.clone(),
+                OperationSource {
+                    json_pointer: operation_pointer,
+                    method: method.to_ascii_uppercase(),
+                    path: source_path.to_string(),
+                    operation_id: operation.operation_id.clone(),
+                    webhook: webhook_name.is_some(),
+                },
+            );
             analysis.operations.insert(operation_id, op_info);
         }
         Ok(())
@@ -7994,6 +8063,59 @@ impl SchemaAnalyzer {
                         };
                     }
                 }
+                if let Some(content) = &response.content {
+                    for (media_type, media) in content {
+                        let representation = match crate::openapi::classify_response_media_type(
+                            media_type,
+                            media.schema.as_ref(),
+                        ) {
+                            crate::openapi::ResponseMediaKind::Json => {
+                                let Some(schema) = media.schema.as_ref() else {
+                                    continue;
+                                };
+                                let schema_name =
+                                    if response_info.media_type.as_ref() == Some(media_type) {
+                                        response_info.schema_name.clone()
+                                    } else if let Some(reference) = schema.reference() {
+                                        self.extract_schema_name(reference).map(str::to_owned)
+                                    } else {
+                                        let preferred = format!(
+                                            "{}{}",
+                                            self.generate_inline_response_type_name(
+                                                operation_id,
+                                                status_code
+                                            ),
+                                            base_param_ident(media_type)
+                                        );
+                                        Some(self.add_inline_schema(
+                                            &preferred,
+                                            schema,
+                                            &mut HashSet::new(),
+                                        )?)
+                                    };
+                                let Some(schema_name) = schema_name else {
+                                    continue;
+                                };
+                                OperationRepresentation::Json { schema_name }
+                            }
+                            crate::openapi::ResponseMediaKind::Text => {
+                                OperationRepresentation::Text
+                            }
+                            crate::openapi::ResponseMediaKind::Binary => {
+                                OperationRepresentation::Binary {
+                                    wildcard: crate::openapi::is_wildcard_media_type(media_type),
+                                }
+                            }
+                            crate::openapi::ResponseMediaKind::EventStream => {
+                                OperationRepresentation::EventStream
+                            }
+                            crate::openapi::ResponseMediaKind::Unsupported => continue,
+                        };
+                        response_info
+                            .representations
+                            .insert(media_type.clone(), representation);
+                    }
+                }
                 response_info.unsupported_media_types = response
                     .content
                     .as_ref()
@@ -8141,9 +8263,18 @@ impl SchemaAnalyzer {
         // `StartTime>`). Without disambiguation those parameters share a
         // single binding and the generated body fails E0382 (use of moved
         // value) or E0415 (binding declared twice).
-        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut used: std::collections::HashSet<String> =
+            ["request", "body", "req", "request_url", "client", "form"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
         for p in op_info.parameters.iter_mut() {
             let raw = base_param_ident(&p.name);
+            let raw = if matches!(raw.as_str(), "self" | "super" | "crate") {
+                format!("{raw}_param")
+            } else {
+                raw
+            };
             let mut chosen = raw.clone();
             let mut suffix = 2;
             while !used.insert(chosen.clone()) {
@@ -9436,6 +9567,11 @@ fn disambiguate_analyzed_schema_names(
         for response in responses.values_mut() {
             if let Some(schema_name) = &mut response.schema_name {
                 *schema_name = renamed_schema_name(schema_name, &aliases);
+            }
+            for representation in response.representations.values_mut() {
+                if let OperationRepresentation::Json { schema_name } = representation {
+                    *schema_name = renamed_schema_name(schema_name, &aliases);
+                }
             }
             if let Some(OperationResponseBody::Json { schema_name, .. }) = &mut response.body {
                 *schema_name = renamed_schema_name(schema_name, &aliases);

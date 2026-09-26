@@ -109,7 +109,10 @@ struct TypeGenerationIndex {
 
 struct TypeGenerationContext<'a> {
     index: &'a TypeGenerationIndex,
+    enum_wire_names: Option<&'a std::cell::RefCell<EnumWireNames>>,
 }
+
+type EnumWireNames = BTreeMap<String, BTreeMap<String, Option<String>>>;
 
 #[derive(Debug, Clone)]
 pub struct GeneratorConfig {
@@ -147,6 +150,12 @@ pub struct GeneratorConfig {
     /// Additional schema extension files to merge into the main spec
     /// These files will be merged additively using simple JSON object merging
     pub schema_extensions: Vec<PathBuf>,
+    /// Ordered OpenAPI Overlay documents, applied after schema extensions.
+    pub overlays: Vec<PathBuf>,
+    /// Optional output-relative effective OpenAPI JSON artifact.
+    pub effective_spec: Option<PathBuf>,
+    /// Optional output-relative versioned Rust bindings metadata artifact.
+    pub bindings_metadata: Option<String>,
     /// HTTP client configuration
     pub http_client_config: Option<crate::http_config::HttpClientConfig>,
     /// Retry configuration for HTTP requests
@@ -187,6 +196,9 @@ impl Default for GeneratorConfig {
             nullable_field_overrides: BTreeMap::new(),
             extensible_enum_overrides: BTreeMap::new(),
             schema_extensions: Vec::new(),
+            overlays: Vec::new(),
+            effective_spec: None,
+            bindings_metadata: None,
             http_client_config: None,
             retry_config: None,
             tracing_enabled: true,
@@ -452,6 +464,43 @@ impl CodeGenerator {
 
     /// Generate all files for the API
     pub fn generate_all(&self, analysis: &mut SchemaAnalysis) -> Result<GenerationResult> {
+        Ok(self
+            .generate_all_internal(analysis, self.config.bindings_metadata.is_some())?
+            .generation)
+    }
+
+    /// Generate Rust output and versioned metadata from the same emission ASTs.
+    /// Metadata paths are relative to the module chosen by the consumer.
+    pub fn generate_all_with_bindings(
+        &self,
+        analysis: &mut SchemaAnalysis,
+    ) -> Result<crate::bindings::GenerationWithBindings> {
+        self.generate_all_internal(analysis, true)
+    }
+
+    fn generate_all_internal(
+        &self,
+        analysis: &mut SchemaAnalysis,
+        collect_bindings: bool,
+    ) -> Result<crate::bindings::GenerationWithBindings> {
+        if collect_bindings
+            && (self.config.registry_only
+                || self.config.enable_registry
+                || self
+                    .config
+                    .server
+                    .as_ref()
+                    .is_some_and(|server| !server.operations.is_empty())
+                || (self.config.enable_sse_client && self.config.streaming_config.is_some()))
+        {
+            return Err(GeneratorError::ValidationError(
+                "bindings metadata v1 supports models and HTTP client output; registry, server, and configured streaming output are unsupported".to_string(),
+            ));
+        }
+        let mut bindings = crate::bindings::BindingsMetadata::new(
+            &self.config.module_name,
+            self.config.enable_async_client,
+        );
         // Resolve client/server selectors exactly once for this generation.
         // The same scopes drive client artifacts and the union model closure.
         let scopes = self.resolve_operation_scopes(analysis)?;
@@ -460,7 +509,10 @@ impl CodeGenerator {
 
         if !self.config.registry_only {
             // Generate types file
-            let types_content = self.generate_types(analysis)?;
+            let types_content = self.generate_types_with_bindings(
+                analysis,
+                collect_bindings.then_some(&mut bindings),
+            )?;
             files.push(GeneratedFile {
                 path: "types.rs".into(),
                 content: types_content,
@@ -493,8 +545,27 @@ impl CodeGenerator {
             // Generate HTTP client if enabled
             if self.config.enable_async_client {
                 let operations = self.client_operations(analysis, scopes.client_ids.as_ref());
-                let http_content =
-                    self.generate_http_client_for_operations(analysis, &operations)?;
+                let needs_sse_runtime = self
+                    .client_method_plans(analysis, &operations)
+                    .iter()
+                    .any(|plan| plan.response.consumption == "parsed_sse");
+                if needs_sse_runtime
+                    && !files
+                        .iter()
+                        .any(|file| file.path == std::path::Path::new("sse.rs"))
+                {
+                    files.push(GeneratedFile {
+                        path: "sse.rs".into(),
+                        content: self.generate_sse_runtime_with_bindings(
+                            collect_bindings.then_some(&mut bindings),
+                        )?,
+                    });
+                }
+                let http_content = self.generate_http_client_for_operations_with_bindings(
+                    analysis,
+                    &operations,
+                    collect_bindings.then_some(&mut bindings),
+                )?;
                 files.push(GeneratedFile {
                     path: "client.rs".into(),
                     content: http_content,
@@ -545,11 +616,53 @@ impl CodeGenerator {
             self.config.enable_specta,
         );
 
-        Ok(GenerationResult {
-            files,
-            mod_file,
-            required_deps,
-            pruned_schemas,
+        if collect_bindings {
+            let top_level_modules: Vec<_> = files
+                .iter()
+                .filter_map(|file| {
+                    file.path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                })
+                .collect();
+            bindings.modules.extend(top_level_modules.iter().cloned());
+            bindings.reexports.extend(
+                top_level_modules
+                    .iter()
+                    .filter(|module| module.as_str() != "sse")
+                    .map(|module| format!("{module}::*")),
+            );
+            bindings.finish();
+        }
+        if let Some(path) = &self.config.bindings_metadata {
+            let artifact_path = std::path::Path::new(path);
+            crate::overlay::validate_artifact_path(artifact_path)?;
+            let overlaps = |other: &std::path::Path| {
+                artifact_path.starts_with(other) || other.starts_with(artifact_path)
+            };
+            if files.iter().any(|file| overlaps(&file.path))
+                || overlaps(std::path::Path::new("mod.rs"))
+                || overlaps(std::path::Path::new("REQUIRED_DEPS.toml"))
+                || self.config.effective_spec.as_deref().is_some_and(overlaps)
+            {
+                return Err(GeneratorError::ValidationError(format!(
+                    "bindings metadata path conflicts with generated artifact: {path}"
+                )));
+            }
+            files.push(GeneratedFile {
+                path: path.into(),
+                content: bindings.to_json()?,
+            });
+        }
+        Ok(crate::bindings::GenerationWithBindings {
+            generation: GenerationResult {
+                files,
+                mod_file,
+                required_deps,
+                pruned_schemas,
+            },
+            bindings,
         })
     }
 
@@ -560,13 +673,25 @@ impl CodeGenerator {
 
     /// Generate the types.rs file content
     fn generate_types(&self, analysis: &mut SchemaAnalysis) -> Result<String> {
+        self.generate_types_with_bindings(analysis, None)
+    }
+
+    fn generate_types_with_bindings(
+        &self,
+        analysis: &mut SchemaAnalysis,
+        bindings: Option<&mut crate::bindings::BindingsMetadata>,
+    ) -> Result<String> {
         self.validate_schema_type_names(analysis)?;
 
         let provenance_attribute = self.provenance_attribute();
         let mut type_definitions = TokenStream::new();
 
         let type_index = self.type_generation_index(analysis);
-        let type_context = TypeGenerationContext { index: &type_index };
+        let enum_wire_names = std::cell::RefCell::new(BTreeMap::new());
+        let type_context = TypeGenerationContext {
+            index: &type_index,
+            enum_wire_names: bindings.as_ref().map(|_| &enum_wire_names),
+        };
 
         // Generate types based on dependency order
         let generation_order = analysis.dependencies.topological_sort()?;
@@ -1072,6 +1197,21 @@ impl CodeGenerator {
             GeneratorError::CodeGenError(format!("Failed to parse generated code: {e}"))
         })?;
 
+        if let Some(bindings) = bindings {
+            bindings.collect("types", &syntax_tree);
+            for (name, variants) in enum_wire_names.into_inner() {
+                if let Some(symbol) = bindings
+                    .symbols
+                    .iter_mut()
+                    .find(|symbol| symbol.path == format!("types::{name}"))
+                {
+                    for variant in &mut symbol.variants {
+                        variant.wire_name = variants.get(&variant.name).cloned().flatten();
+                    }
+                }
+            }
+        }
+
         let formatted = prettyplease::unparse(&syntax_tree);
 
         Ok(formatted)
@@ -1172,16 +1312,33 @@ impl CodeGenerator {
     /// This standalone entry point honors `[client].operations` but does not
     /// validate unrelated server or streaming scopes. Use [`Self::generate_all`]
     /// when generating the complete configured output set.
+    /// SSE variants use raw byte streams in this standalone file. The bundled
+    /// entry point emits parsed SSE variants together with their `sse.rs` runtime.
     pub fn generate_http_client(&self, analysis: &SchemaAnalysis) -> Result<String> {
         let client_ids = self.resolve_client_operation_ids(analysis)?;
         let operations = self.client_operations(analysis, client_ids.as_ref());
-        self.generate_http_client_for_operations(analysis, &operations)
+        let mut config = self.config.clone();
+        config.enable_sse_client = false;
+        let standalone = Self {
+            config,
+            source_provenance: self.source_provenance.clone(),
+        };
+        standalone.generate_http_client_for_operations(analysis, &operations)
     }
 
     fn generate_http_client_for_operations(
         &self,
         analysis: &SchemaAnalysis,
         operations: &[&crate::analysis::OperationInfo],
+    ) -> Result<String> {
+        self.generate_http_client_for_operations_with_bindings(analysis, operations, None)
+    }
+
+    fn generate_http_client_for_operations_with_bindings(
+        &self,
+        analysis: &SchemaAnalysis,
+        operations: &[&crate::analysis::OperationInfo],
+        bindings: Option<&mut crate::bindings::BindingsMetadata>,
     ) -> Result<String> {
         let provenance_attribute = self.provenance_attribute();
         let error_types = self.generate_http_error_types();
@@ -1213,7 +1370,65 @@ impl CodeGenerator {
             GeneratorError::CodeGenError(format!("Failed to parse HTTP client code: {e}"))
         })?;
 
+        if let Some(bindings) = bindings {
+            bindings.collect("client", &syntax_tree);
+            self.attach_operation_bindings(analysis, operations, bindings)?;
+        }
+
         Ok(prettyplease::unparse(&syntax_tree))
+    }
+
+    fn attach_operation_bindings(
+        &self,
+        analysis: &SchemaAnalysis,
+        operations: &[&crate::analysis::OperationInfo],
+        bindings: &mut crate::bindings::BindingsMetadata,
+    ) -> Result<()> {
+        for plan in self.client_method_plans(analysis, operations) {
+            let source = analysis
+                .operation_sources
+                .get(&plan.operation.operation_id)
+                .ok_or_else(|| {
+                    GeneratorError::ValidationError(format!(
+                        "bindings metadata requires effective-source identity for operation '{}'",
+                        plan.operation.operation_id
+                    ))
+                })?;
+            let path = format!("client::HttpClient::{}", plan.method_ident);
+            let builder_entry = plan
+                .builder_method_ident
+                .as_ref()
+                .map(|ident| format!("client::HttpClient::{ident}"));
+            let builder_type = plan
+                .builder_type_ident
+                .as_ref()
+                .map(|ident| format!("client::{ident}"));
+            let operation_binding = crate::bindings::BindingOperation {
+                operation_id: plan.operation.operation_id.clone(),
+                source_json_pointer: source.json_pointer.clone(),
+                source_method: source.method.clone(),
+                source_path: source.path.clone(),
+                source_operation_id: source.operation_id.clone(),
+                webhook: source.webhook,
+                response_statuses: plan.response.statuses,
+                response_excluded_statuses: plan.response.excluded_statuses,
+                response_media_type: plan.response.media_type,
+                response_kind: plan.response.kind,
+                consumption: plan.response.consumption,
+                multipart_filenames: plan.multipart_filenames.is_some(),
+            };
+            for symbol in &mut bindings.symbols {
+                if symbol.path == path
+                    || builder_entry.as_ref() == Some(&symbol.path)
+                    || builder_type.as_ref().is_some_and(|owner| {
+                        symbol.path == *owner || symbol.path.starts_with(&format!("{owner}::"))
+                    })
+                {
+                    symbol.operation = Some(operation_binding.clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve_operation_scopes(&self, analysis: &SchemaAnalysis) -> Result<OperationScopes> {
@@ -1766,14 +1981,14 @@ impl CodeGenerator {
                     .copied()
                     .unwrap_or(false);
                 if force_extensible {
-                    self.generate_extensible_enum(schema, values, ext)
+                    self.generate_extensible_enum(schema, values, ext, type_context)
                 } else {
                     self.generate_string_enum(schema, values, ext)
                 }
             }
             SchemaType::ExtensibleEnum { known_values } => {
                 let ext = analysis.enum_extensions.get(&schema.name);
-                self.generate_extensible_enum(schema, known_values, ext)
+                self.generate_extensible_enum(schema, known_values, ext, type_context)
             }
             SchemaType::Object {
                 properties,
@@ -1921,6 +2136,7 @@ impl CodeGenerator {
         schema: &crate::analysis::AnalyzedSchema,
         known_values: &[String],
         ext: Option<&crate::analysis::EnumExtensions>,
+        type_context: &TypeGenerationContext<'_>,
     ) -> Result<TokenStream> {
         let enum_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -1949,6 +2165,23 @@ impl CodeGenerator {
             };
             format_ident!("{}", name)
         };
+
+        if let Some(metadata) = type_context.enum_wire_names {
+            let mut variants: BTreeMap<_, _> = known_values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    (
+                        variant_ident_for(index, value).to_string(),
+                        Some(value.clone()),
+                    )
+                })
+                .collect();
+            variants.insert("Custom".to_string(), None);
+            metadata
+                .borrow_mut()
+                .insert(enum_name.to_string(), variants);
+        }
 
         // For extensible enums, we need a different approach:
         // 1. Create a regular enum with known variants + Custom
@@ -5613,6 +5846,13 @@ impl CodeGenerator {
 
     /// Generate the reusable SSE transport module emitted as `sse.rs`.
     fn generate_sse_runtime(&self) -> Result<String> {
+        self.generate_sse_runtime_with_bindings(None)
+    }
+
+    fn generate_sse_runtime_with_bindings(
+        &self,
+        bindings: Option<&mut crate::bindings::BindingsMetadata>,
+    ) -> Result<String> {
         let provenance_attribute = self.provenance_attribute();
         let error_types = self.generate_streaming_error_types()?;
         let parser = self.generate_sse_parser_utilities()?;
@@ -5763,6 +6003,9 @@ impl CodeGenerator {
         let syntax_tree = syn::parse2::<syn::File>(tokens).map_err(|error| {
             GeneratorError::CodeGenError(format!("Failed to parse generated sse.rs: {error}"))
         })?;
+        if let Some(bindings) = bindings {
+            bindings.collect("sse", &syntax_tree);
+        }
         Ok(prettyplease::unparse(&syntax_tree))
     }
 
@@ -6079,6 +6322,14 @@ impl CodeGenerator {
 
                 debug!("SSE connection opened");
                 Ok(response)
+            }
+
+            /// Parse an already validated HTTP response as SSE events.
+            /// This preserves the request middleware of the calling HTTP client.
+            pub fn parse_sse_response(
+                response: reqwest::Response,
+            ) -> BoxSseStream<Result<SseEvent<String>, StreamingError>> {
+                __raw_response_stream(response)
             }
 
             fn __raw_response_stream(

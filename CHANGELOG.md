@@ -6,6 +6,45 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Typed multipart client operations expose request-local filename overrides,
+  including builder setters and response variants. Overrides use OpenAPI wire
+  names and support both byte and conservative string binary mappings.
+- Generated clients retain every supported successful response representation.
+  Additive methods expose alternate JSON/text/binary bodies, live binary chunks,
+  and raw or parsed SSE without replacing existing preferred methods or the
+  configured SSE reconnection transport. Different schemas at different success
+  statuses receive explicit status-specific methods.
+- OpenAPI Overlay 1.1 preprocessing supports ordered RFC 9535 JSONPath
+  updates, copies, and removals. Configure `generator.overlays` or repeat
+  `--overlay`; optional `effective_spec`/`--effective-spec` materializes the
+  transformed document and participates in `--check` and `--dry-run`.
+- Optional versioned `bindings.json` describes emitted model and HTTP-client
+  symbols, exact signatures, source operation locations, and response modes.
+  Enable `generator.bindings_metadata` or `--bindings-metadata`. The additive
+  library API `generate_all_with_bindings` returns output and metadata while
+  retaining the existing `GenerationResult` shape. Initial metadata coverage
+  rejects dedicated configured streaming, server, and registry generation.
+
+### Fixed
+
+- Effective-document validation and generated default server URLs now run after
+  schema extensions and overlays, so preprocessing and generation agree.
+- Alternate JSON response schemas remain reachable when models are pruned.
+- Client method, argument, builder, and transport-variant names share allocation,
+  including collisions involving body parameters and filename overrides.
+
+### Breaking changes
+
+#### Library API
+
+- `GeneratorConfig`, configuration generator sections, `SchemaAnalysis`, and
+  `OperationResponse` gained public fields for preprocessing, metadata, source
+  locations, and complete response representations. Downstream exhaustive struct
+  literals must include those fields. Prefer default-based configuration and
+  construct analyses with `SchemaAnalyzer`.
+
 ## [0.18.0] - 2026-09-25
 
 ### Breaking changes

@@ -274,6 +274,8 @@ Two complete examples are in the repo:
 | `server/validation.rs` | Offline JSON Schema validators and sanitized Problem Details rejections |
 | `mod.rs` | Module declarations + re-exports |
 | `REQUIRED_DEPS.toml` | Complete direct dependencies and crate features for the exact generated modes and selected operations — append or merge into the consuming `Cargo.toml` |
+| `bindings.json` | Optional versioned description of the emitted Rust symbols, signatures, and source operations |
+| Configured effective-spec file | Optional transformed OpenAPI JSON document used for generation |
 
 ### Generated client usage
 
@@ -302,8 +304,65 @@ fixed-length body crosses the limit, the call returns
 exceed it. Successful SSE responses remain streaming; only SSE error responses
 are buffered under the same cap.
 
+### Multipart filenames
+
+Typed multipart operations with binary fields also expose an additive filename
+method. Overrides belong to each call and use OpenAPI wire field names:
+
+```rust
+client.create_upload_with_multipart_filenames(
+    request,
+    &[("document", "report.pdf"), ("attachment", "notes.txt")],
+).await?;
+```
+
+The original `create_upload(request)` method keeps its existing wire behavior.
+Unspecified filenames and absent optional fields stay unchanged. Unknown fields,
+non-binary fields, and duplicate override keys return a configuration error.
+Filenames work with byte and conservative string binary mappings. When an
+operation builder is generated, its `multipart_filenames(&[("document", "report.pdf")])`
+setter stores an independent copy of the overrides for that request.
+
+### Response representations and live downloads
+
+An operation declaring JSON, binary, and SSE retains its existing preferred
+method and gains methods for the other representations. For a `render` operation
+whose preferred response is JSON, examples include `render_binary()` for buffered
+bytes and `render_binary_stream()` for live chunks. With SSE client generation
+enabled, `render_sse()` yields parsed `SseEvent<String>` values through the
+existing SSE parser; otherwise `render_event_stream()` exposes raw chunks.
+Existing configured typed SSE and reconnection APIs remain available.
+The standalone library helpers `generate_http_client` and
+`generate_operation_methods` expose raw SSE streams so their output remains
+self-contained with the generated models. `generate_all` includes the parsed
+SSE runtime when enabled.
+
+```rust
+use futures_util::StreamExt;
+
+let stream = client.render_binary_stream().await?;
+futures_util::pin_mut!(stream);
+while let Some(chunk) = stream.next().await {
+    let bytes = chunk?;
+    // Write or process this chunk before the download finishes.
+}
+```
+
+New representation methods set their declared `Accept` value and validate the
+response representation before decoding. Successful live streams do not buffer
+the complete body or apply the buffered body's total byte ceiling; error bodies
+remain bounded. If a media type has different schemas at different successful
+statuses, generated status-specific methods accept only their documented status
+and return an inspectable error for another status. A method cannot control which
+status a server returns.
+
+Method names are allocated around real operations and builders. Multiple media
+types of the same kind include a normalized media-type suffix. Consult generated
+Rust or the binding metadata for the exact allocated names. Filename overrides
+also compose with multipart operations' response variants.
+
 Generated HTTP clients compile for `wasm32-unknown-unknown` as well as native
-targets, including the opt-in SSE runtime (`enable_sse_client` with
+targets, including the opt-in SSE runtime (`enable_sse_client`, with optional
 `[[streaming.endpoints]]`) and the opt-in retry middleware
 (`[http_client.retry]`). On wasm32 the generated SSE stream is single-threaded
 (no `Send` bound) because the browser `fetch` body is not `Send`; native
@@ -498,6 +557,69 @@ A list of files whose top-level objects are deep-merged into the main spec befor
 schema_extensions = ["sse-overlay.json"]
 ```
 
+### OpenAPI Overlay 1.1 and the effective document
+
+Standard [OpenAPI Overlay 1.1](https://spec.openapis.org/overlay/v1.1.0.html)
+documents are configured separately from the existing deep-merge fragments:
+
+```toml
+[generator]
+overlays = ["remove-legacy.overlay.yaml", "customize.overlay.json"]
+effective_spec = "effective-openapi.json"
+```
+
+Input paths resolve relative to the configuration file. Processing applies
+`schema_extensions` first, then overlays and their actions in order, then
+validates and analyzes the resulting document. Server defaults also come from
+that effective document. Existing extension merge behavior is preserved.
+The optional effective-spec artifact is deterministic JSON inside `output_dir`;
+it describes the same document used for generation, before Rust name allocation.
+
+Overlay actions use RFC 9535 JSONPath for `update`, `copy`, and `remove`.
+Errors identify the overlay file and action. An overlay's `extends` identifies
+its intended source; it does not implicitly fetch or replace the configured
+input. Direct-mode equivalents are repeatable `--overlay <path>` and
+`--effective-spec <filename>`. `--check` verifies the effective artifact along
+with Rust output, and `--dry-run` writes nothing.
+
+Library callers can use `overlay::preprocess_spec(spec, &extensions, &overlays)`
+before constructing a `SchemaAnalyzer`.
+
+### Binding metadata
+
+Enable a deterministic JSON artifact describing the Rust API actually emitted:
+
+```toml
+[generator]
+bindings_metadata = "bindings.json"
+```
+
+The CLI also accepts `--bindings-metadata bindings.json`. Version 1 records
+module and re-export paths, structs and their fields/wire names, enum payloads,
+aliases, public helpers, builders, and exact HTTP-client method signatures.
+Operation methods retain source JSON Pointer locations and explicit response
+media/status/consumption descriptors even when their Rust names are disambiguated.
+Consumers should check `schema_version` and `coverage` before interpreting the
+artifact. It contains no generation timestamp or machine-specific input paths.
+
+Metadata is collected from the same emission AST and client plans used to render
+source, and is separate from the client-sync manifest. Its initial coverage is
+models and HTTP clients, including their parsed SSE helpers; configured dedicated
+streaming clients, servers, and registries are rejected when metadata is requested.
+Without metadata enabled, those generation modes remain available as usual.
+The sidecar participates in `--check` and `--dry-run`.
+
+The library API is additive and preserves `GenerationResult`:
+
+```rust
+let output = generator.generate_all_with_bindings(&mut analysis)?;
+generator.write_files(&output.generation)?;
+let metadata_json = output.bindings.to_json()?;
+```
+
+Configured sidecar filenames must be distinct output-relative filenames and
+cannot replace generated Rust modules or dependency fragments.
+
 ### `nullable_overrides` — force a field to `Option<T>`
 
 When a spec marks a field as required + non-nullable but the API actually returns `null`. Format: `"SchemaName.fieldName" = true`.
@@ -635,7 +757,7 @@ module_name = "types"                   # informational label, not a directory
 schema_extensions = []                  # optional list of JSON/YAML overlays merged into the spec
 
 [features]
-enable_sse_client = false               # generate SSE streaming client (requires [[streaming.endpoints]])
+enable_sse_client = false               # parsed SSE variants; optional [[streaming.endpoints]] adds typed clients
 enable_async_client = true              # generate HTTP REST client
 enable_specta = false                   # add specta::Type derives
 enable_registry = false                 # generate static operation registry (CLI/proxy routing)
