@@ -394,7 +394,7 @@ fn standalone_default_sse_output_compiles_without_a_runtime_file() {
     .unwrap();
     std::fs::write(temp.path().join("Cargo.toml"), format!("[package]\nname = \"standalone-sse-bindings-test\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n{deps}")).unwrap();
     let output = std::process::Command::new("cargo")
-        .args(["check", "--offline", "--quiet"])
+        .args(["check", "--quiet"])
         .current_dir(temp.path())
         .env("RUSTC_WRAPPER", "")
         .env("CC_aarch64_apple_darwin", "cc")
