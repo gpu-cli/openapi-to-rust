@@ -899,7 +899,7 @@ impl CodeGenerator {
             request
         };
         let response_type = if precise_stream {
-            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + use<#(#captures),*> }
+            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + 'static + use<#(#captures),*> }
         } else if consumption == "parsed_sse" {
             quote! { super::sse::BoxSseStream<Result<super::sse::SseEvent<String>, super::sse::StreamingError>> }
         } else {
