@@ -877,8 +877,7 @@ impl CodeGenerator {
         multipart_filenames: Option<syn::Ident>,
         validate_content_type: bool,
     ) -> ClientMethodPlan<'a> {
-        let precise_stream = matches!(success.body, ClientSuccessBody::EventStream)
-            && (validate_content_type || multipart_filenames.is_some());
+        let precise_stream = matches!(success.body, ClientSuccessBody::EventStream);
         let mut captures = Vec::new();
         let request = if precise_stream {
             self.generate_request_param_with_capture(operation, Some(&mut captures))
