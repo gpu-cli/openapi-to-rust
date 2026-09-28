@@ -877,8 +877,7 @@ impl CodeGenerator {
         multipart_filenames: Option<syn::Ident>,
         validate_content_type: bool,
     ) -> ClientMethodPlan<'a> {
-        let precise_stream = matches!(success.body, ClientSuccessBody::EventStream)
-            && (validate_content_type || multipart_filenames.is_some());
+        let precise_stream = matches!(success.body, ClientSuccessBody::EventStream);
         let mut captures = Vec::new();
         let request = if precise_stream {
             self.generate_request_param_with_capture(operation, Some(&mut captures))
@@ -900,7 +899,7 @@ impl CodeGenerator {
             request
         };
         let response_type = if precise_stream {
-            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + use<#(#captures),*> }
+            quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + 'static + use<#(#captures),*> }
         } else if consumption == "parsed_sse" {
             quote! { super::sse::BoxSseStream<Result<super::sse::SseEvent<String>, super::sse::StreamingError>> }
         } else {

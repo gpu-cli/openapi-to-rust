@@ -49,6 +49,13 @@ fn spec() -> serde_json::Value {
         "application/octet-stream":{"schema":{"type":"string","format":"binary"}}
     }}});
     document["paths"]["/upload-stream"] = json!({"post":streaming_upload});
+    document["paths"]["/events"] = json!({"get":{
+        "operationId":"rawEvents",
+        "parameters":[{"name":"cursor","in":"query","schema":{"type":"string"}}],
+        "responses":{"200":{"description":"events","content":{
+            "text/event-stream":{"schema":{"type":"string"}}
+        }}}
+    }});
     document["paths"]["/constructor"] =
         json!({"get":{"operationId":"new","responses":{"204":{"description":"ok"}}}});
     document["paths"]["/keyword"] = json!({"get":{"operationId":"type","responses":{"200":{"description":"ok", "content":{"application/octet-stream":{"schema":{"type":"string","format":"binary"}}}}}}});
@@ -112,6 +119,7 @@ fn generated_variants_negotiate_stream_and_keep_filenames_request_local() {
                     "range".into(),
                     "profile".into(),
                     "quotedProfile".into(),
+                    "rawEvents".into(),
                 ],
                 prune_models: true,
             }),
@@ -141,6 +149,8 @@ fn generated_variants_negotiate_stream_and_keep_filenames_request_local() {
                 .contains("pub async fn upload_with_multipart_filenames_2")
         );
         assert!(client.content.contains("pub async fn render_binary_stream"));
+        assert!(client.content.contains("pub async fn raw_events"));
+        assert!(client.content.contains("use<"));
         assert!(
             client
                 .content
@@ -311,6 +321,20 @@ mod tests {
         let _ = client.type_binary_stream().await;
         let _ = client.r#type_binary_stream_2().await;
     }
+    #[allow(dead_code)]
+    async fn boxed_owned_raw_events<'a>(
+        client: &HttpClient,
+        cursor: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
+                + 'static,
+        >,
+    > {
+        let stream = client.raw_events(Some(cursor)).await.unwrap();
+        Box::pin(stream)
+    }
+
     #[tokio::test]
     async fn transports() {
         let state = ServerState::default();
