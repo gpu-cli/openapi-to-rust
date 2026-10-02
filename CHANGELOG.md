@@ -18,6 +18,11 @@ when correcting output that was wrong or incomplete on the wire.
   `bcc`, and of `text` or `html`") no longer fails generation as intersecting
   multiple union members, and one beside a real union leaves that union the
   variant (#88).
+- Operation builders take a request body that declares variants beside its
+  properties (`properties` with a `oneOf`) as an argument. Its generated struct
+  carries the variant in a required field, so it has no `Default` or
+  required-properties constructor, which the builder called and failed to
+  compile on (#86).
 
 ## [0.19.0] - 2026-09-26
 
