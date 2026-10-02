@@ -6392,30 +6392,36 @@ impl SchemaAnalyzer {
     /// Requiredness formulas can nest through `anyOf`/`oneOf` and `not`, as
     /// in protobuf-generated "at most one field" schemas. They constrain
     /// presence but add no payload shape for a Rust field to carry.
+    ///
+    /// A branch may restate `type: object`, as Cloudflare's "at least one of
+    /// `to`, `cc` or `bcc`" does: only an object has required properties, so
+    /// it says nothing the requiredness doesn't.
     fn schema_only_constrains_requiredness(schema: &Schema) -> bool {
         let keys_are_requiredness_or_annotations = serde_json::to_value(schema)
             .ok()
             .and_then(|value| value.as_object().cloned())
             .is_some_and(|object| {
-                object.keys().all(|key| {
-                    matches!(
-                        key.as_str(),
-                        "required"
-                            | "not"
-                            | "anyOf"
-                            | "oneOf"
-                            | "title"
-                            | "description"
-                            | "deprecated"
-                            | "readOnly"
-                            | "writeOnly"
-                            | "examples"
-                            | "example"
-                            | "default"
-                            | "externalDocs"
-                            | "xml"
-                            | "$comment"
-                    ) || key.starts_with("x-")
+                object.iter().all(|(key, value)| {
+                    (key == "type" && value == "object")
+                        || matches!(
+                            key.as_str(),
+                            "required"
+                                | "not"
+                                | "anyOf"
+                                | "oneOf"
+                                | "title"
+                                | "description"
+                                | "deprecated"
+                                | "readOnly"
+                                | "writeOnly"
+                                | "examples"
+                                | "example"
+                                | "default"
+                                | "externalDocs"
+                                | "xml"
+                                | "$comment"
+                        )
+                        || key.starts_with("x-")
                 })
             });
         if !keys_are_requiredness_or_annotations {

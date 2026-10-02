@@ -6,6 +6,15 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- A union whose branches only list required properties is a constraint on the
+  object, not a variant of it, also when a branch restates `type: object`.
+  An `allOf` of two of them (Cloudflare's "at least one of `to`, `cc` or
+  `bcc`, and of `text` or `html`") no longer fails generation as intersecting
+  multiple union members, and one beside a real union leaves that union the
+  variant (#88).
+
 ## [0.19.0] - 2026-09-26
 
 ### Added
