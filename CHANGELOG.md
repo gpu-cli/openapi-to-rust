@@ -8,6 +8,10 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- An operation that declares no 2xx response no longer generates a second
+  `else if status.is_success()` branch after its success guard, which is
+  `status.is_success()` itself. The branch couldn't be reached, and clippy's
+  deny-by-default `ifs_same_cond` rejected the generated client (#89).
 - A union whose branches only list required properties is a constraint on the
   object, not a variant of it, also when a branch restates `type: object`.
   An `allOf` of two of them (Cloudflare's "at least one of `to`, `cc` or
