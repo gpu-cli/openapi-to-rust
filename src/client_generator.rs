@@ -1547,6 +1547,12 @@ impl CodeGenerator {
         );
 
         let required_construction = match &resolved_schema.schema_type {
+            // An object that declares variants beside its properties carries
+            // the variant in a required field of its own, which neither
+            // `Default` nor the required-properties constructor can supply.
+            SchemaType::Object {
+                variant: Some(_), ..
+            } => RequiredBodyConstruction::Whole,
             SchemaType::Object {
                 properties,
                 required,

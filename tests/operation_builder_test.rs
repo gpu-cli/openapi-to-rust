@@ -443,3 +443,147 @@ edition = "2024"
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// An object that declares variants beside its properties is generated as a
+/// struct with a required `variant` field, so it has neither `Default` nor a
+/// constructor from its required properties. Cloudflare's Browser Rendering
+/// bodies are like this: "a `url` or `html`, and these options".
+fn variant_body_spec() -> serde_json::Value {
+    let variants = json!([
+        { "type": "object", "required": ["url"],
+          "properties": { "url": { "type": "string" } } },
+        { "type": "object", "required": ["html"],
+          "properties": { "html": { "type": "string" } } }
+    ]);
+    // Four optional parameters, past the default threshold of three.
+    let parameters: Vec<_> = ["a", "b", "c", "d"]
+        .map(|name| json!({ "name": name, "in": "query", "schema": { "type": "string" } }))
+        .into();
+    let operation = |operation_id: &str, body: &str| {
+        json!({
+            "operationId": operation_id,
+            "parameters": parameters,
+            "requestBody": {
+                "required": true,
+                "content": { "application/json": { "schema": {
+                    "$ref": format!("#/components/schemas/{body}")
+                } } }
+            },
+            "responses": { "204": { "description": "done" } }
+        })
+    };
+    json!({
+        "openapi": "3.0.3",
+        "info": { "title": "variant bodies", "version": "1.0.0" },
+        "paths": {
+            "/render": { "post": operation("render", "RenderRequest") },
+            "/apps": { "post": operation("createApp", "CreateAppRequest") }
+        },
+        "components": { "schemas": {
+            // No required property: the builder used `Default::default()`.
+            "RenderRequest": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "timeout": { "type": "number" } },
+                "oneOf": variants
+            },
+            // A required property beside an optional one: the builder used
+            // `CreateAppRequest::new(name)`.
+            "CreateAppRequest": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "note": { "type": "string" }
+                },
+                "oneOf": variants
+            }
+        }}
+    })
+}
+
+#[test]
+fn builders_take_a_body_that_declares_variants_whole() {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut analyzer = SchemaAnalyzer::new(variant_body_spec()).unwrap();
+    let mut analysis = analyzer.analyze().unwrap();
+    let temp = tempfile::TempDir::new().unwrap();
+    let output_dir = temp.path().join("src/generated");
+    let generator = CodeGenerator::new(GeneratorConfig {
+        output_dir: output_dir.clone(),
+        module_name: "variant_body_builder".into(),
+        enable_async_client: true,
+        enable_sse_client: false,
+        tracing_enabled: false,
+        builders: BuildersSection {
+            enabled: true,
+            threshold: 3,
+        },
+        ..Default::default()
+    });
+    let result = generator.generate_all(&mut analysis).unwrap();
+    let client = &result
+        .files
+        .iter()
+        .find(|file| file.path == std::path::Path::new("client.rs"))
+        .unwrap()
+        .content;
+    assert!(client.contains("pub fn render_builder(&self, request: RenderRequest)"));
+    assert!(client.contains("pub fn create_app_builder(&self, request: CreateAppRequest)"));
+    assert!(!client.contains("Default::default()"));
+    assert!(!client.contains("CreateAppRequest::new("));
+    generator.write_files(&result).unwrap();
+
+    // The optional properties keep their setters on the body passed in.
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        r#"pub mod generated;
+
+pub async fn variant_body_builders_compile(
+    client: &generated::HttpClient,
+    render: generated::RenderRequest,
+    app: generated::CreateAppRequest,
+) {
+    let _ = client.render_builder(render).a("x").timeout(1.0).send().await;
+    let _ = client
+        .create_app_builder(app)
+        .note("y".to_string())
+        .send()
+        .await;
+}
+"#,
+    )
+    .unwrap();
+    let generated_dependencies =
+        std::fs::read_to_string(output_dir.join("REQUIRED_DEPS.toml")).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "variant-body-builder-smoke"
+version = "0.1.0"
+edition = "2024"
+
+{generated_dependencies}
+"#
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(temp.path())
+        .env(
+            "CARGO_TARGET_DIR",
+            manifest_dir.join("target/variant-body-builder-smoke"),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "variant body builders failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
