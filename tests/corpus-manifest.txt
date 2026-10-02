@@ -47,7 +47,7 @@ circleci/client.rs                                       625181    16188 97bb3b9
 circleci/mod.rs                                             442       17 7a8b5691342a9d62
 circleci/types.rs                                        384614    10072 6f277085e1ad9894
 cloudflare/REQUIRED_DEPS.toml                               787       19 09cccc57db93029b
-cloudflare/client.rs                                   14201380   369993 1fdaaedfac657071
+cloudflare/client.rs                                   14175795   369305 39222ef4f1aa394c
 cloudflare/mod.rs                                           446       17 ce0e733f646147da
 cloudflare/types.rs                                    16792851   390215 d20ffe23076f5949
 coda/REQUIRED_DEPS.toml                                     672       16 9e666f39c7301c02
@@ -75,7 +75,7 @@ gcore/client.rs                                         5203526   137184 7ede00f
 gcore/mod.rs                                                436       17 d5c05d8821f23bcb
 gcore/types.rs                                          6016429   140206 f72406948cf03e54
 github/REQUIRED_DEPS.toml                                   625       15 0e0871569054a9ee
-github/client.rs                                        5859284   148163 6eaa2cb71078dfb5
+github/client.rs                                        5854524   148035 05f5a16b431854d7
 github/mod.rs                                               438       17 ac4d40f51fb06aa3
 github/types.rs                                         8075234   216344 42b90f805a994a04
 gitpod/REQUIRED_DEPS.toml                                   736       18 21727a31b033ca36
@@ -83,27 +83,27 @@ gitpod/client.rs                                        1635409    43864 666a318
 gitpod/mod.rs                                               438       17 516880570ce5294f
 gitpod/types.rs                                          849831    19869 c2ab58c21a1573e6
 google-calendar/REQUIRED_DEPS.toml                          528       13 d6f1ac00e2426e4d
-google-calendar/client.rs                                156002     4146 5507c7736aaf713e
+google-calendar/client.rs                                133987     3554 dec9771e2bf02758
 google-calendar/mod.rs                                      456       17 c31832b05087624c
 google-calendar/types.rs                                  65472     1002 d25796f627e27a14
 google-drive/REQUIRED_DEPS.toml                             528       13 d6f1ac00e2426e4d
-google-drive/client.rs                                   239711     6130 ae423d4cefa81b37
+google-drive/client.rs                                   205796     5218 2139f9310bee85a8
 google-drive/mod.rs                                         450       17 fdb9dcacd2e8d704
 google-drive/types.rs                                    128460     1946 75bee84db99d2863
 google-gmail/REQUIRED_DEPS.toml                             528       13 d6f1ac00e2426e4d
-google-gmail/client.rs                                   295347     7581 c85727584eb0395a
+google-gmail/client.rs                                   248342     6317 c5dc7907b0007a36
 google-gmail/mod.rs                                         450       17 ce127037493417e3
 google-gmail/types.rs                                     65481     1177 aef0efe2b930b0dd
 google-tasks/REQUIRED_DEPS.toml                             528       13 d6f1ac00e2426e4d
-google-tasks/client.rs                                    61311     1630 f28aecf83e56256d
+google-tasks/client.rs                                    52981     1406 da5c64dad022a6a6
 google-tasks/mod.rs                                         450       17 d25368315b206134
 google-tasks/types.rs                                     10259      190 27998c94ecf7453b
 google-youtube/REQUIRED_DEPS.toml                           528       13 d6f1ac00e2426e4d
-google-youtube/client.rs                                 345850     9196 a7721ff373c9636a
+google-youtube/client.rs                                 296465     7868 91d23dd666add243
 google-youtube/mod.rs                                       454       17 dc6e7f7cef938c3e
 google-youtube/types.rs                                  397395     9292 4b91fb45be6db00a
 grafana/REQUIRED_DEPS.toml                                  625       15 0e0871569054a9ee
-grafana/client.rs                                       1894803    48979 8f52fb0fea2fb7ba
+grafana/client.rs                                       1889448    48835 c2adcb06f2970421
 grafana/mod.rs                                              440       17 7b59b00331edb605
 grafana/types.rs                                         391878     9248 e82c5cd4fb60daf2
 groq/REQUIRED_DEPS.toml                                     630       15 7935666e65c0812e
@@ -151,7 +151,7 @@ microsoft-graph/client.rs                             110206174  2683008 7e63b3b
 microsoft-graph/mod.rs                                      456       17 b99d7781b4460b5d
 microsoft-graph/types.rs                               15241507   390543 ee7db4cd80762807
 modern-treasury/REQUIRED_DEPS.toml                          746       17 7f467fcbfe949464
-modern-treasury/client.rs                                968508    26001 10421b2b792da46b
+modern-treasury/client.rs                                967318    25969 cbf7ba8543f72600
 modern-treasury/mod.rs                                      456       17 5f336a50419a709b
 modern-treasury/types.rs                                1005013    26859 4617c87b9896c411
 openai/REQUIRED_DEPS.toml                                   648       15 a3db003e7f3781e2
@@ -163,7 +163,7 @@ opencode/client.rs                                       955931    25401 2b4aa34
 opencode/mod.rs                                             442       17 98c109eb94b95dbf
 opencode/types.rs                                       6820664   146287 4e38f9d8cbd1024e
 pagerduty/REQUIRED_DEPS.toml                                672       16 9e666f39c7301c02
-pagerduty/client.rs                                     2168498    58187 0a0bf3f7f6db74a0
+pagerduty/client.rs                                     2167903    58171 53f435e807dfb488
 pagerduty/mod.rs                                            444       17 2edbc04dfe892a50
 pagerduty/types.rs                                      2058127    49376 e7800d4fc1435ac1
 perplexity/REQUIRED_DEPS.toml                               623       15 86a1a17387cf7108
@@ -187,7 +187,7 @@ sentry/client.rs                                        1005589    25966 318b70d
 sentry/mod.rs                                               438       17 2bdd2d5164ca444f
 sentry/types.rs                                         2425940    67408 f2618f6b9437854c
 snyk/REQUIRED_DEPS.toml                                     688       17 9c8fe0ad1f161983
-snyk/client.rs                                          1922666    49718 913f84dd9317341b
+snyk/client.rs                                          1920881    49670 52280bdb9d20b478
 snyk/mod.rs                                                 434       17 eec62ea6f01f40f6
 snyk/types.rs                                           2776003    60800 f50e5cc2d997c5c4
 spotify/REQUIRED_DEPS.toml                                  579       14 9277be96334b3809
@@ -195,7 +195,7 @@ spotify/client.rs                                        563501    14797 7303567
 spotify/mod.rs                                              440       17 954184fb7fd84586
 spotify/types.rs                                         261914     6374 ec3db89e1975c7b0
 storyden/REQUIRED_DEPS.toml                                 698       17 569479aa8197c912
-storyden/client.rs                                      1045134    27440 65f9830f12e661a3
+storyden/client.rs                                      1044539    27424 0447be958242564e
 storyden/mod.rs                                             442       17 ff7a510276d50e59
 storyden/types.rs                                        887093    20176 96f969322e485cda
 stripe/REQUIRED_DEPS.toml                                   601       15 de8d722a8a5cb828
@@ -215,11 +215,11 @@ terminal-shop/client.rs                                  208120     5561 e896ba1
 terminal-shop/mod.rs                                        452       17 7014abd4e66e4e4e
 terminal-shop/types.rs                                    62233     1872 5c0e2ce07125c290
 together/REQUIRED_DEPS.toml                                 762       18 2357560c3a71c3c6
-together/client.rs                                       574825    15055 4c5ce8caed48692f
+together/client.rs                                       573040    15007 d7927f0627e293a8
 together/mod.rs                                             442       17 69fe71a3ff6db06e
 together/types.rs                                        682848    17401 7f831820a1cb4aae
 twilio/REQUIRED_DEPS.toml                                   650       16 79c204ac31d0efe3
-twilio/client.rs                                         844086    22156 b1ce00b1b35715a7
+twilio/client.rs                                         843491    22140 f07d9150ddcc0136
 twilio/mod.rs                                               438       17 1e85ee5c08c46793
 twilio/types.rs                                          895681    20820 37d493aaebf60a09
 val-town/REQUIRED_DEPS.toml                                 720       17 4d0f659a2898dcf4
@@ -227,7 +227,7 @@ val-town/client.rs                                       177233     4682 73f4a3a
 val-town/mod.rs                                             442       17 8a07cd572c0c8638
 val-town/types.rs                                         68086     1978 78ac613c49efff35
 vercel/REQUIRED_DEPS.toml                                   673       16 b888661e2699f921
-vercel/client.rs                                        1511136    39678 124586336afef632
+vercel/client.rs                                        1510541    39662 0e5d00af7d23bb67
 vercel/mod.rs                                               438       17 6e4cb11d3c843a23
 vercel/types.rs                                        15047218   383523 325ce33d9e507225
 writer/REQUIRED_DEPS.toml                                   720       17 4d0f659a2898dcf4
@@ -235,4 +235,4 @@ writer/client.rs                                         190577     4990 9b2d6e5
 writer/mod.rs                                               438       17 0435bf1552e493d1
 writer/types.rs                                          198394     4888 800dd8afe5798530
 #
-# specs: 56   files: 224   bytes: 331094328
+# specs: 56   files: 224   bytes: 330890838
