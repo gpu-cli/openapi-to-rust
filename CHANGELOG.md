@@ -6,6 +6,13 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- An operation that declares no 2xx response no longer generates a second
+  `else if status.is_success()` branch after its success guard, which is
+  `status.is_success()` itself. The branch couldn't be reached, and clippy's
+  deny-by-default `ifs_same_cond` rejected the generated client (#89).
+
 ## [0.19.0] - 2026-09-26
 
 ### Added
