@@ -3830,6 +3830,10 @@ impl CodeGenerator {
         } else {
             success.statuses.join(", ")
         };
+        // With no 2xx status declared, the success guard is
+        // `status.is_success()` itself, so no successful status can reach the
+        // branch that rejects unexpected ones.
+        let rejects_unexpected_success = !success.statuses.is_empty();
 
         let success_branch = match success_body {
             ClientSuccessBody::Json(_) => quote! {
@@ -3878,14 +3882,8 @@ impl CodeGenerator {
             } else {
                 quote! { response.bytes_stream() }
             };
-            return quote! {
-                let status = response.status();
-                let status_code = status.as_u16();
-                let headers = response.headers().clone();
-
-                if #success_status_guard {
-                    Ok(#stream)
-                } else {
+            let reject_unexpected_success = if rejects_unexpected_success {
+                quote! {
                     if status.is_success() {
                         return Err(ApiOpError::Api(ApiError {
                             status: status_code,
@@ -3900,6 +3898,19 @@ impl CodeGenerator {
                             )),
                         }));
                     }
+                }
+            } else {
+                quote! {}
+            };
+            return quote! {
+                let status = response.status();
+                let status_code = status.as_u16();
+                let headers = response.headers().clone();
+
+                if #success_status_guard {
+                    Ok(#stream)
+                } else {
+                    #reject_unexpected_success
                     let body_bytes = __read_bounded_response_body(
                         response,
                         self.max_response_body_bytes,
@@ -3922,20 +3933,8 @@ impl CodeGenerator {
         }
 
         if matches!(success_body, ClientSuccessBody::Binary) {
-            return quote! {
-                let status = response.status();
-                let status_code = status.as_u16();
-                let headers = response.headers().clone();
-
-                let body_bytes = __read_bounded_response_body(
-                    response,
-                    self.max_response_body_bytes,
-                ).await?;
-                if #success_status_guard {
-                    Ok(bytes::Bytes::from(body_bytes))
-                } else {
-                    let raw_body = body_bytes;
-                    let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+            let reject_unexpected_success = if rejects_unexpected_success {
+                quote! {
                     if status.is_success() {
                         return Err(ApiOpError::Api(ApiError {
                             status: status_code,
@@ -3950,6 +3949,25 @@ impl CodeGenerator {
                             )),
                         }));
                     }
+                }
+            } else {
+                quote! {}
+            };
+            return quote! {
+                let status = response.status();
+                let status_code = status.as_u16();
+                let headers = response.headers().clone();
+
+                let body_bytes = __read_bounded_response_body(
+                    response,
+                    self.max_response_body_bytes,
+                ).await?;
+                if #success_status_guard {
+                    Ok(bytes::Bytes::from(body_bytes))
+                } else {
+                    let raw_body = body_bytes;
+                    let body_text = String::from_utf8_lossy(&raw_body).into_owned();
+                    #reject_unexpected_success
                     let typed: Option<#op_error_type>;
                     let parse_error: Option<String>;
                     #error_match_arms
@@ -3965,6 +3983,27 @@ impl CodeGenerator {
             };
         }
 
+        let reject_unexpected_success = if rejects_unexpected_success {
+            quote! {
+                else if status.is_success() {
+                    Err(ApiOpError::Api(ApiError {
+                        status: status_code,
+                        headers,
+                        body: body_text,
+                        raw_body,
+                        typed: None,
+                        parse_error: Some(format!(
+                            "unexpected successful status {}; generated return type selects `{}`",
+                            status_code,
+                            #selected_status,
+                        )),
+                    }))
+                }
+            }
+        } else {
+            quote! {}
+        };
+
         quote! {
             let status = response.status();
             let status_code = status.as_u16();
@@ -3978,20 +4017,7 @@ impl CodeGenerator {
 
             if #success_status_guard {
                 #success_branch
-            } else if status.is_success() {
-                Err(ApiOpError::Api(ApiError {
-                    status: status_code,
-                    headers,
-                    body: body_text,
-                    raw_body,
-                    typed: None,
-                    parse_error: Some(format!(
-                        "unexpected successful status {}; generated return type selects `{}`",
-                        status_code,
-                        #selected_status,
-                    )),
-                }))
-            } else {
+            } #reject_unexpected_success else {
                 let typed: Option<#op_error_type>;
                 let parse_error: Option<String>;
                 #error_match_arms

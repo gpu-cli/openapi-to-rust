@@ -373,6 +373,87 @@ fn a_union_that_only_alternates_requiredness_is_the_object_it_describes() {
 }
 
 #[test]
+fn requiredness_branches_that_restate_type_object_are_still_only_requiredness() {
+    // Cloudflare's Email Sending: "at least one of to or cc, and at least one
+    // of text or html". Each branch also says `type: object`, which only
+    // restates what having required properties means, so the two unions are
+    // constraints on one object, not two variants it can't be both of.
+    assert_types(
+        spec_with_schemas(json!({
+            "Email": {
+                "type": "object",
+                "required": ["from"],
+                "properties": {
+                    "from": { "type": "string" },
+                    "to": { "type": "string" },
+                    "cc": { "type": "string" },
+                    "text": { "type": "string" },
+                    "html": { "type": "string" }
+                },
+                "allOf": [
+                    { "anyOf": [
+                        { "type": "object", "required": ["to"] },
+                        { "type": "object", "required": ["cc"] }
+                    ]},
+                    { "anyOf": [
+                        { "type": "object", "required": ["text"] },
+                        { "type": "object", "required": ["html"] }
+                    ]}
+                ]
+            }
+        })),
+        &[
+            "pub struct Email",
+            "pub from: String",
+            "pub to: Option<String>",
+            "pub html: Option<String>",
+        ],
+    );
+}
+
+#[test]
+fn a_requiredness_union_beside_a_real_union_leaves_that_union_the_variant() {
+    // Cloudflare's Magic WAN: an app is an account app or a managed app, and
+    // sets breakout, priority or both. Only the first is a variant.
+    let generated = generate(spec_with_schemas(json!({
+        "AppConfig": {
+            "type": "object",
+            "allOf": [
+                { "oneOf": [
+                    { "type": "object", "required": ["account_app_id"],
+                      "properties": { "account_app_id": { "type": "string" } } },
+                    { "type": "object", "required": ["managed_app_id"],
+                      "properties": { "managed_app_id": { "type": "string" } } }
+                ]},
+                { "anyOf": [
+                    { "type": "object", "required": ["breakout"] },
+                    { "type": "object", "required": ["priority"] }
+                ]},
+                { "type": "object", "properties": {
+                    "breakout": { "type": "boolean" },
+                    "priority": { "type": "integer" }
+                }}
+            ]
+        }
+    })));
+    for want in [
+        "pub struct AppConfig",
+        "pub breakout: Option<bool>",
+        "pub priority: Option<i64>",
+        "pub variant: AppConfigAllOfVariant1",
+    ] {
+        assert!(
+            generated.contains(want),
+            "expected `{want}` in generated output:\n{generated}"
+        );
+    }
+    assert!(
+        !generated.contains("AppConfigAllOfVariant2"),
+        "the requiredness union is not a variant:\n{generated}"
+    );
+}
+
+#[test]
 fn union_branches_that_are_deep_pointers_are_expanded() {
     // A component-root prefix must not make these look like two references to
     // the whole `CacheData` schema. Each pointer names one union member.
