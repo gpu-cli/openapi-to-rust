@@ -1353,6 +1353,14 @@ impl CodeGenerator {
         } else {
             quote! { self.client.#flat_method(#(#call_arguments),*).await }
         };
+        // The entry point is deprecated with its operation. `send` calls the
+        // deprecated method on the caller's behalf, who was warned at the entry.
+        let deprecated = Self::deprecated_attribute(operation);
+        let allow_deprecated = if operation.deprecated {
+            quote! { #[allow(deprecated)] }
+        } else {
+            TokenStream::new()
+        };
         let definition = quote! {
             #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
             #[must_use]
@@ -1364,6 +1372,7 @@ impl CodeGenerator {
                 #(#setters)*
 
                 /// Send the request through the existing flat operation method.
+                #allow_deprecated
                 pub async fn send(self) -> Result<#response_type, ApiOpError<#error_type>> {
                     #send
                 }
@@ -1371,6 +1380,7 @@ impl CodeGenerator {
         };
         let entry = quote! {
             #[doc = concat!("Start an additive builder for `", #operation_id, "`.")]
+            #deprecated
             pub fn #entry_ident(
                 &self,
                 #(#entry_parameters),*
@@ -1984,11 +1994,14 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        let deprecated = Self::deprecated_attribute(op);
+
         quote! {
             #doc_comment
             #variant_doc
             #filename_doc
             #stream_doc
+            #deprecated
             pub async fn #method_name #generics(
                 &self,
                 #request_param
@@ -2776,9 +2789,19 @@ impl CodeGenerator {
         }
     }
 
+    /// `#[deprecated]` for an operation the document marks `deprecated: true`,
+    /// so calling any of its client methods warns.
+    fn deprecated_attribute(op: &OperationInfo) -> TokenStream {
+        if op.deprecated {
+            quote! { #[deprecated] }
+        } else {
+            TokenStream::new()
+        }
+    }
+
     /// Generate the rustdoc block for an operation, surfacing summary,
     /// description, the HTTP method+path, and any tags from the OAS spec
-    /// (T13). Also marks the method `#[deprecated]` if the operation is.
+    /// (T13). `deprecated_attribute` marks the method `#[deprecated]`.
     fn generate_operation_doc_comment(&self, op: &OperationInfo) -> TokenStream {
         let method = op.method.to_uppercase();
         let path = &op.path;
