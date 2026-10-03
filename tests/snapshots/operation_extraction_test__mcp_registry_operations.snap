@@ -16,6 +16,7 @@ getV0Servers:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false
 getV0ServersServerId:
   operation_id: getV0ServersServerId
   method: GET
@@ -37,3 +38,4 @@ getV0ServersServerId:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false

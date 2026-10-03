@@ -945,6 +945,9 @@ pub struct OperationInfo {
     /// Used by the server codegen selector grammar (e.g. `tag:Chat`)
     /// and by `openapi-to-rust server list` for grouping.
     pub tags: Vec<String>,
+    /// `deprecated: true`: consumers SHOULD refrain from calling it, so its
+    /// client methods are `#[deprecated]`.
+    pub deprecated: bool,
 }
 
 /// Content type and schema for a request body
@@ -968,6 +971,11 @@ pub enum RequestBodyContent {
         media_type: String,
         #[serde(skip)]
         validation_schema: Value,
+        /// Each field's `encoding.<field>.contentType`, as written. It can
+        /// list several media types, which is a set of allowed ones rather
+        /// than the type of the part.
+        #[serde(skip)]
+        encoding: BTreeMap<String, String>,
     },
     OctetStream {
         media_type: String,
@@ -7839,6 +7847,7 @@ impl SchemaAnalyzer {
             supports_streaming: false, // Will be determined by StreamingConfig, not spec
             stream_parameter: None,    // Will be determined by StreamingConfig, not spec
             tags: operation.tags.clone().unwrap_or_default(),
+            deprecated: operation.deprecated.unwrap_or(false),
         };
         let mut operation_responses = BTreeMap::new();
 
@@ -7902,12 +7911,24 @@ impl SchemaAnalyzer {
                                     serde_json::to_value(schema)
                                         .map_err(GeneratorError::ParseError)?,
                                 );
+                            let encoding = request_body
+                                .content
+                                .as_ref()
+                                .and_then(|content| content.get(content_type))
+                                .and_then(|media_type| media_type.encoding.as_ref())
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|(field, encoding)| {
+                                    Some((field.clone(), encoding.content_type.clone()?))
+                                })
+                                .collect();
                             Some(
                                 self.resolve_or_inline_schema(schema, operation_id, "Request")
                                     .map(|schema_name| RequestBodyContent::Multipart {
                                         schema_name,
                                         media_type: content_type.to_string(),
                                         validation_schema,
+                                        encoding,
                                     })?,
                             )
                         }

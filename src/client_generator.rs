@@ -177,6 +177,8 @@ enum MultipartClientFieldKind {
     Base64,
     Base64UrlUnpadded,
     Text,
+    /// An object, or a union of them, sent as one JSON part.
+    Json,
 }
 
 #[derive(Clone, Copy)]
@@ -1351,6 +1353,14 @@ impl CodeGenerator {
         } else {
             quote! { self.client.#flat_method(#(#call_arguments),*).await }
         };
+        // The entry point is deprecated with its operation. `send` calls the
+        // deprecated method on the caller's behalf, who was warned at the entry.
+        let deprecated = Self::deprecated_attribute(operation);
+        let allow_deprecated = if operation.deprecated {
+            quote! { #[allow(deprecated)] }
+        } else {
+            TokenStream::new()
+        };
         let definition = quote! {
             #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
             #[must_use]
@@ -1362,6 +1372,7 @@ impl CodeGenerator {
                 #(#setters)*
 
                 /// Send the request through the existing flat operation method.
+                #allow_deprecated
                 pub async fn send(self) -> Result<#response_type, ApiOpError<#error_type>> {
                     #send
                 }
@@ -1369,6 +1380,7 @@ impl CodeGenerator {
         };
         let entry = quote! {
             #[doc = concat!("Start an additive builder for `", #operation_id, "`.")]
+            #deprecated
             pub fn #entry_ident(
                 &self,
                 #(#entry_parameters),*
@@ -1736,9 +1748,8 @@ impl CodeGenerator {
 
         // Dedupe variant names. Real-world specs use sort enums like
         // `["created_at", "-created_at"]` (descending prefix), and both
-        // PascalCase to `CreatedAt`. Suffix collisions with `_2`/`_3`/…
-        // while keeping each `serde(rename)` pointing at the original
-        // wire string.
+        // PascalCase to `CreatedAt`. Number collisions `CreatedAt2`, … while
+        // keeping each `serde(rename)` pointing at the original wire string.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         // `x-enum-varnames` wins over the naming heuristic when the spec
         // supplies it — the whole point of the extension is that the author
@@ -1760,7 +1771,7 @@ impl CodeGenerator {
                 let mut chosen = base.clone();
                 let mut suffix = 2;
                 while !used.insert(chosen.clone()) {
-                    chosen = format!("{base}_{suffix}");
+                    chosen = crate::generator::numbered_variant_name(&base, suffix);
                     suffix += 1;
                 }
                 chosen
@@ -1983,11 +1994,14 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        let deprecated = Self::deprecated_attribute(op);
+
         quote! {
             #doc_comment
             #variant_doc
             #filename_doc
             #stream_doc
+            #deprecated
             pub async fn #method_name #generics(
                 &self,
                 #request_param
@@ -2775,9 +2789,19 @@ impl CodeGenerator {
         }
     }
 
+    /// `#[deprecated]` for an operation the document marks `deprecated: true`,
+    /// so calling any of its client methods warns.
+    fn deprecated_attribute(op: &OperationInfo) -> TokenStream {
+        if op.deprecated {
+            quote! { #[deprecated] }
+        } else {
+            TokenStream::new()
+        }
+    }
+
     /// Generate the rustdoc block for an operation, surfacing summary,
     /// description, the HTTP method+path, and any tags from the OAS spec
-    /// (T13). Also marks the method `#[deprecated]` if the operation is.
+    /// (T13). `deprecated_attribute` marks the method `#[deprecated]`.
     fn generate_operation_doc_comment(&self, op: &OperationInfo) -> TokenStream {
         let method = op.method.to_uppercase();
         let path = &op.path;
@@ -3089,6 +3113,18 @@ impl CodeGenerator {
             | crate::analysis::SchemaType::ExtensibleEnum { .. } => {
                 Some(MultipartClientFieldKind::Text)
             }
+            // OpenAPI's default `contentType` for an object is
+            // `application/json`. Arrays are left out: their default depends
+            // on the items, and each item is a part of its own.
+            crate::analysis::SchemaType::Object { .. }
+            | crate::analysis::SchemaType::DiscriminatedUnion { .. }
+            | crate::analysis::SchemaType::Union { .. }
+            | crate::analysis::SchemaType::Composition { .. }
+            | crate::analysis::SchemaType::Untyped {
+                shape:
+                    crate::analysis::UntypedShape::Value | crate::analysis::UntypedShape::ValueMap,
+                ..
+            } => Some(MultipartClientFieldKind::Json),
             crate::analysis::SchemaType::Reference { target } => {
                 if !visited.insert(target.clone()) {
                     return None;
@@ -3251,10 +3287,21 @@ impl CodeGenerator {
         }
     }
 
+    /// The media type a multipart `encoding.<field>.contentType` gives its
+    /// part, when it names exactly one. A comma-separated list or a range
+    /// such as `image/*` only says what the server accepts.
+    fn single_media_type(content_type: &str) -> Option<&str> {
+        let content_type = content_type.trim();
+        let essence = content_type.split(';').next().unwrap_or_default();
+        (!content_type.contains(',') && !essence.contains('*') && essence.contains('/'))
+            .then_some(content_type)
+    }
+
     fn generate_typed_multipart_form(
         &self,
         schema_name: &str,
         validation_schema: &serde_json::Value,
+        encoding: &BTreeMap<String, String>,
         analysis: &SchemaAnalysis,
         filenames: Option<&syn::Ident>,
     ) -> TokenStream {
@@ -3353,39 +3400,82 @@ impl CodeGenerator {
                     return Err(HttpError::Config(#message.to_string()).into());
                 };
             };
-            let filename_assignment = filenames.map(|filenames| quote! {
-                if let Some((_, filename)) = #filenames.iter().find(|(key, _)| *key == #wire_name) {
-                    part = part.file_name((*filename).to_string());
+            // A single media type in `encoding.<field>.contentType` is the
+            // part's type, whatever the field holds. Several of them are the
+            // set the server accepts, so none is picked.
+            let content_type = encoding
+                .get(wire_name)
+                .and_then(|content_type| Self::single_media_type(content_type))
+                .or(matches!(kind, MultipartClientFieldKind::Json).then_some("application/json"));
+            let filename_assignment = filenames
+                .filter(|_| wire_format == Some("binary"))
+                .map(|filenames| quote! {
+                    if let Some((_, filename)) = #filenames.iter().find(|(key, _)| *key == #wire_name) {
+                        part = part.file_name((*filename).to_string());
+                    }
+                });
+            // The shorthand for a part that needs neither a filename nor a
+            // content type. An object always has a content type.
+            let shorthand = match kind {
+                MultipartClientFieldKind::RawBytes => Some(quote! {
+                    form = form.part(#wire_name, reqwest::multipart::Part::bytes(value.to_vec()));
+                }),
+                MultipartClientFieldKind::Base64 => Some(quote! {
+                    use base64::Engine as _;
+                    form = form.text(#wire_name, base64::engine::general_purpose::STANDARD.encode(value));
+                }),
+                MultipartClientFieldKind::Base64UrlUnpadded => Some(quote! {
+                    use base64::Engine as _;
+                    form = form.text(#wire_name, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value));
+                }),
+                MultipartClientFieldKind::Text => {
+                    Some(quote! { form = form.text(#wire_name, value.to_string()); })
                 }
-            }).unwrap_or_default();
-            let add_value = if wire_format == Some("binary") && filenames.is_some() {
+                MultipartClientFieldKind::Json => None,
+            }
+            .filter(|_| content_type.is_none() && filename_assignment.is_none());
+            let add_value = if let Some(shorthand) = shorthand {
+                shorthand
+            } else {
                 let part = match kind {
                     MultipartClientFieldKind::RawBytes => {
                         quote! { reqwest::multipart::Part::bytes(value.to_vec()) }
                     }
-                    _ => quote! { reqwest::multipart::Part::text(value.to_string()) },
-                };
-                quote! {
-                    let mut part = #part;
-                    #filename_assignment
-                    form = form.part(#wire_name, part);
-                }
-            } else {
-                match kind {
-                    MultipartClientFieldKind::RawBytes => quote! {
-                        form = form.part(#wire_name, reqwest::multipart::Part::bytes(value.to_vec()));
-                    },
-                    MultipartClientFieldKind::Base64 => quote! {
+                    MultipartClientFieldKind::Base64 => quote! { {
                         use base64::Engine as _;
-                        form = form.text(#wire_name, base64::engine::general_purpose::STANDARD.encode(value));
-                    },
-                    MultipartClientFieldKind::Base64UrlUnpadded => quote! {
+                        reqwest::multipart::Part::text(base64::engine::general_purpose::STANDARD.encode(value))
+                    } },
+                    MultipartClientFieldKind::Base64UrlUnpadded => quote! { {
                         use base64::Engine as _;
-                        form = form.text(#wire_name, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value));
-                    },
+                        reqwest::multipart::Part::text(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value))
+                    } },
                     MultipartClientFieldKind::Text => {
-                        quote! { form = form.text(#wire_name, value.to_string()); }
+                        quote! { reqwest::multipart::Part::text(value.to_string()) }
                     }
+                    MultipartClientFieldKind::Json => quote! {
+                        reqwest::multipart::Part::bytes(serde_json::to_vec(value).map_err(HttpError::serialization_error)?)
+                    },
+                };
+                let binding = if filename_assignment.is_some() {
+                    quote! { let mut part }
+                } else {
+                    quote! { let part }
+                };
+                let content_type = content_type.map(|content_type| {
+                    let message = format!(
+                        "multipart field `{wire_name}` has an invalid content type `{content_type}`"
+                    );
+                    quote! {
+                        let part = part
+                            .mime_str(#content_type)
+                            .map_err(|error| HttpError::Config(format!("{}: {}", #message, error)))?;
+                    }
+                });
+                quote! {
+                    #binding = #part;
+                    #filename_assignment
+                    #content_type
+                    form = form.part(#wire_name, part);
                 }
             };
             parts.push(if is_tri_state {
@@ -3461,12 +3551,14 @@ impl CodeGenerator {
             RequestBodyContent::Multipart {
                 schema_name,
                 validation_schema,
+                encoding,
                 ..
             } => (
                 quote! { request },
                 self.generate_typed_multipart_form(
                     schema_name,
                     validation_schema,
+                    encoding,
                     analysis,
                     filenames,
                 ),
