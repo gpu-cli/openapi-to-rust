@@ -304,24 +304,30 @@ fixed-length body crosses the limit, the call returns
 exceed it. Successful SSE responses remain streaming; only SSE error responses
 are buffered under the same cap.
 
-### Multipart filenames
+### Multipart files
 
-Typed multipart operations with binary fields also expose an additive filename
-method. Overrides belong to each call and use OpenAPI wire field names:
+A file field of a typed multipart body (`format: binary`, or a union of text
+and bytes) is a `MultipartFile`: the part's content, in the `types.binary`
+carrier, with the filename and content type to send it under. It converts from
+its content, so a plain value sends a part with neither:
 
 ```rust
-client.create_upload_with_multipart_filenames(
-    request,
-    &[("document", "report.pdf"), ("attachment", "notes.txt")],
-).await?;
+let request = CreateUploadRequest {
+    document: MultipartFile::from(pdf_bytes)
+        .with_file_name("report.pdf")
+        .with_content_type("application/pdf"),
+    attachment: Some(notes.into()),
+    ..
+};
+client.create_upload(request).await?;
 ```
 
-The original `create_upload(request)` method keeps its existing wire behavior.
-Unspecified filenames and absent optional fields stay unchanged. Unknown fields,
-non-binary fields, and duplicate override keys return a configuration error.
-Filenames work with byte and conservative string binary mappings. When an
-operation builder is generated, its `multipart_filenames(&[("document", "report.pdf")])`
-setter stores an independent copy of the overrides for that request.
+A file's own content type wins over a single media type declared in
+`encoding.<field>.contentType`, which applies otherwise. A list of declared
+types, or a range such as `image/*`, sets none. An array field is one part per
+item under the field's name, so `Vec<MultipartFile>` sends several files, each
+with its own filename. An object field is one JSON part, typed
+`application/json` unless `encoding` names another type.
 
 ### Response representations and live downloads
 
@@ -385,7 +391,8 @@ pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
 pub url: url::Url,
 pub callback_url: Option<url::Url>,
 
-// format: binary (multipart) → bytes::Bytes
+// format: binary → bytes::Bytes (a multipart file field is a
+// `MultipartFile` holding it, with its filename and content type)
 Binary(bytes::Bytes),
 
 // format: uuid → uuid::Uuid

@@ -389,11 +389,9 @@ impl<'a> ServerCodegen<'a> {
                     property.get("type").and_then(serde_json::Value::as_str),
                     property.get("format").and_then(serde_json::Value::as_str),
                 ) {
-                    (Some("string"), Some("binary")) => match self.config.types.binary {
-                        crate::type_mapping::BinaryStrategy::String => MultipartFieldKind::String,
-                        crate::type_mapping::BinaryStrategy::Bytes
-                        | crate::type_mapping::BinaryStrategy::VecU8 => MultipartFieldKind::Binary,
-                    },
+                    // A file part, a `MultipartFile` in the model whatever the
+                    // binary strategy, so its filename and content type survive.
+                    (Some("string"), Some("binary")) => MultipartFieldKind::Binary,
                     (Some("string"), _) => MultipartFieldKind::String,
                     (Some("integer"), Some("uint32" | "uint64" | "uint"))
                         if self.config.types.unsigned =>
@@ -1943,39 +1941,26 @@ impl<'a> ServerCodegen<'a> {
                     let field_ident = &plan.field_ident;
                     let slot = format_ident!("__multipart_binary_{}", field_ident);
                     binary_locals.push(quote! {
-                        let mut #slot: ::std::option::Option<::bytes::Bytes> = None;
+                        let mut #slot: ::std::option::Option<super::super::types::MultipartFile> = None;
                     });
                     binary_validation_arms.push(quote! {
                         #wire_name => ::serde_json::Value::String(
-                            "x".repeat(#slot.as_ref().map_or(0, ::bytes::Bytes::len))
+                            "x".repeat(#slot.as_ref().map_or(0, |file| file.content.len()))
                         ),
                     });
-                    binary_patches.push(match (self.config.types.binary, plan.required) {
-                        (crate::type_mapping::BinaryStrategy::Bytes, true) => quote! {
+                    binary_patches.push(if plan.required {
+                        quote! {
                             body.#field_ident = match #slot {
-                                Some(bytes) => bytes,
+                                Some(file) => file,
                                 None => return ::axum::response::IntoResponse::into_response(
                                     (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "missing required multipart field")
                                 ),
                             };
-                        },
-                        (crate::type_mapping::BinaryStrategy::Bytes, false) => quote! {
+                        }
+                    } else {
+                        quote! {
                             body.#field_ident = #slot;
-                        },
-                        (crate::type_mapping::BinaryStrategy::VecU8, true) => quote! {
-                            body.#field_ident = match #slot {
-                                Some(bytes) => bytes.to_vec(),
-                                None => return ::axum::response::IntoResponse::into_response(
-                                    (::axum::http::StatusCode::UNPROCESSABLE_ENTITY, "missing required multipart field")
-                                ),
-                            };
-                        },
-                        (crate::type_mapping::BinaryStrategy::VecU8, false) => quote! {
-                            body.#field_ident = #slot.map(|bytes| bytes.to_vec());
-                        },
-                        (crate::type_mapping::BinaryStrategy::String, _) => unreachable!(
-                            "string-backed binary fields must use multipart text extraction"
-                        ),
+                        }
                     });
                 }
                 let mut field_arms = Vec::new();
@@ -1983,16 +1968,39 @@ impl<'a> ServerCodegen<'a> {
                     let wire_name = plan.wire_name;
                     let binary_slot = format_ident!("__multipart_binary_{}", plan.field_ident);
                     let decode = match plan.kind {
-                        MultipartFieldKind::Binary => quote! {
-                            let bytes = match field.bytes().await {
-                                Ok(bytes) => bytes,
-                                Err(_) => return ::axum::response::IntoResponse::into_response(
-                                    (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart field")
-                                ),
+                        MultipartFieldKind::Binary => {
+                            let content = match self.config.types.binary {
+                                crate::type_mapping::BinaryStrategy::Bytes => quote! { bytes },
+                                crate::type_mapping::BinaryStrategy::VecU8 => {
+                                    quote! { bytes.to_vec() }
+                                }
+                                crate::type_mapping::BinaryStrategy::String => quote! {
+                                    match ::std::string::String::from_utf8(bytes.to_vec()) {
+                                        Ok(text) => text,
+                                        Err(_) => return ::axum::response::IntoResponse::into_response(
+                                            (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart text field")
+                                        ),
+                                    }
+                                },
                             };
-                            #binary_slot = Some(bytes);
-                            ::serde_json::Value::Array(Vec::new())
-                        },
+                            quote! {
+                                let file_name = field.file_name().map(::std::string::ToString::to_string);
+                                let content_type = field.content_type().map(::std::string::ToString::to_string);
+                                let bytes = match field.bytes().await {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => return ::axum::response::IntoResponse::into_response(
+                                        (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart field")
+                                    ),
+                                };
+                                #binary_slot = Some(super::super::types::MultipartFile {
+                                    content: #content,
+                                    file_name,
+                                    content_type,
+                                });
+                                // A stand-in the model decodes; the file replaces it.
+                                ::serde_json::Value::String(::std::string::String::new())
+                            }
+                        }
                         MultipartFieldKind::String => quote! {
                             match field.text().await {
                                 Ok(text) => ::serde_json::Value::String(text),

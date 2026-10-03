@@ -208,8 +208,6 @@ pub(crate) struct ClientMethodPlan<'a> {
     pub response_type: TokenStream,
     pub error_type: TokenStream,
     pub response: ClientResponsePlan,
-    pub multipart_filenames: Option<syn::Ident>,
-    pub filenames_method_ident: Option<syn::Ident>,
     pub builder_method_ident: Option<syn::Ident>,
     pub builder_type_ident: Option<syn::Ident>,
     success: ClientSuccessSelection<'a>,
@@ -635,28 +633,8 @@ impl CodeGenerator {
                 method_ident.clone(),
                 success.clone(),
                 "buffered",
-                None,
                 false,
             ));
-            if !self.multipart_binary_fields(operation, analysis).is_empty() {
-                let base = format!("{method_ident}_with_multipart_filenames");
-                let name = Self::allocate_name(&base, &mut used);
-                let mut arguments: std::collections::HashSet<String> = self
-                    .allocated_operation_params(operation)
-                    .iter()
-                    .map(|p| p.ident.to_string())
-                    .collect();
-                arguments.extend(["request".to_string(), "body".to_string()]);
-                let filename_name = Self::allocate_name("multipart_filenames", &mut arguments);
-                plans.push(self.make_client_method_plan(
-                    operation,
-                    Self::to_field_ident(&name),
-                    success,
-                    "buffered",
-                    Some(Self::to_field_ident(&filename_name)),
-                    false,
-                ));
-            }
             let Some(responses) = analysis.operation_responses.get(&operation.operation_id) else {
                 continue;
             };
@@ -743,7 +721,6 @@ impl CodeGenerator {
                             Self::to_field_ident(&name),
                             selection.clone(),
                             "buffered",
-                            None,
                             true,
                         ));
                     }
@@ -761,7 +738,6 @@ impl CodeGenerator {
                             Self::to_field_ident(&name),
                             live_selection,
                             "binary_stream",
-                            None,
                             true,
                         );
                         plan.response.kind = "binary".to_string();
@@ -780,7 +756,6 @@ impl CodeGenerator {
                                 Self::to_field_ident(&name),
                                 selection,
                                 "parsed_sse",
-                                None,
                                 true,
                             ));
                         } else if !equivalent {
@@ -791,71 +766,12 @@ impl CodeGenerator {
                                 Self::to_field_ident(&name),
                                 selection,
                                 "raw_event_stream",
-                                None,
                                 true,
                             ));
                         }
                     }
                 }
             }
-        }
-        let response_count = plans.len();
-        for index in 0..response_count {
-            let plan = &plans[index];
-            if !plan.validate_content_type
-                || self
-                    .multipart_binary_fields(plan.operation, analysis)
-                    .is_empty()
-            {
-                continue;
-            }
-            let name = Self::allocate_name(
-                &format!("{}_with_multipart_filenames", plan.method_ident),
-                &mut used,
-            );
-            let mut arguments: std::collections::HashSet<String> = self
-                .allocated_operation_params(plan.operation)
-                .iter()
-                .map(|p| p.ident.to_string())
-                .collect();
-            arguments.extend(["request".to_string(), "body".to_string()]);
-            let argument = Self::allocate_name("multipart_filenames", &mut arguments);
-            let mut filename_plan = self.make_client_method_plan(
-                plan.operation,
-                Self::to_field_ident(&name),
-                plan.success.clone(),
-                &plan.response.consumption,
-                Some(Self::to_field_ident(&argument)),
-                true,
-            );
-            filename_plan.response.kind = plan.response.kind.clone();
-            plans.push(filename_plan);
-        }
-        let mut filename_plans: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        for (index, plan) in plans.iter().enumerate() {
-            if plan.multipart_filenames.is_some() {
-                filename_plans
-                    .entry(plan.operation.operation_id.as_str())
-                    .or_default()
-                    .push(index);
-            }
-        }
-        for index in 0..plans.len() {
-            if plans[index].multipart_filenames.is_some() {
-                continue;
-            }
-            let target = filename_plans
-                .get(plans[index].operation.operation_id.as_str())
-                .into_iter()
-                .flatten()
-                .map(|candidate| &plans[*candidate])
-                .find(|candidate| {
-                    candidate.response.statuses == plans[index].response.statuses
-                        && candidate.response.media_type == plans[index].response.media_type
-                        && candidate.response.consumption == plans[index].response.consumption
-                })
-                .map(|candidate| candidate.method_ident.clone());
-            plans[index].filenames_method_ident = target;
         }
         self.plan_operation_builders(analysis, &mut plans);
         plans
@@ -876,7 +792,6 @@ impl CodeGenerator {
         method_ident: syn::Ident,
         success: ClientSuccessSelection<'a>,
         consumption: &str,
-        multipart_filenames: Option<syn::Ident>,
         validate_content_type: bool,
     ) -> ClientMethodPlan<'a> {
         let precise_stream = matches!(success.body, ClientSuccessBody::EventStream);
@@ -891,15 +806,7 @@ impl CodeGenerator {
         } else {
             quote! { <#(#captures: AsRef<str>),*> }
         };
-        let request_parameters = if let Some(ident) = &multipart_filenames {
-            if request.is_empty() {
-                quote! { #ident: &[(&str, &str)] }
-            } else {
-                quote! { #request, #ident: &[(&str, &str)] }
-            }
-        } else {
-            request
-        };
+        let request_parameters = request;
         let response_type = if precise_stream {
             quote! { impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + 'static + use<#(#captures),*> }
         } else if consumption == "parsed_sse" {
@@ -939,8 +846,6 @@ impl CodeGenerator {
                 kind: kind.to_string(),
                 consumption: consumption.to_string(),
             },
-            multipart_filenames,
-            filenames_method_ident: None,
             builder_method_ident: None,
             builder_type_ident: None,
             success,
@@ -1296,63 +1201,10 @@ impl CodeGenerator {
             call_arguments.push(quote! { self.#body_ident });
         }
 
-        let mut filename_field = None;
-        if plan.multipart_filenames.is_some() || plan.filenames_method_ident.is_some() {
-            let mut used_fields: std::collections::HashSet<String> = allocated_params
-                .iter()
-                .map(|p| p.ident.to_string())
-                .collect();
-            used_fields.extend([
-                "request".to_string(),
-                "body".to_string(),
-                "client".to_string(),
-            ]);
-            let field = Self::to_field_ident(&Self::allocate_name(
-                "multipart_filenames",
-                &mut used_fields,
-            ));
-            fields.push(quote! { #field: Vec<(String, String)> });
-            initializers.push(quote! { #field: Vec::new() });
-            let setter = Self::allocate_builder_method("multipart_filenames", &mut used_methods);
-            setters.push(quote! {
-                /// Set request-local filenames by declared binary field wire name.
-                #[must_use]
-                pub fn #setter(mut self, filenames: &[(&str, &str)]) -> Self {
-                    self.#field = filenames.iter().map(|(key, value)| ((*key).to_string(), (*value).to_string())).collect();
-                    self
-                }
-            });
-            if plan.multipart_filenames.is_some() {
-                call_arguments.push(quote! { &self.#field.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect::<Vec<_>>() });
-            }
-            filename_field = Some(field);
-        }
         let response_type = self.response_type_for_body(plan.success.body);
         let error_type = &plan.error_type;
         let operation_id = &operation.operation_id;
-        let send = if let (Some(field), Some(method)) =
-            (&filename_field, &plan.filenames_method_ident)
-        {
-            if matches!(plan.success.body, ClientSuccessBody::EventStream) {
-                quote! {
-                    if self.#field.is_empty() { self.client.#flat_method(#(#call_arguments),*).await.map(futures_util::future::Either::Left) }
-                    else {
-                        let filenames: Vec<_> = self.#field.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
-                        self.client.#method(#(#call_arguments,)* &filenames).await.map(futures_util::future::Either::Right)
-                    }
-                }
-            } else {
-                quote! {
-                    if self.#field.is_empty() { self.client.#flat_method(#(#call_arguments),*).await }
-                    else {
-                        let filenames: Vec<_> = self.#field.iter().map(|(key, value)| (key.as_str(), value.as_str())).collect();
-                        self.client.#method(#(#call_arguments,)* &filenames).await
-                    }
-                }
-            }
-        } else {
-            quote! { self.client.#flat_method(#(#call_arguments),*).await }
-        };
+        let send = quote! { self.client.#flat_method(#(#call_arguments),*).await };
         let definition = quote! {
             #[doc = concat!("Additive request builder for `", #operation_id, "`.")]
             #[must_use]
@@ -1914,16 +1766,7 @@ impl CodeGenerator {
         let path = &op.path;
         let request_param = &plan.request_parameters;
         let generics = &plan.generics;
-        let request_body = self.generate_request_body_with_filenames(
-            op,
-            analysis,
-            plan.multipart_filenames.as_ref(),
-        );
-        let filename_validation = self.generate_multipart_filename_validation(
-            op,
-            analysis,
-            plan.multipart_filenames.as_ref(),
-        );
+        let request_body = self.generate_request_body(op, analysis);
         let query_params = self.generate_query_params(op);
         let header_params = self.generate_header_params(op);
         let cookie_params = self.generate_cookie_params(op);
@@ -1974,11 +1817,6 @@ impl CodeGenerator {
         } else {
             TokenStream::new()
         };
-        let filename_doc = if plan.multipart_filenames.is_some() {
-            quote! { #[doc = "Override filenames by binary field wire name for this request. Unknown or duplicate keys are configuration errors; absent fields stay absent."] }
-        } else {
-            TokenStream::new()
-        };
         let stream_doc = if plan.response.consumption == "binary_stream" {
             quote! { #[doc = "Success chunks are returned live without a total body-size limit. Error responses use the configured buffered body-size limit."] }
         } else {
@@ -1988,13 +1826,11 @@ impl CodeGenerator {
         quote! {
             #doc_comment
             #variant_doc
-            #filename_doc
             #stream_doc
             pub async fn #method_name #generics(
                 &self,
                 #request_param
             ) -> Result<#response_type, ApiOpError<#op_error_type>> {
-                #filename_validation
                 #url_construction
 
                 let mut req = #http_method_call;
@@ -3025,40 +2861,6 @@ impl CodeGenerator {
         param.schema_ref.is_none() && param.rust_type == "String"
     }
 
-    fn resolve_multipart_wire_schema<'a>(
-        schema: &'a serde_json::Value,
-        analysis: &'a SchemaAnalysis,
-        visited: &mut std::collections::HashSet<String>,
-    ) -> Option<&'a serde_json::Value> {
-        let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) else {
-            for keyword in ["anyOf", "oneOf"] {
-                if let Some(branches) = schema.get(keyword).and_then(serde_json::Value::as_array) {
-                    let concrete: Vec<_> = branches
-                        .iter()
-                        .filter(|branch| {
-                            branch.get("type").and_then(serde_json::Value::as_str) != Some("null")
-                        })
-                        .collect();
-                    if concrete.len() == 1 && concrete.len() < branches.len() {
-                        return Self::resolve_multipart_wire_schema(concrete[0], analysis, visited);
-                    }
-                }
-            }
-            if let Some(branches) = schema.get("allOf").and_then(serde_json::Value::as_array) {
-                if branches.len() == 1 {
-                    return Self::resolve_multipart_wire_schema(&branches[0], analysis, visited);
-                }
-            }
-            return Some(schema);
-        };
-        let name = reference.strip_prefix("#/components/schemas/")?;
-        if !visited.insert(name.to_string()) {
-            return None;
-        }
-        let resolved = analysis.validation_context.component_schemas.get(name)?;
-        Self::resolve_multipart_wire_schema(resolved, analysis, visited)
-    }
-
     fn multipart_client_field_kind(
         schema_type: &crate::analysis::SchemaType,
         analysis: &SchemaAnalysis,
@@ -3113,64 +2915,6 @@ impl CodeGenerator {
             }
             _ => None,
         }
-    }
-
-    fn multipart_binary_fields(
-        &self,
-        operation: &OperationInfo,
-        analysis: &SchemaAnalysis,
-    ) -> Vec<String> {
-        let Some(crate::analysis::RequestBodyContent::Multipart {
-            validation_schema, ..
-        }) = &operation.request_body
-        else {
-            return Vec::new();
-        };
-        let Some(schema) = Self::resolve_multipart_wire_schema(
-            validation_schema,
-            analysis,
-            &mut std::collections::HashSet::new(),
-        ) else {
-            return Vec::new();
-        };
-        schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-            .into_iter()
-            .flat_map(|p| p.iter())
-            .filter_map(|(name, schema)| {
-                let schema = Self::resolve_multipart_wire_schema(
-                    schema,
-                    analysis,
-                    &mut std::collections::HashSet::new(),
-                )?;
-                (schema.get("format").and_then(serde_json::Value::as_str) == Some("binary"))
-                    .then(|| name.clone())
-            })
-            .collect()
-    }
-
-    fn generate_multipart_filename_validation(
-        &self,
-        operation: &OperationInfo,
-        analysis: &SchemaAnalysis,
-        filenames: Option<&syn::Ident>,
-    ) -> TokenStream {
-        let Some(filenames) = filenames else {
-            return TokenStream::new();
-        };
-        let keys = self.multipart_binary_fields(operation, analysis);
-        quote! { {
-            let mut seen = std::collections::HashSet::new();
-            for &(key, _) in #filenames {
-                if ![#(#keys),*].contains(&key) {
-                    return Err(HttpError::Config(format!("multipart filename key `{}` is unknown or is not a binary field", key)).into());
-                }
-                if !seen.insert(key) {
-                    return Err(HttpError::Config(format!("duplicate multipart filename key `{}`", key)).into());
-                }
-            }
-        } }
     }
 
     fn generate_response_content_type_validation(
@@ -3265,6 +3009,39 @@ impl CodeGenerator {
         }
     }
 
+    /// The item type of a multipart field that is a list, directly or through
+    /// named types such as `type Extensions = Vec<Extension>`.
+    fn resolve_multipart_list<'a>(
+        schema_type: &'a crate::analysis::SchemaType,
+        analysis: &'a SchemaAnalysis,
+    ) -> Option<&'a crate::analysis::SchemaType> {
+        let mut current = schema_type;
+        let mut visited = std::collections::HashSet::new();
+        loop {
+            match current {
+                crate::analysis::SchemaType::Array { item_type } => return Some(item_type),
+                crate::analysis::SchemaType::Reference { target } if visited.insert(target) => {
+                    current = &analysis.schemas.get(target)?.schema_type;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether a multipart field holds a `MultipartFile`, the type the
+    /// analysis gives file parts.
+    fn is_multipart_file_type(schema_type: &crate::analysis::SchemaType) -> bool {
+        match schema_type {
+            crate::analysis::SchemaType::Primitive { rust_type, .. } => {
+                rust_type == crate::analysis::MULTIPART_FILE_TYPE
+            }
+            crate::analysis::SchemaType::Nullable { inner_type } => {
+                Self::is_multipart_file_type(inner_type)
+            }
+            _ => false,
+        }
+    }
+
     /// The media type a multipart `encoding.<field>.contentType` gives its
     /// part, when it names exactly one. A comma-separated list or a range
     /// such as `image/*` only says what the server accepts.
@@ -3278,10 +3055,8 @@ impl CodeGenerator {
     fn generate_typed_multipart_form(
         &self,
         schema_name: &str,
-        validation_schema: &serde_json::Value,
         encoding: &BTreeMap<String, String>,
         analysis: &SchemaAnalysis,
-        filenames: Option<&syn::Ident>,
     ) -> TokenStream {
         use crate::analysis::{ObjectAdditionalProperties, SchemaType};
 
@@ -3308,14 +3083,6 @@ impl CodeGenerator {
                 return Err(HttpError::Config(#message.to_string()).into());
             };
         };
-        let wire_schema = Self::resolve_multipart_wire_schema(
-            validation_schema,
-            analysis,
-            &mut std::collections::HashSet::new(),
-        );
-        let wire_properties = wire_schema
-            .and_then(|schema| schema.get("properties"))
-            .and_then(serde_json::Value::as_object);
         let fields = self.emitted_object_properties(
             resolved_name,
             properties,
@@ -3346,115 +3113,142 @@ impl CodeGenerator {
                 field.is_required,
             );
             let ident = field.ident;
-            let wire_format = wire_properties
-                .and_then(|properties| properties.get(wire_name))
-                .and_then(|schema| {
-                    Self::resolve_multipart_wire_schema(
-                        schema,
-                        analysis,
-                        &mut std::collections::HashSet::new(),
-                    )
-                })
-                .and_then(|schema| schema.get("format"))
-                .and_then(serde_json::Value::as_str);
-            let kind = if wire_format == Some("binary") {
-                match self.config().types.binary {
-                    crate::type_mapping::BinaryStrategy::String => MultipartClientFieldKind::Text,
-                    crate::type_mapping::BinaryStrategy::Bytes
-                    | crate::type_mapping::BinaryStrategy::VecU8 => {
-                        MultipartClientFieldKind::RawBytes
-                    }
-                }
-            } else if let Some(kind) = Self::multipart_client_field_kind(
-                &field.property.schema_type,
-                analysis,
-                &mut std::collections::HashSet::new(),
-            ) {
-                kind
-            } else {
-                let message =
-                    format!("multipart field `{wire_name}` must be binary or a scalar text field");
-                return quote! {
-                    return Err(HttpError::Config(#message.to_string()).into());
-                };
+            // A list is one part per item, under the field's name.
+            let field_type = match &field.property.schema_type {
+                crate::analysis::SchemaType::Nullable { inner_type } => &**inner_type,
+                other => other,
+            };
+            let (is_array, item_type) = match Self::resolve_multipart_list(field_type, analysis) {
+                Some(item_type) => (true, item_type),
+                None => (false, field_type),
             };
             // A single media type in `encoding.<field>.contentType` is the
             // part's type, whatever the field holds. Several of them are the
             // set the server accepts, so none is picked.
-            let content_type = encoding
+            let declared_content_type = encoding
                 .get(wire_name)
-                .and_then(|content_type| Self::single_media_type(content_type))
-                .or(matches!(kind, MultipartClientFieldKind::Json).then_some("application/json"));
-            let filename_assignment = filenames
-                .filter(|_| wire_format == Some("binary"))
-                .map(|filenames| quote! {
-                    if let Some((_, filename)) = #filenames.iter().find(|(key, _)| *key == #wire_name) {
-                        part = part.file_name((*filename).to_string());
+                .and_then(|content_type| Self::single_media_type(content_type));
+            let add_item = if Self::is_multipart_file_type(item_type) {
+                // A file's own content type wins over the declared one.
+                let part = match self.config().types.binary {
+                    crate::type_mapping::BinaryStrategy::Bytes => {
+                        quote! { reqwest::multipart::Part::bytes(value.content.to_vec()) }
                     }
-                });
-            // The shorthand for a part that needs neither a filename nor a
-            // content type. An object always has a content type.
-            let shorthand = match kind {
-                MultipartClientFieldKind::RawBytes => Some(quote! {
-                    form = form.part(#wire_name, reqwest::multipart::Part::bytes(value.to_vec()));
-                }),
-                MultipartClientFieldKind::Base64 => Some(quote! {
-                    use base64::Engine as _;
-                    form = form.text(#wire_name, base64::engine::general_purpose::STANDARD.encode(value));
-                }),
-                MultipartClientFieldKind::Base64UrlUnpadded => Some(quote! {
-                    use base64::Engine as _;
-                    form = form.text(#wire_name, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value));
-                }),
-                MultipartClientFieldKind::Text => {
-                    Some(quote! { form = form.text(#wire_name, value.to_string()); })
-                }
-                MultipartClientFieldKind::Json => None,
-            }
-            .filter(|_| content_type.is_none() && filename_assignment.is_none());
-            let add_value = if let Some(shorthand) = shorthand {
-                shorthand
-            } else {
-                let part = match kind {
-                    MultipartClientFieldKind::RawBytes => {
-                        quote! { reqwest::multipart::Part::bytes(value.to_vec()) }
+                    crate::type_mapping::BinaryStrategy::VecU8 => {
+                        quote! { reqwest::multipart::Part::bytes(value.content.clone()) }
                     }
-                    MultipartClientFieldKind::Base64 => quote! { {
-                        use base64::Engine as _;
-                        reqwest::multipart::Part::text(base64::engine::general_purpose::STANDARD.encode(value))
-                    } },
-                    MultipartClientFieldKind::Base64UrlUnpadded => quote! { {
-                        use base64::Engine as _;
-                        reqwest::multipart::Part::text(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value))
-                    } },
-                    MultipartClientFieldKind::Text => {
-                        quote! { reqwest::multipart::Part::text(value.to_string()) }
+                    crate::type_mapping::BinaryStrategy::String => {
+                        quote! { reqwest::multipart::Part::text(value.content.clone()) }
                     }
-                    MultipartClientFieldKind::Json => quote! {
-                        reqwest::multipart::Part::bytes(serde_json::to_vec(value).map_err(HttpError::serialization_error)?)
+                };
+                let invalid = format!("multipart field `{wire_name}` has an invalid content type");
+                let set_content_type = quote! {
+                    part = part.mime_str(content_type).map_err(|error| {
+                        HttpError::Config(format!("{} `{}`: {}", #invalid, content_type, error))
+                    })?;
+                };
+                let content_type = match declared_content_type {
+                    Some(declared) => quote! {
+                        let content_type = value.content_type.as_deref().unwrap_or(#declared);
+                        #set_content_type
+                    },
+                    None => quote! {
+                        if let Some(content_type) = value.content_type.as_deref() {
+                            #set_content_type
+                        }
                     },
                 };
-                let binding = if filename_assignment.is_some() {
-                    quote! { let mut part }
-                } else {
-                    quote! { let part }
-                };
-                let content_type = content_type.map(|content_type| {
-                    let message = format!(
-                        "multipart field `{wire_name}` has an invalid content type `{content_type}`"
-                    );
-                    quote! {
-                        let part = part
-                            .mime_str(#content_type)
-                            .map_err(|error| HttpError::Config(format!("{}: {}", #message, error)))?;
-                    }
-                });
                 quote! {
-                    #binding = #part;
-                    #filename_assignment
+                    let mut part = #part;
+                    if let Some(file_name) = &value.file_name {
+                        part = part.file_name(file_name.clone());
+                    }
                     #content_type
                     form = form.part(#wire_name, part);
                 }
+            } else {
+                let Some(kind) = Self::multipart_client_field_kind(
+                    item_type,
+                    analysis,
+                    &mut std::collections::HashSet::new(),
+                ) else {
+                    let message = format!(
+                        "multipart field `{wire_name}` must be a file, an object, a scalar, or a list of them"
+                    );
+                    return quote! {
+                        return Err(HttpError::Config(#message.to_string()).into());
+                    };
+                };
+                let content_type =
+                    declared_content_type.or(matches!(kind, MultipartClientFieldKind::Json)
+                        .then_some("application/json"));
+                // The shorthand for a part that needs no content type. An
+                // object always has one.
+                let shorthand = match kind {
+                    MultipartClientFieldKind::RawBytes => Some(quote! {
+                        form = form.part(#wire_name, reqwest::multipart::Part::bytes(value.to_vec()));
+                    }),
+                    MultipartClientFieldKind::Base64 => Some(quote! {
+                        use base64::Engine as _;
+                        form = form.text(#wire_name, base64::engine::general_purpose::STANDARD.encode(value));
+                    }),
+                    MultipartClientFieldKind::Base64UrlUnpadded => Some(quote! {
+                        use base64::Engine as _;
+                        form = form.text(#wire_name, base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value));
+                    }),
+                    MultipartClientFieldKind::Text => {
+                        Some(quote! { form = form.text(#wire_name, value.to_string()); })
+                    }
+                    MultipartClientFieldKind::Json => None,
+                }
+                .filter(|_| content_type.is_none());
+                if let Some(shorthand) = shorthand {
+                    shorthand
+                } else {
+                    let part = match kind {
+                        MultipartClientFieldKind::RawBytes => {
+                            quote! { reqwest::multipart::Part::bytes(value.to_vec()) }
+                        }
+                        MultipartClientFieldKind::Base64 => quote! { {
+                            use base64::Engine as _;
+                            reqwest::multipart::Part::text(base64::engine::general_purpose::STANDARD.encode(value))
+                        } },
+                        MultipartClientFieldKind::Base64UrlUnpadded => quote! { {
+                            use base64::Engine as _;
+                            reqwest::multipart::Part::text(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value))
+                        } },
+                        MultipartClientFieldKind::Text => {
+                            quote! { reqwest::multipart::Part::text(value.to_string()) }
+                        }
+                        MultipartClientFieldKind::Json => quote! {
+                            reqwest::multipart::Part::bytes(serde_json::to_vec(value).map_err(HttpError::serialization_error)?)
+                        },
+                    };
+                    let content_type = content_type.map(|content_type| {
+                        let message = format!(
+                            "multipart field `{wire_name}` has an invalid content type `{content_type}`"
+                        );
+                        quote! {
+                            let part = part
+                                .mime_str(#content_type)
+                                .map_err(|error| HttpError::Config(format!("{}: {}", #message, error)))?;
+                        }
+                    });
+                    quote! {
+                        let part = #part;
+                        #content_type
+                        form = form.part(#wire_name, part);
+                    }
+                }
+            };
+            let add_value = if is_array {
+                quote! {
+                    for value in value {
+                        #add_item
+                    }
+                }
+            } else {
+                add_item
             };
             parts.push(if is_tri_state {
                 // Multipart has no representation for a JSON null part. A
@@ -3497,12 +3291,7 @@ impl CodeGenerator {
     /// explicit zero-length framing for bodyless POST, PUT, and PATCH requests.
     /// Optional bodies (T11) gate the application on `Some(_)`; required bodies
     /// apply unconditionally.
-    fn generate_request_body_with_filenames(
-        &self,
-        op: &OperationInfo,
-        analysis: &SchemaAnalysis,
-        filenames: Option<&syn::Ident>,
-    ) -> TokenStream {
+    fn generate_request_body(&self, op: &OperationInfo, analysis: &SchemaAnalysis) -> TokenStream {
         let empty_request_framing = Self::generate_empty_request_framing(op);
         let Some(rb) = op.request_body.as_ref() else {
             return empty_request_framing;
@@ -3528,18 +3317,11 @@ impl CodeGenerator {
             ),
             RequestBodyContent::Multipart {
                 schema_name,
-                validation_schema,
                 encoding,
                 ..
             } => (
                 quote! { request },
-                self.generate_typed_multipart_form(
-                    schema_name,
-                    validation_schema,
-                    encoding,
-                    analysis,
-                    filenames,
-                ),
+                self.generate_typed_multipart_form(schema_name, encoding, analysis),
             ),
             RequestBodyContent::OctetStream { media_type } => (
                 quote! { body },
