@@ -23,7 +23,7 @@ asana/client.rs                                         1959860    49405 d9dc5bd
 asana/mod.rs                                                436       17 2390079a5e4e9f74
 asana/types.rs                                           619164    13468 f5722207ddaa92d4
 box/REQUIRED_DEPS.toml                                      771       18 5dbdfe553bf9dbeb
-box/client.rs                                           1734636    45025 6a0f48b8e79bb58b
+box/client.rs                                           1737478    45083 4fba9d0fff75dcce
 box/mod.rs                                                  432       17 b40589a066c4b98b
 box/types.rs                                            1281818    33255 9ab3c662ec355a13
 browserbase/REQUIRED_DEPS.toml                              699       16 4ad61bc1ea5c636a
@@ -35,7 +35,7 @@ cal-com/client.rs                                       1281022    33372 557d0f7
 cal-com/mod.rs                                              440       17 05fb649563c82805
 cal-com/types.rs                                        1869078    47094 afddc8676879915b
 cartesia/REQUIRED_DEPS.toml                                 669       16 a7f60b37a7334009
-cartesia/client.rs                                       351139     9302 ac310bd2daa06c46
+cartesia/client.rs                                       357433     9446 c3e801f2738991b2
 cartesia/mod.rs                                             442       17 3c5001b7641597a2
 cartesia/types.rs                                        232348     6354 99d9eeaf841fc4de
 cerebras/REQUIRED_DEPS.toml                                 528       13 d6f1ac00e2426e4d
@@ -47,7 +47,7 @@ circleci/client.rs                                       625181    16188 97bb3b9
 circleci/mod.rs                                             442       17 7a8b5691342a9d62
 circleci/types.rs                                        384614    10072 6f277085e1ad9894
 cloudflare/REQUIRED_DEPS.toml                               787       19 09cccc57db93029b
-cloudflare/client.rs                                   14175795   369305 39222ef4f1aa394c
+cloudflare/client.rs                                   14185323   369523 7792011c0c900632
 cloudflare/mod.rs                                           446       17 ce0e733f646147da
 cloudflare/types.rs                                    16792851   390215 d20ffe23076f5949
 coda/REQUIRED_DEPS.toml                                     672       16 9e666f39c7301c02
@@ -111,7 +111,7 @@ groq/client.rs                                           147278     3851 dfc5b9c
 groq/mod.rs                                                 434       17 72fd6d54577d5597
 groq/types.rs                                            389823     9789 a01c6e96836c8b5a
 imagekit/REQUIRED_DEPS.toml                                 673       16 b888661e2699f921
-imagekit/client.rs                                       502570    12609 d8d458bf589873d2
+imagekit/client.rs                                       502538    12609 105635c10e16c3f2
 imagekit/mod.rs                                             442       17 40484a363f5391c3
 imagekit/types.rs                                        722305    15938 42c68227a7c26c12
 increase/REQUIRED_DEPS.toml                                 653       15 715b930adfa76491
@@ -155,7 +155,7 @@ modern-treasury/client.rs                                967318    25969 cbf7ba8
 modern-treasury/mod.rs                                      456       17 5f336a50419a709b
 modern-treasury/types.rs                                1005013    26859 4617c87b9896c411
 openai/REQUIRED_DEPS.toml                                   648       15 a3db003e7f3781e2
-openai/client.rs                                        1266488    33859 b317ca713ed4c495
+openai/client.rs                                        1280493    34175 e7b9748395cdcaa7
 openai/mod.rs                                               438       17 59c0207149335235
 openai/types.rs                                         6329163   142793 e9466bc79da37e1f
 opencode/REQUIRED_DEPS.toml                                 576       14 9228e95d38f5078e
@@ -207,7 +207,7 @@ supabase/client.rs                                       602597    16288 dbc1210
 supabase/mod.rs                                             442       17 331ec75d430bc0a8
 supabase/types.rs                                        501018    13981 a90e47b6926d92a1
 telnyx/REQUIRED_DEPS.toml                                   787       19 09cccc57db93029b
-telnyx/client.rs                                        5442660   142740 178fa3b9163ad7c7
+telnyx/client.rs                                        5447044   142838 7010f3f8a28c4de5
 telnyx/mod.rs                                               438       17 f3a44d93d532e621
 telnyx/types.rs                                         4501474   108106 c72e842eb8b25f1c
 terminal-shop/REQUIRED_DEPS.toml                            529       14 241dda1403a4b0ba
@@ -215,7 +215,7 @@ terminal-shop/client.rs                                  208120     5561 e896ba1
 terminal-shop/mod.rs                                        452       17 7014abd4e66e4e4e
 terminal-shop/types.rs                                    62233     1872 5c0e2ce07125c290
 together/REQUIRED_DEPS.toml                                 762       18 2357560c3a71c3c6
-together/client.rs                                       573040    15007 d7927f0627e293a8
+together/client.rs                                       576317    15082 ba1d375becf1c216
 together/mod.rs                                             442       17 69fe71a3ff6db06e
 together/types.rs                                        682848    17401 7f831820a1cb4aae
 twilio/REQUIRED_DEPS.toml                                   650       16 79c204ac31d0efe3
@@ -235,4 +235,4 @@ writer/client.rs                                         190577     4990 9b2d6e5
 writer/mod.rs                                               438       17 0435bf1552e493d1
 writer/types.rs                                          198394     4888 800dd8afe5798530
 #
-# specs: 56   files: 224   bytes: 330890838
+# specs: 56   files: 224   bytes: 330931136

@@ -23,6 +23,14 @@ when correcting output that was wrong or incomplete on the wire.
   carries the variant in a required field, so it has no `Default` or
   required-properties constructor, which the builder called and failed to
   compile on (#86).
+- A `multipart/form-data` field that is an object, a union of objects or
+  arbitrary JSON is sent as one JSON part, typed `application/json`, instead of
+  the generated method returning `HttpError::Config` before sending anything.
+  A single media type in `encoding.<field>.contentType` is now the type of
+  any part, such as `image/png` on a binary field or another JSON type on an
+  object. A list of media types, or a range such as `image/*`, is the set the
+  server accepts, so the part gets none. Arrays of files remain unsupported
+  (#87).
 
 ## [0.19.0] - 2026-09-26
 

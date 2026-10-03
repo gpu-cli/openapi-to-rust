@@ -429,6 +429,7 @@ fn test_extract_multipart_body() {
         schema_name,
         media_type,
         validation_schema,
+        encoding,
     } = request_body
     else {
         panic!("expected typed multipart request body, got {request_body:?}");
@@ -440,6 +441,7 @@ fn test_extract_multipart_body() {
         Some(&serde_json::Value::String("binary".to_string()))
     );
     assert_eq!(request_body.schema_name(), Some("UploadFileRequest"));
+    assert!(encoding.is_empty(), "the fixture declares no encoding");
 }
 
 #[test]
