@@ -29,6 +29,14 @@ when correcting output that was wrong or incomplete on the wire.
   which `rustc`'s `non_camel_case_types` lint warned on. After a digit the
   underscore stays, so `"v1"` and `"V1"` are `V1` and `V1_2`. This renames
   those variants in schema and parameter enums (#89).
+- A `multipart/form-data` field that is an object, a union of objects or
+  arbitrary JSON is sent as one JSON part, typed `application/json`, instead of
+  the generated method returning `HttpError::Config` before sending anything.
+  A single media type in `encoding.<field>.contentType` is now the type of
+  any part, such as `image/png` on a binary field or another JSON type on an
+  object. A list of media types, or a range such as `image/*`, is the set the
+  server accepts, so the part gets none. Arrays of files remain unsupported
+  (#87).
 
 ## [0.19.0] - 2026-09-26
 

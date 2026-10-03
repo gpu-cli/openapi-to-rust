@@ -968,6 +968,11 @@ pub enum RequestBodyContent {
         media_type: String,
         #[serde(skip)]
         validation_schema: Value,
+        /// Each field's `encoding.<field>.contentType`, as written. It can
+        /// list several media types, which is a set of allowed ones rather
+        /// than the type of the part.
+        #[serde(skip)]
+        encoding: BTreeMap<String, String>,
     },
     OctetStream {
         media_type: String,
@@ -7902,12 +7907,24 @@ impl SchemaAnalyzer {
                                     serde_json::to_value(schema)
                                         .map_err(GeneratorError::ParseError)?,
                                 );
+                            let encoding = request_body
+                                .content
+                                .as_ref()
+                                .and_then(|content| content.get(content_type))
+                                .and_then(|media_type| media_type.encoding.as_ref())
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|(field, encoding)| {
+                                    Some((field.clone(), encoding.content_type.clone()?))
+                                })
+                                .collect();
                             Some(
                                 self.resolve_or_inline_schema(schema, operation_id, "Request")
                                     .map(|schema_name| RequestBodyContent::Multipart {
                                         schema_name,
                                         media_type: content_type.to_string(),
                                         validation_schema,
+                                        encoding,
                                     })?,
                             )
                         }
