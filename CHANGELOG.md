@@ -6,6 +6,20 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Changed
+
+- A file field of a typed multipart request body is a `MultipartFile`, which
+  carries its content in the `types.binary` carrier together with its own
+  filename and content type, and converts from that content. This replaces
+  the `*_with_multipart_filenames` methods and the builders'
+  `with_multipart_filenames` setters added in 0.19.0, which are removed: a
+  filename now travels with its file, so single files and lists name their
+  parts the same way, and every file part can set its content type. A file's
+  own content type wins over a single media type declared in
+  `encoding.<field>.contentType`. The generated server fills in a
+  `MultipartFile`'s filename and content type from the part it receives. The
+  bindings metadata loses its `multipart_filenames` flag (#87).
+
 ### Fixed
 
 - An operation that declares no 2xx response no longer generates a second
@@ -23,6 +37,21 @@ when correcting output that was wrong or incomplete on the wire.
   carries the variant in a required field, so it has no `Default` or
   required-properties constructor, which the builder called and failed to
   compile on (#86).
+- A `multipart/form-data` field that is an object, a union of objects or
+  arbitrary JSON is sent as one JSON part, typed `application/json`, instead of
+  the generated method returning `HttpError::Config` before sending anything.
+  A single media type in `encoding.<field>.contentType` is now the type of
+  any part, such as `image/png` on a binary field or another JSON type on an
+  object. A list of media types, or a range such as `image/*`, is the set the
+  server accepts, so the part gets none (#87).
+- A `multipart/form-data` field that is a list is sent as one part per item
+  under the field's name: files as `Vec<MultipartFile>`, each with its own
+  filename and content type, scalars as text and objects as JSON. Lists
+  returned `HttpError::Config` before sending anything. A union of text and
+  bytes, such as Cloudflare's KV `value`, was a `String`, so it couldn't send
+  bytes; it's a `MultipartFile` now and can send either. Uploading a Worker's
+  modules, which Cloudflare matches by filename under the one part name
+  `files`, now works (#87).
 
 ## [0.19.0] - 2026-09-26
 

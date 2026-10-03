@@ -72,14 +72,14 @@ mod tests {
 
     #[derive(Clone)]
     struct Api {
-        captured: UnboundedSender<(Vec<u8>, u64, bool, Option<String>)>,
+        captured: UnboundedSender<(MultipartFile, u64, bool, Option<String>)>,
     }
 
     #[async_trait::async_trait]
     impl ServerApi for Api {
         async fn upload_file(&self, body: UploadFileRequest) -> UploadFileResponse {
             self.captured.send((
-                body.file.to_vec(),
+                body.file,
                 body.count,
                 body.enabled,
                 body.display_name,
@@ -99,8 +99,12 @@ mod tests {
         let base_url = format!("http://{address}");
         let client = HttpClient::new().with_base_url(base_url.clone());
         let payload = vec![0, 1, 2, 255];
+        // The handler gets the part's filename and content type with its bytes.
+        let file = MultipartFile::from(payload)
+            .with_file_name("data.bin")
+            .with_content_type("application/vnd.demo");
         let request = UploadFileRequest {
-            file: bytes::Bytes::from(payload.clone()),
+            file: file.clone(),
             count: 9_223_372_036_854_775_808_u64,
             enabled: true,
             display_name: Some("demo".into()),
@@ -109,7 +113,7 @@ mod tests {
         assert_eq!(
             rx.recv().await.unwrap(),
             (
-                payload,
+                file,
                 9_223_372_036_854_775_808_u64,
                 true,
                 Some("demo".into())

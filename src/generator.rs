@@ -399,6 +399,24 @@ fn untyped_tokens(shape: crate::analysis::UntypedShape) -> TokenStream {
     }
 }
 
+/// Whether `schema_type` uses the Rust type `rust_type` anywhere a model
+/// field can hold it.
+fn schema_type_uses_rust_type(schema_type: &SchemaType, rust_type: &str) -> bool {
+    match schema_type {
+        SchemaType::Primitive {
+            rust_type: actual, ..
+        } => actual == rust_type,
+        SchemaType::Object { properties, .. } => properties
+            .values()
+            .any(|property| schema_type_uses_rust_type(&property.schema_type, rust_type)),
+        SchemaType::Array { item_type }
+        | SchemaType::Nullable {
+            inner_type: item_type,
+        } => schema_type_uses_rust_type(item_type, rust_type),
+        _ => false,
+    }
+}
+
 fn schema_type_uses_serde_codec(schema_type: &SchemaType, codec: &str) -> bool {
     match schema_type {
         SchemaType::Primitive {
@@ -431,6 +449,127 @@ fn schema_type_uses_serde_codec(schema_type: &SchemaType, codec: &str) -> bool {
 }
 
 impl CodeGenerator {
+    /// `MultipartFile`, the type of a multipart file field: the part's content,
+    /// in the configured `types.binary` carrier, with its own filename and
+    /// content type. It converts from the content, so a plain value still
+    /// works. In a JSON document it's the content alone, as a UTF-8 string,
+    /// like any other `format: binary` field.
+    fn generate_multipart_file_type(&self) -> TokenStream {
+        use crate::type_mapping::BinaryStrategy;
+        let (content, conversions, serialize) = match self.config.types.binary {
+            BinaryStrategy::Bytes => (
+                quote! { bytes::Bytes },
+                quote! {
+                    impl From<bytes::Bytes> for MultipartFile {
+                        fn from(content: bytes::Bytes) -> Self { Self::new(content) }
+                    }
+                    impl From<Vec<u8>> for MultipartFile {
+                        fn from(content: Vec<u8>) -> Self { Self::new(content) }
+                    }
+                    impl From<&'static [u8]> for MultipartFile {
+                        fn from(content: &'static [u8]) -> Self { Self::new(content) }
+                    }
+                    impl From<String> for MultipartFile {
+                        fn from(content: String) -> Self { Self::new(content) }
+                    }
+                    impl From<&'static str> for MultipartFile {
+                        fn from(content: &'static str) -> Self { Self::new(content) }
+                    }
+                },
+                quote! {
+                    let content = std::str::from_utf8(self.content.as_ref())
+                        .map_err(serde::ser::Error::custom)?;
+                    ser.serialize_str(content)
+                },
+            ),
+            BinaryStrategy::VecU8 => (
+                quote! { Vec<u8> },
+                quote! {
+                    impl From<Vec<u8>> for MultipartFile {
+                        fn from(content: Vec<u8>) -> Self { Self::new(content) }
+                    }
+                    impl From<&[u8]> for MultipartFile {
+                        fn from(content: &[u8]) -> Self { Self::new(content) }
+                    }
+                    impl From<String> for MultipartFile {
+                        fn from(content: String) -> Self { Self::new(content) }
+                    }
+                    impl From<&str> for MultipartFile {
+                        fn from(content: &str) -> Self { Self::new(content.as_bytes()) }
+                    }
+                },
+                quote! {
+                    let content = std::str::from_utf8(&self.content)
+                        .map_err(serde::ser::Error::custom)?;
+                    ser.serialize_str(content)
+                },
+            ),
+            BinaryStrategy::String => (
+                quote! { String },
+                quote! {
+                    impl From<String> for MultipartFile {
+                        fn from(content: String) -> Self { Self::new(content) }
+                    }
+                    impl From<&str> for MultipartFile {
+                        fn from(content: &str) -> Self { Self::new(content) }
+                    }
+                },
+                quote! { ser.serialize_str(&self.content) },
+            ),
+        };
+        quote! {
+            /// A multipart file part: its content, with the filename and
+            /// content type to send it under. Each defaults to none, and a
+            /// content type declared by the document's `encoding` applies when
+            /// this one is unset.
+            ///
+            /// It converts from its content, so `MultipartFile::from(content)`
+            /// or `content.into()` sends a part without either. In a JSON
+            /// document it's the content alone.
+            #[derive(Debug, Clone, Default, PartialEq, Eq)]
+            pub struct MultipartFile {
+                pub content: #content,
+                pub file_name: Option<String>,
+                pub content_type: Option<String>,
+            }
+
+            impl MultipartFile {
+                /// A part with this content, and no filename or content type.
+                pub fn new(content: impl Into<#content>) -> Self {
+                    Self { content: content.into(), file_name: None, content_type: None }
+                }
+
+                /// Send the part under this filename.
+                #[must_use]
+                pub fn with_file_name(mut self, file_name: impl Into<String>) -> Self {
+                    self.file_name = Some(file_name.into());
+                    self
+                }
+
+                /// Send the part with this `Content-Type`.
+                #[must_use]
+                pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
+                    self.content_type = Some(content_type.into());
+                    self
+                }
+            }
+
+            #conversions
+
+            impl Serialize for MultipartFile {
+                fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+                    #serialize
+                }
+            }
+
+            impl<'de> Deserialize<'de> for MultipartFile {
+                fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+                    String::deserialize(de).map(Self::new)
+                }
+            }
+        }
+    }
+
     pub fn new(config: GeneratorConfig) -> Self {
         Self {
             config,
@@ -1016,6 +1155,14 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        let multipart_file_helper = if analysis.schemas.values().any(|schema| {
+            schema_type_uses_rust_type(&schema.schema_type, crate::analysis::MULTIPART_FILE_TYPE)
+        }) {
+            self.generate_multipart_file_type()
+        } else {
+            TokenStream::new()
+        };
+
         let tri_state_helper = if uses_plain_tri_state {
             quote! {
                 /// Serde normally maps both a missing `Option<T>` field and an
@@ -1180,6 +1327,8 @@ impl CodeGenerator {
             #binary_bytes_helper
 
             #binary_vec_helper
+
+            #multipart_file_helper
 
             #tri_state_helper
 
@@ -1415,7 +1564,6 @@ impl CodeGenerator {
                 response_media_type: plan.response.media_type,
                 response_kind: plan.response.kind,
                 consumption: plan.response.consumption,
-                multipart_filenames: plan.multipart_filenames.is_some(),
             };
             for symbol in &mut bindings.symbols {
                 if symbol.path == path
