@@ -99,6 +99,7 @@ edition = "2024"
         .arg("check")
         .arg("--quiet")
         .arg("--message-format=short")
+        .arg("--color=never")
         .current_dir(temp.path())
         .env(
             "CARGO_TARGET_DIR",
