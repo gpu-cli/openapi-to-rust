@@ -19,3 +19,4 @@ createItem:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false

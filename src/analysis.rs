@@ -945,6 +945,9 @@ pub struct OperationInfo {
     /// Used by the server codegen selector grammar (e.g. `tag:Chat`)
     /// and by `openapi-to-rust server list` for grouping.
     pub tags: Vec<String>,
+    /// `deprecated: true`: consumers SHOULD refrain from calling it, so its
+    /// client methods are `#[deprecated]`.
+    pub deprecated: bool,
 }
 
 /// Content type and schema for a request body
@@ -7839,6 +7842,7 @@ impl SchemaAnalyzer {
             supports_streaming: false, // Will be determined by StreamingConfig, not spec
             stream_parameter: None,    // Will be determined by StreamingConfig, not spec
             tags: operation.tags.clone().unwrap_or_default(),
+            deprecated: operation.deprecated.unwrap_or(false),
         };
         let mut operation_responses = BTreeMap::new();
 

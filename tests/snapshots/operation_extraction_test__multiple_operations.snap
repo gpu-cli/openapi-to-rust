@@ -22,6 +22,7 @@ deleteItem:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false
 duplicateItem:
   operation_id: duplicateItem
   method: POST
@@ -43,6 +44,7 @@ duplicateItem:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false
 getItem:
   operation_id: getItem
   method: GET
@@ -64,6 +66,7 @@ getItem:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false
 updateItem:
   operation_id: updateItem
   method: PUT
@@ -88,3 +91,4 @@ updateItem:
   supports_streaming: false
   stream_parameter: ~
   tags: []
+  deprecated: false

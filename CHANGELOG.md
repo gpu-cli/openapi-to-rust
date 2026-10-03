@@ -6,6 +6,13 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- An operation marked `deprecated: true` generates client methods marked
+  `#[deprecated]`, its builder entry point included, so calling one warns. A
+  builder's `send`, which calls the method on the caller's behalf, doesn't
+  (#95).
+
 ### Fixed
 
 - An operation that declares no 2xx response no longer generates a second
