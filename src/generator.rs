@@ -268,6 +268,21 @@ pub fn default_type_mappings() -> BTreeMap<String, String> {
     mappings
 }
 
+/// The `n`th variant named `base`, for enum values whose names collide.
+///
+/// `rustc`'s `non_camel_case_types` lint accepts an underscore only between
+/// two characters without case, so `AmberStrict_2` warns while `AmberStrict2`
+/// and `V1_2` don't. The underscore is kept after a digit, where dropping it
+/// would run two numbers together (`V12`).
+pub(crate) fn numbered_variant_name(base: &str, n: usize) -> String {
+    let base = base.trim_end_matches('_');
+    if base.ends_with(|c: char| c.is_ascii_digit()) {
+        format!("{base}_{n}")
+    } else {
+        format!("{base}{n}")
+    }
+}
+
 /// Convert an OpenAPI schema name to the canonical Rust model identifier.
 ///
 /// Every code-generation surface must use this helper rather than parsing raw
@@ -2318,8 +2333,8 @@ impl CodeGenerator {
 
         // Variant-name uniqueness: enum values that PascalCase to the same
         // identifier (e.g. `ASC`/`asc` both → `Asc`) collide and produce
-        // E0428 + non-exhaustive matches downstream. Dedupe by suffixing
-        // `_2`, `_3`, … on collisions while preserving the first occurrence's
+        // E0428 + non-exhaustive matches downstream. Dedupe by numbering
+        // collisions `2`, `3`, … while preserving the first occurrence's
         // name, and keeping each variant's `#[serde(rename)]` pointed at the
         // original wire string.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2334,7 +2349,7 @@ impl CodeGenerator {
                 let mut variant_name = base.clone();
                 let mut suffix = 2;
                 while !used.insert(variant_name.clone()) {
-                    variant_name = format!("{base}_{suffix}");
+                    variant_name = numbered_variant_name(&base, suffix);
                     suffix += 1;
                 }
                 let variant_ident = format_ident!("{}", variant_name);

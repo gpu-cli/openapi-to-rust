@@ -23,6 +23,12 @@ when correcting output that was wrong or incomplete on the wire.
   carries the variant in a required field, so it has no `Default` or
   required-properties constructor, which the builder called and failed to
   compile on (#86).
+- Enum values whose names collide once converted to an identifier are
+  numbered without an underscore after a letter: `"amber-strict"` and
+  `"amber+strict"` are `AmberStrict` and `AmberStrict2`, not `AmberStrict_2`,
+  which `rustc`'s `non_camel_case_types` lint warned on. After a digit the
+  underscore stays, so `"v1"` and `"V1"` are `V1` and `V1_2`. This renames
+  those variants in schema and parameter enums (#89).
 
 ## [0.19.0] - 2026-09-26
 

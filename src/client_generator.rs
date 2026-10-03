@@ -1736,9 +1736,8 @@ impl CodeGenerator {
 
         // Dedupe variant names. Real-world specs use sort enums like
         // `["created_at", "-created_at"]` (descending prefix), and both
-        // PascalCase to `CreatedAt`. Suffix collisions with `_2`/`_3`/…
-        // while keeping each `serde(rename)` pointing at the original
-        // wire string.
+        // PascalCase to `CreatedAt`. Number collisions `CreatedAt2`, … while
+        // keeping each `serde(rename)` pointing at the original wire string.
         let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         // `x-enum-varnames` wins over the naming heuristic when the spec
         // supplies it — the whole point of the extension is that the author
@@ -1760,7 +1759,7 @@ impl CodeGenerator {
                 let mut chosen = base.clone();
                 let mut suffix = 2;
                 while !used.insert(chosen.clone()) {
-                    chosen = format!("{base}_{suffix}");
+                    chosen = crate::generator::numbered_variant_name(&base, suffix);
                     suffix += 1;
                 }
                 chosen

@@ -17,7 +17,7 @@ anthropic/types.rs                                      4212914    87145 fab1ac6
 arcade/REQUIRED_DEPS.toml                                   576       14 9228e95d38f5078e
 arcade/client.rs                                         343884     8843 dd68bb333a916907
 arcade/mod.rs                                               438       17 b55cb3acf5fdbd02
-arcade/types.rs                                          105169     2609 7717f649b6d59880
+arcade/types.rs                                          105165     2609 24d1eb8b7d02cb60
 asana/REQUIRED_DEPS.toml                                    699       16 4ad61bc1ea5c636a
 asana/client.rs                                         1959860    49405 d9dc5bddd5b9b433
 asana/mod.rs                                                436       17 2390079a5e4e9f74
@@ -25,7 +25,7 @@ asana/types.rs                                           619164    13468 f572220
 box/REQUIRED_DEPS.toml                                      771       18 5dbdfe553bf9dbeb
 box/client.rs                                           1734636    45025 6a0f48b8e79bb58b
 box/mod.rs                                                  432       17 b40589a066c4b98b
-box/types.rs                                            1281818    33255 9ab3c662ec355a13
+box/types.rs                                            1281814    33255 5b9eb083e4f92456
 browserbase/REQUIRED_DEPS.toml                              699       16 4ad61bc1ea5c636a
 browserbase/client.rs                                    108996     2946 7b1dd36acb36a744
 browserbase/mod.rs                                          448       17 7e721aa1bb802e26
@@ -47,9 +47,9 @@ circleci/client.rs                                       625181    16188 97bb3b9
 circleci/mod.rs                                             442       17 7a8b5691342a9d62
 circleci/types.rs                                        384614    10072 6f277085e1ad9894
 cloudflare/REQUIRED_DEPS.toml                               787       19 09cccc57db93029b
-cloudflare/client.rs                                   14175795   369305 39222ef4f1aa394c
+cloudflare/client.rs                                   14175793   369305 e4edc7b4d0781d52
 cloudflare/mod.rs                                           446       17 ce0e733f646147da
-cloudflare/types.rs                                    16792851   390215 d20ffe23076f5949
+cloudflare/types.rs                                    16792691   390215 524e26e12480a725
 coda/REQUIRED_DEPS.toml                                     672       16 9e666f39c7301c02
 coda/client.rs                                           847692    21836 2d23862bfc0441d3
 coda/mod.rs                                                 434       17 4e8b99caec52b623
@@ -65,15 +65,15 @@ datadog-v2/types.rs                                     3897209    98343 90bb9c5
 digitalocean/REQUIRED_DEPS.toml                             736       18 21727a31b033ca36
 digitalocean/client.rs                                  3863638    99343 53bab089f111c56b
 digitalocean/mod.rs                                         450       17 3b99e8d4d3161f03
-digitalocean/types.rs                                   1548370    36436 59bc59352b81284a
+digitalocean/types.rs                                   1548368    36436 3df74aca9b80384a
 discord/REQUIRED_DEPS.toml                                  699       16 4ad61bc1ea5c636a
 discord/client.rs                                       1082335    28233 0c5554e4ab9b24d5
 discord/mod.rs                                              440       17 1d9f7eee6c834b1c
 discord/types.rs                                        1843460    46571 63bbe5e6b4fc30d4
 gcore/REQUIRED_DEPS.toml                                    746       17 7f467fcbfe949464
-gcore/client.rs                                         5203526   137184 7ede00ff22518a72
+gcore/client.rs                                         5203420   137184 68ad48596c34756a
 gcore/mod.rs                                                436       17 d5c05d8821f23bcb
-gcore/types.rs                                          6016429   140206 f72406948cf03e54
+gcore/types.rs                                          6016371   140206 72228c29dc59372e
 github/REQUIRED_DEPS.toml                                   625       15 0e0871569054a9ee
 github/client.rs                                        5854524   148035 05f5a16b431854d7
 github/mod.rs                                               438       17 ac4d40f51fb06aa3
@@ -137,7 +137,7 @@ letta/types.rs                                          6955920   141632 ef6251b
 lithic/REQUIRED_DEPS.toml                                   688       17 9c8fe0ad1f161983
 lithic/client.rs                                        1351876    35356 60aebed1624e10a4
 lithic/mod.rs                                               438       17 eba70abf1f172ff1
-lithic/types.rs                                         1681235    40761 2b07c4477b1d8d8a
+lithic/types.rs                                         1681233    40761 e7fed374a5346f58
 luma/REQUIRED_DEPS.toml                                     672       16 9e666f39c7301c02
 luma/client.rs                                            59518     1615 5f1fe1b8e87ef5ea
 luma/mod.rs                                                 434       17 d85018b8cdd8f625
@@ -149,7 +149,7 @@ meta-llama/types.rs                                       97541     2408 2bd9da2
 microsoft-graph/REQUIRED_DEPS.toml                          674       16 e864ec8321bc90dc
 microsoft-graph/client.rs                             110206174  2683008 7e63b3b31ef91d86
 microsoft-graph/mod.rs                                      456       17 b99d7781b4460b5d
-microsoft-graph/types.rs                               15241507   390543 ee7db4cd80762807
+microsoft-graph/types.rs                               15241503   390543 6a5e33709313a2b1
 modern-treasury/REQUIRED_DEPS.toml                          746       17 7f467fcbfe949464
 modern-treasury/client.rs                                967318    25969 cbf7ba8543f72600
 modern-treasury/mod.rs                                      456       17 5f336a50419a709b
@@ -157,7 +157,7 @@ modern-treasury/types.rs                                1005013    26859 4617c87
 openai/REQUIRED_DEPS.toml                                   648       15 a3db003e7f3781e2
 openai/client.rs                                        1266488    33859 b317ca713ed4c495
 openai/mod.rs                                               438       17 59c0207149335235
-openai/types.rs                                         6329163   142793 e9466bc79da37e1f
+openai/types.rs                                         6329161   142793 46ba4dbcae197e4e
 opencode/REQUIRED_DEPS.toml                                 576       14 9228e95d38f5078e
 opencode/client.rs                                       955931    25401 2b4aa344b2001bda
 opencode/mod.rs                                             442       17 98c109eb94b95dbf
@@ -177,7 +177,7 @@ resend/types.rs                                          133568     3604 b889f47
 retell/REQUIRED_DEPS.toml                                   528       13 d6f1ac00e2426e4d
 retell/client.rs                                         484380    12607 680baab3afcc5495
 retell/mod.rs                                               438       17 e5b430243537a3be
-retell/types.rs                                         1433974    37887 a806dd555441d377
+retell/types.rs                                         1433944    37887 5cb8ea9962440599
 runway/REQUIRED_DEPS.toml                                   672       16 9e666f39c7301c02
 runway/client.rs                                         193999     5310 a6305fb6adc0b2e2
 runway/mod.rs                                               438       17 67ec5d69926d7742
@@ -207,9 +207,9 @@ supabase/client.rs                                       602597    16288 dbc1210
 supabase/mod.rs                                             442       17 331ec75d430bc0a8
 supabase/types.rs                                        501018    13981 a90e47b6926d92a1
 telnyx/REQUIRED_DEPS.toml                                   787       19 09cccc57db93029b
-telnyx/client.rs                                        5442660   142740 178fa3b9163ad7c7
+telnyx/client.rs                                        5442578   142740 fd14dfcf338a1520
 telnyx/mod.rs                                               438       17 f3a44d93d532e621
-telnyx/types.rs                                         4501474   108106 c72e842eb8b25f1c
+telnyx/types.rs                                         4501444   108106 8fa895b2ba7dabd8
 terminal-shop/REQUIRED_DEPS.toml                            529       14 241dda1403a4b0ba
 terminal-shop/client.rs                                  208120     5561 e896ba15ff57c29a
 terminal-shop/mod.rs                                        452       17 7014abd4e66e4e4e
@@ -229,10 +229,10 @@ val-town/types.rs                                         68086     1978 78ac613
 vercel/REQUIRED_DEPS.toml                                   673       16 b888661e2699f921
 vercel/client.rs                                        1510541    39662 0e5d00af7d23bb67
 vercel/mod.rs                                               438       17 6e4cb11d3c843a23
-vercel/types.rs                                        15047218   383523 325ce33d9e507225
+vercel/types.rs                                        15046655   383513 3022713d78f22aa0
 writer/REQUIRED_DEPS.toml                                   720       17 4d0f659a2898dcf4
 writer/client.rs                                         190577     4990 9b2d6e5c683a7bc4
 writer/mod.rs                                               438       17 0435bf1552e493d1
 writer/types.rs                                          198394     4888 800dd8afe5798530
 #
-# specs: 56   files: 224   bytes: 330890838
+# specs: 56   files: 224   bytes: 330889789
