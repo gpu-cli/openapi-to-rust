@@ -136,26 +136,22 @@ fn generated_variants_negotiate_stream_and_keep_filenames_request_local() {
             .iter()
             .find(|f| f.path.to_str() == Some("client.rs"))
             .unwrap();
+        // Filenames travel with each `MultipartFile`, so there are no
+        // filename variants, and the operation that is really named
+        // `uploadWithMultipartFilenames` keeps its name.
         assert!(
-            client
-                .content
-                .contains("multipart_filenames_2: &[(&str, &str)]"),
+            !client.content.contains("&[(&str, &str)]"),
             "{}",
             client.content
         );
         assert!(
             client
                 .content
-                .contains("pub async fn upload_with_multipart_filenames_2")
+                .contains("pub async fn upload_with_multipart_filenames(")
         );
         assert!(client.content.contains("pub async fn render_binary_stream"));
         assert!(client.content.contains("pub async fn raw_events"));
         assert!(client.content.contains("use<"));
-        assert!(
-            client
-                .content
-                .contains("multipart_filenames_3: &[(&str, &str)]")
-        );
         assert!(client.content.contains("pub async fn new_2"));
         assert!(client.content.contains("pub async fn r#type"));
         assert!(
@@ -259,7 +255,7 @@ const RUNTIME: &str = r###"pub mod typed;
 pub mod strings;
 #[cfg(test)]
 mod tests {
-    use super::typed::{client::{HttpClient, ApiOpError}, types::UploadRequest};
+    use super::typed::{client::{HttpClient, ApiOpError}, types::{MultipartFile, UploadRequest}};
     use axum::{body::Body, extract::{Multipart, Query, State}, http::{HeaderMap, StatusCode}, response::Response, routing::{get, post}, Router};
     use futures_util::StreamExt;
     use std::{collections::BTreeMap, sync::{Arc, Mutex}, time::Duration};
@@ -310,12 +306,19 @@ mod tests {
         };
         Response::builder().header("content-type", format!("{media}; charset=utf-8")).body(body).unwrap()
     }
-    fn request() -> UploadRequest { UploadRequest { front_page: bytes::Bytes::from_static(b"front"), back: bytes::Bytes::from_static(b"back"), omitted: None, nullable: Some(None), referenced: None, caption: Some("caption".into()) } }
+    fn request() -> UploadRequest { UploadRequest { front_page: bytes::Bytes::from_static(b"front").into(), back: bytes::Bytes::from_static(b"back").into(), omitted: None, nullable: Some(None), referenced: None, caption: Some("caption".into()) } }
+    fn named(front: &str, back: &str) -> UploadRequest {
+        UploadRequest {
+            front_page: MultipartFile::from(&b"front"[..]).with_file_name(front),
+            back: MultipartFile::from(&b"back"[..]).with_file_name(back),
+            ..request()
+        }
+    }
     #[allow(dead_code)]
     async fn collision_signatures(client: &HttpClient, request: super::typed::types::UploadCollisionRequest) {
-        let _ = client.upload_collision_with_multipart_filenames(None::<&str>, None::<&str>, request, &[]).await;
-        let _ = client.upload_stream_binary_stream_builder(bytes::Bytes::from_static(b"back"), bytes::Bytes::from_static(b"front"))
-            .multipart_filenames("query").with_multipart_filenames(&[("front-page","a.pdf")]).send().await;
+        let _ = client.upload_collision(None::<&str>, None::<&str>, request).await;
+        let _ = client.upload_stream_binary_stream_builder(bytes::Bytes::from_static(b"back").into(), MultipartFile::from(&b"front"[..]).with_file_name("a.pdf"))
+            .multipart_filenames("query").send().await;
         let _ = client.new_2().await;
         let _ = client.r#type().await;
         let _ = client.type_binary_stream().await;
@@ -358,8 +361,8 @@ mod tests {
         client.upload(Some("query"), request()).await.unwrap();
         assert!(state.captured.lock().unwrap()[0].values().all(|(filename,_)| filename.is_none()));
         let (one,two) = tokio::join!(
-            client.upload_with_multipart_filenames_2(Some("query"), request(), &[("front-page","a.pdf"),("back","b.pdf"),("omitted","absent.pdf"),("nullable","null.pdf"),("referenced","ref.pdf")]),
-            client.upload_with_multipart_filenames_2(Some("query"), request(), &[("front-page","c.pdf"),("back","d.pdf")])
+            client.upload(Some("query"), named("a.pdf", "b.pdf")),
+            client.upload(Some("query"), named("c.pdf", "d.pdf"))
         );
         one.unwrap(); two.unwrap();
         let captures = state.captured.lock().unwrap().clone();
@@ -373,13 +376,13 @@ mod tests {
             assert!(matches!((front,back),("a.pdf","b.pdf")|("c.pdf","d.pdf")));
             assert_eq!(capture["front-page"].1,b"front");
         }
-        for filenames in [&[("front-page","a"),("front-page","b")][..], &[("caption","a")][..], &[("unknown","a")][..]] {
-            assert!(matches!(client.upload_with_multipart_filenames_2(Some("query"), request(), filenames).await, Err(ApiOpError::Transport(super::typed::HttpError::Config(_)))));
-        }
-        client.upload_builder(bytes::Bytes::from_static(b"back"), bytes::Bytes::from_static(b"front"))
-            .multipart_filenames("query").with_multipart_filenames(&[("front-page","builder.pdf")]).send().await.unwrap();
+        client.upload_builder(bytes::Bytes::from_static(b"back").into(), MultipartFile::from(&b"front"[..]).with_file_name("builder.pdf"))
+            .multipart_filenames("query").send().await.unwrap();
+        let builder = state.captured.lock().unwrap().last().unwrap().clone();
+        assert_eq!(builder["front-page"].0.as_deref(), Some("builder.pdf"));
+        assert_eq!(builder["back"].0, None);
         let strings = super::strings::client::HttpClient::new().with_base_url(format!("http://{address}"));
-        strings.upload_with_multipart_filenames_2(Some("query"), super::strings::types::UploadRequest { front_page:"string".into(),back:"back".into(),omitted:None,nullable:Some(None),referenced:None,caption:None }, &[("front-page","string.pdf")]).await.unwrap();
+        strings.upload(Some("query"), super::strings::types::UploadRequest { front_page:super::strings::types::MultipartFile::from("string").with_file_name("string.pdf"),back:"back".into(),omitted:None,nullable:Some(None),referenced:None,caption:None }).await.unwrap();
         assert_eq!(state.captured.lock().unwrap().last().unwrap()["front-page"],(Some("string.pdf".into()),b"string".to_vec()));
         assert_eq!(client.render(None::<&str>).await.unwrap().value,"default");
         assert_eq!(client.render_json_application_vnd_alternate_json(None::<&str>).await.unwrap().alternate,42);

@@ -95,7 +95,6 @@ pub struct BindingOperation {
     pub response_media_type: Option<String>,
     pub response_kind: String,
     pub consumption: String,
-    pub multipart_filenames: bool,
 }
 
 impl BindingsMetadata {
