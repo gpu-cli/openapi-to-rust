@@ -3051,14 +3051,17 @@ impl CodeGenerator {
     }
 
     /// Whether a multipart field holds a `MultipartFile`, the type the
-    /// analysis gives file parts.
-    fn is_multipart_file_type(schema_type: &crate::analysis::SchemaType) -> bool {
+    /// analysis gives file parts, under whatever name it gave it.
+    fn is_multipart_file_type(
+        schema_type: &crate::analysis::SchemaType,
+        analysis: &SchemaAnalysis,
+    ) -> bool {
         match schema_type {
             crate::analysis::SchemaType::Primitive { rust_type, .. } => {
-                rust_type == crate::analysis::MULTIPART_FILE_TYPE
+                analysis.multipart_file_type.as_deref() == Some(rust_type.as_str())
             }
             crate::analysis::SchemaType::Nullable { inner_type } => {
-                Self::is_multipart_file_type(inner_type)
+                Self::is_multipart_file_type(inner_type, analysis)
             }
             _ => false,
         }
@@ -3144,13 +3147,20 @@ impl CodeGenerator {
                 Some(item_type) => (true, item_type),
                 None => (false, field_type),
             };
+            // A null item is no part, as a null field is none.
+            let (nullable_items, item_type) = match item_type {
+                crate::analysis::SchemaType::Nullable { inner_type } if is_array => {
+                    (true, &**inner_type)
+                }
+                other => (false, other),
+            };
             // A single media type in `encoding.<field>.contentType` is the
             // part's type, whatever the field holds. Several of them are the
             // set the server accepts, so none is picked.
             let declared_content_type = encoding
                 .get(wire_name)
                 .and_then(|content_type| Self::single_media_type(content_type));
-            let add_item = if Self::is_multipart_file_type(item_type) {
+            let add_item = if Self::is_multipart_file_type(item_type, analysis) {
                 // A file's own content type wins over the declared one.
                 let part = match self.config().types.binary {
                     crate::type_mapping::BinaryStrategy::Bytes => {
@@ -3263,7 +3273,13 @@ impl CodeGenerator {
                     }
                 }
             };
-            let add_value = if is_array {
+            let add_value = if nullable_items {
+                quote! {
+                    for value in value.iter().flatten() {
+                        #add_item
+                    }
+                }
+            } else if is_array {
                 quote! {
                     for value in value {
                         #add_item

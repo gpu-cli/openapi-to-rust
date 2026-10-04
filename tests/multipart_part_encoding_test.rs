@@ -14,6 +14,10 @@
 //! part's name, filename, content type and body. The client is generated
 //! under each `types.binary` strategy, since `MultipartFile` holds its content
 //! in that carrier.
+//!
+//! A null item of a list of files is no part, and a schema named
+//! `MultipartFile` keeps its name: the generated file type takes the next free
+//! one, `MultipartFile2`.
 
 use openapi_to_rust::config::ClientSection;
 use openapi_to_rust::type_mapping::{BinaryStrategy, TypeMapper, TypeMappingConfig};
@@ -81,21 +85,72 @@ fn spec() -> serde_json::Value {
     })
 }
 
+/// A list of files whose items may be null, and a schema whose type is named
+/// like the generated file type.
+fn colliding_spec() -> serde_json::Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "multipart collisions", "version": "1" },
+        "components": { "schemas": {
+            "MultipartFile": { "type": "object", "properties": { "label": { "type": "string" } } }
+        }},
+        "paths": {
+            "/attachments": { "put": {
+                "operationId": "uploadAttachments",
+                "requestBody": { "required": true, "content": { "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "files": { "type": "array", "items": { "anyOf": [
+                                { "type": "string", "format": "binary" },
+                                { "type": "null" }
+                            ]}},
+                            "manifest": { "$ref": "#/components/schemas/MultipartFile" }
+                        }
+                    }
+                }}},
+                "responses": { "204": { "description": "ok" } }
+            }}
+        }
+    })
+}
+
 #[test]
 fn multipart_parts_follow_openapi_encoding() {
     let temp = tempfile::TempDir::new().unwrap();
     let mut dependencies = String::new();
-    for (module, binary) in [
-        ("with_bytes", BinaryStrategy::Bytes),
-        ("with_vec", BinaryStrategy::VecU8),
-        ("with_string", BinaryStrategy::String),
+    for (module, binary, spec, operations) in [
+        (
+            "with_bytes",
+            BinaryStrategy::Bytes,
+            spec(),
+            vec!["uploadScript", "writeValue"],
+        ),
+        (
+            "with_vec",
+            BinaryStrategy::VecU8,
+            spec(),
+            vec!["uploadScript", "writeValue"],
+        ),
+        (
+            "with_string",
+            BinaryStrategy::String,
+            spec(),
+            vec!["uploadScript", "writeValue"],
+        ),
+        (
+            "colliding",
+            BinaryStrategy::Bytes,
+            colliding_spec(),
+            vec!["uploadAttachments"],
+        ),
     ] {
         let types = TypeMappingConfig {
             binary,
             ..TypeMappingConfig::default()
         };
         let mut analyzer =
-            SchemaAnalyzer::with_type_mapper(spec(), TypeMapper::new(types.clone())).unwrap();
+            SchemaAnalyzer::with_type_mapper(spec, TypeMapper::new(types.clone())).unwrap();
         let mut analysis = analyzer.analyze().unwrap();
         let generator = CodeGenerator::new(GeneratorConfig {
             output_dir: temp.path().join("src").join(module),
@@ -103,7 +158,7 @@ fn multipart_parts_follow_openapi_encoding() {
             enable_async_client: true,
             tracing_enabled: false,
             client: Some(ClientSection {
-                operations: vec!["uploadScript".into(), "writeValue".into()],
+                operations: operations.into_iter().map(String::from).collect(),
                 prune_models: true,
             }),
             ..Default::default()
@@ -194,6 +249,7 @@ tokio = {{version="1", features=["macros","net","rt-multi-thread"]}}
 const RUNTIME: &str = r###"pub mod with_bytes;
 pub mod with_vec;
 pub mod with_string;
+pub mod colliding;
 #[cfg(test)]
 mod tests {
     use axum::{extract::{Multipart, State}, http::StatusCode, routing::put, Router};
@@ -230,6 +286,7 @@ mod tests {
         let app = Router::new()
             .route("/scripts", put(record))
             .route("/values", put(record))
+            .route("/attachments", put(record))
             .with_state(parts.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -335,6 +392,39 @@ mod tests {
     async fn string_files() {
         let (script, text, file) = upload_script_parts!(with_string);
         check(script, text, file);
+    }
+
+    #[tokio::test]
+    async fn null_files_and_colliding_names() {
+        use super::colliding::{client::HttpClient, types::*};
+        let (base_url, parts) = serve().await;
+        let client = HttpClient::new().with_base_url(base_url);
+        client
+            .upload_attachments(UploadAttachmentsRequest {
+                files: Some(vec![
+                    Some(MultipartFile2::from("a").with_file_name("a.txt")),
+                    None,
+                    Some(MultipartFile2::from("b")),
+                ]),
+                manifest: Some(MultipartFile { label: Some("both".into()) }),
+            })
+            .await
+            .unwrap();
+        let form = parts.lock().unwrap().clone();
+
+        // A null item is no part.
+        assert_eq!(named(&form, "files"), [
+            &Part::new(Some("a.txt"), None, b"a"),
+            &Part::new(None, None, b"b"),
+        ]);
+        // The document's `MultipartFile` is its own object, sent as JSON.
+        let manifest = named(&form, "manifest");
+        assert_eq!(manifest.len(), 1, "{form:?}");
+        assert_eq!(manifest[0].content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&manifest[0].body).unwrap(),
+            serde_json::json!({ "label": "both" })
+        );
     }
 }
 "###;

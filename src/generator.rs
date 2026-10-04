@@ -464,30 +464,33 @@ fn schema_type_uses_serde_codec(schema_type: &SchemaType, codec: &str) -> bool {
 }
 
 impl CodeGenerator {
-    /// `MultipartFile`, the type of a multipart file field: the part's content,
+    /// `MultipartFile`, or the free name the analysis gave it in its place,
+    /// the type of a multipart file field: the part's content,
     /// in the configured `types.binary` carrier, with its own filename and
     /// content type. It converts from the content, so a plain value still
     /// works. In a JSON document it's the content alone, as a UTF-8 string,
     /// like any other `format: binary` field.
-    fn generate_multipart_file_type(&self) -> TokenStream {
+    fn generate_multipart_file_type(&self, type_name: &str) -> TokenStream {
         use crate::type_mapping::BinaryStrategy;
+        let ident = format_ident!("{}", type_name);
+        let from_doc = format!(" It converts from its content, so `{type_name}::from(content)`");
         let (content, conversions, serialize) = match self.config.types.binary {
             BinaryStrategy::Bytes => (
                 quote! { bytes::Bytes },
                 quote! {
-                    impl From<bytes::Bytes> for MultipartFile {
+                    impl From<bytes::Bytes> for #ident {
                         fn from(content: bytes::Bytes) -> Self { Self::new(content) }
                     }
-                    impl From<Vec<u8>> for MultipartFile {
+                    impl From<Vec<u8>> for #ident {
                         fn from(content: Vec<u8>) -> Self { Self::new(content) }
                     }
-                    impl From<&'static [u8]> for MultipartFile {
+                    impl From<&'static [u8]> for #ident {
                         fn from(content: &'static [u8]) -> Self { Self::new(content) }
                     }
-                    impl From<String> for MultipartFile {
+                    impl From<String> for #ident {
                         fn from(content: String) -> Self { Self::new(content) }
                     }
-                    impl From<&'static str> for MultipartFile {
+                    impl From<&'static str> for #ident {
                         fn from(content: &'static str) -> Self { Self::new(content) }
                     }
                 },
@@ -500,16 +503,16 @@ impl CodeGenerator {
             BinaryStrategy::VecU8 => (
                 quote! { Vec<u8> },
                 quote! {
-                    impl From<Vec<u8>> for MultipartFile {
+                    impl From<Vec<u8>> for #ident {
                         fn from(content: Vec<u8>) -> Self { Self::new(content) }
                     }
-                    impl From<&[u8]> for MultipartFile {
+                    impl From<&[u8]> for #ident {
                         fn from(content: &[u8]) -> Self { Self::new(content) }
                     }
-                    impl From<String> for MultipartFile {
+                    impl From<String> for #ident {
                         fn from(content: String) -> Self { Self::new(content) }
                     }
-                    impl From<&str> for MultipartFile {
+                    impl From<&str> for #ident {
                         fn from(content: &str) -> Self { Self::new(content.as_bytes()) }
                     }
                 },
@@ -522,10 +525,10 @@ impl CodeGenerator {
             BinaryStrategy::String => (
                 quote! { String },
                 quote! {
-                    impl From<String> for MultipartFile {
+                    impl From<String> for #ident {
                         fn from(content: String) -> Self { Self::new(content) }
                     }
-                    impl From<&str> for MultipartFile {
+                    impl From<&str> for #ident {
                         fn from(content: &str) -> Self { Self::new(content) }
                     }
                 },
@@ -538,17 +541,17 @@ impl CodeGenerator {
             /// content type declared by the document's `encoding` applies when
             /// this one is unset.
             ///
-            /// It converts from its content, so `MultipartFile::from(content)`
+            #[doc = #from_doc]
             /// or `content.into()` sends a part without either. In a JSON
             /// document it's the content alone.
             #[derive(Debug, Clone, Default, PartialEq, Eq)]
-            pub struct MultipartFile {
+            pub struct #ident {
                 pub content: #content,
                 pub file_name: Option<String>,
                 pub content_type: Option<String>,
             }
 
-            impl MultipartFile {
+            impl #ident {
                 /// A part with this content, and no filename or content type.
                 pub fn new(content: impl Into<#content>) -> Self {
                     Self { content: content.into(), file_name: None, content_type: None }
@@ -571,13 +574,13 @@ impl CodeGenerator {
 
             #conversions
 
-            impl Serialize for MultipartFile {
+            impl Serialize for #ident {
                 fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
                     #serialize
                 }
             }
 
-            impl<'de> Deserialize<'de> for MultipartFile {
+            impl<'de> Deserialize<'de> for #ident {
                 fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
                     String::deserialize(de).map(Self::new)
                 }
@@ -1170,12 +1173,16 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
-        let multipart_file_helper = if analysis.schemas.values().any(|schema| {
-            schema_type_uses_rust_type(&schema.schema_type, crate::analysis::MULTIPART_FILE_TYPE)
-        }) {
-            self.generate_multipart_file_type()
-        } else {
-            TokenStream::new()
+        let multipart_file_helper = match &analysis.multipart_file_type {
+            Some(type_name)
+                if analysis
+                    .schemas
+                    .values()
+                    .any(|schema| schema_type_uses_rust_type(&schema.schema_type, type_name)) =>
+            {
+                self.generate_multipart_file_type(type_name)
+            }
+            _ => TokenStream::new(),
         };
 
         let tri_state_helper = if uses_plain_tri_state {

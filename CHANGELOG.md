@@ -24,7 +24,11 @@ when correcting output that was wrong or incomplete on the wire.
   parts the same way, and every file part can set its content type. A file's
   own content type wins over a single media type declared in
   `encoding.<field>.contentType`. The generated server fills in a
-  `MultipartFile`'s filename and content type from the part it receives. The
+  `MultipartFile`'s filename and content type from the part it receives. A
+  null item of a list of files, or of any list, is no part, as a null field
+  is none. A schema whose type is named `MultipartFile` keeps its name, and
+  the file type takes the first free one of `MultipartFile2`, `MultipartFile3`
+  and so on, which `SchemaAnalysis::multipart_file_type` records. The
   bindings metadata loses its `multipart_filenames` flag (#87).
 
 ### Fixed

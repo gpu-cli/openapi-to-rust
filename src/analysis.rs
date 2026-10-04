@@ -116,6 +116,11 @@ pub struct SchemaAnalysis {
     /// branch schemas exist. Side-channel keyed by analyzed-schema name so no
     /// object constructor has to carry it.
     pub untagged_union_branches: BTreeSet<String>,
+    /// The Rust name of the generated type of multipart file parts, which
+    /// the file fields of multipart request bodies take: `MultipartFile`,
+    /// unless a schema's type already has that name. `None` when no request
+    /// body has a file field.
+    pub multipart_file_type: Option<String>,
 }
 
 /// Every schema reachable as a branch of a [`SchemaType::Union`], which the
@@ -2167,6 +2172,7 @@ impl SchemaAnalyzer {
             enum_extensions: BTreeMap::new(),
             validation_context,
             untagged_union_branches: BTreeSet::new(),
+            multipart_file_type: None,
         };
 
         // First pass: detect patterns
@@ -9542,30 +9548,47 @@ fn is_multipart_file_schema(schema: &Value, component_schemas: &BTreeMap<String,
 /// type, and arrays of them as `Vec<MultipartFile>`, one part per file. Only
 /// the top-level properties of a body are parts, so nested objects keep
 /// their types.
+///
+/// The carrier is the generator's, not the document's, so it gives way to a
+/// schema whose type is already `MultipartFile`: it takes the first free name
+/// of `MultipartFile2`, `MultipartFile3` and so on, recorded in
+/// [`SchemaAnalysis::multipart_file_type`].
 fn retype_multipart_file_fields(analysis: &mut SchemaAnalysis) {
-    fn file_type(original: &SchemaType) -> SchemaType {
+    fn file_type(original: &SchemaType, type_name: &str) -> SchemaType {
         match original {
             SchemaType::Nullable { inner_type } => SchemaType::Nullable {
-                inner_type: Box::new(file_type(inner_type)),
+                inner_type: Box::new(file_type(inner_type, type_name)),
             },
             _ => SchemaType::Primitive {
-                rust_type: MULTIPART_FILE_TYPE.to_string(),
+                rust_type: type_name.to_string(),
                 serde_with: None,
             },
         }
     }
-    fn file_array_type(original: &SchemaType) -> SchemaType {
+    fn file_array_type(original: &SchemaType, type_name: &str) -> SchemaType {
         match original {
             SchemaType::Nullable { inner_type } => SchemaType::Nullable {
-                inner_type: Box::new(file_array_type(inner_type)),
+                inner_type: Box::new(file_array_type(inner_type, type_name)),
             },
             SchemaType::Array { item_type } => SchemaType::Array {
-                item_type: Box::new(file_type(item_type)),
+                item_type: Box::new(file_type(item_type, type_name)),
             },
             _ => SchemaType::Array {
-                item_type: Box::new(file_type(original)),
+                item_type: Box::new(file_type(original, type_name)),
             },
         }
+    }
+
+    let claimed: HashSet<String> = analysis
+        .schemas
+        .keys()
+        .map(|name| crate::generator::rust_type_name(name))
+        .collect();
+    let mut type_name = MULTIPART_FILE_TYPE.to_string();
+    let mut suffix = 2;
+    while claimed.contains(&type_name) {
+        type_name = format!("{MULTIPART_FILE_TYPE}{suffix}");
+        suffix += 1;
     }
 
     let bodies: Vec<(String, Value)> = analysis
@@ -9613,7 +9636,8 @@ fn retype_multipart_file_fields(analysis: &mut SchemaAnalysis) {
                 continue;
             };
             if is_multipart_file_schema(wire_property, &components) {
-                property.schema_type = file_type(&property.schema_type);
+                property.schema_type = file_type(&property.schema_type, &type_name);
+                analysis.multipart_file_type = Some(type_name.clone());
                 continue;
             }
             let items =
@@ -9621,14 +9645,15 @@ fn retype_multipart_file_fields(analysis: &mut SchemaAnalysis) {
                     .filter(|schema| schema.get("type").and_then(Value::as_str) == Some("array"))
                     .and_then(|schema| schema.get("items"));
             if items.is_some_and(|items| is_multipart_file_schema(items, &components)) {
-                property.schema_type = file_array_type(&property.schema_type);
+                property.schema_type = file_array_type(&property.schema_type, &type_name);
+                analysis.multipart_file_type = Some(type_name.clone());
             }
         }
     }
 }
 
-/// The generated type of a multipart file part. See
-/// [`retype_multipart_file_fields`].
+/// The name of the generated type of a multipart file part, unless a
+/// schema's type has it. See [`retype_multipart_file_fields`].
 pub(crate) const MULTIPART_FILE_TYPE: &str = "MultipartFile";
 
 fn disambiguate_analyzed_schema_names(

@@ -1916,6 +1916,14 @@ impl<'a> ServerCodegen<'a> {
                     ));
                 };
                 let plans = self.multipart_field_plans(validation_schema)?;
+                // The model's file type, under the name the analysis gave it.
+                let multipart_file = format_ident!(
+                    "{}",
+                    self.analysis
+                        .multipart_file_type
+                        .as_deref()
+                        .unwrap_or(crate::analysis::MULTIPART_FILE_TYPE)
+                );
                 let multipart_validation = self
                     .validation_target(validation_bundle, op, "body", None)?
                     .map(|target| {
@@ -1941,7 +1949,7 @@ impl<'a> ServerCodegen<'a> {
                     let field_ident = &plan.field_ident;
                     let slot = format_ident!("__multipart_binary_{}", field_ident);
                     binary_locals.push(quote! {
-                        let mut #slot: ::std::option::Option<super::super::types::MultipartFile> = None;
+                        let mut #slot: ::std::option::Option<super::super::types::#multipart_file> = None;
                     });
                     binary_validation_arms.push(quote! {
                         #wire_name => ::serde_json::Value::String(
@@ -1992,7 +2000,7 @@ impl<'a> ServerCodegen<'a> {
                                         (::axum::http::StatusCode::BAD_REQUEST, "invalid multipart field")
                                     ),
                                 };
-                                #binary_slot = Some(super::super::types::MultipartFile {
+                                #binary_slot = Some(super::super::types::#multipart_file {
                                     content: #content,
                                     file_name,
                                     content_type,
