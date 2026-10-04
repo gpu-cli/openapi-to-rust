@@ -6,6 +6,8 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-04
+
 ### Added
 
 - An operation marked `deprecated: true` generates client methods marked
@@ -33,6 +35,8 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- Raw response streams are explicitly `'static` and do not capture borrowed
+  client or request inputs, so they can be moved into spawned tasks (#85).
 - An operation that declares no 2xx response no longer generates a second
   `else if status.is_success()` branch after its success guard, which is
   `status.is_success()` itself. The branch couldn't be reached, and clippy's
@@ -841,7 +845,8 @@ would have passed any amount of spec-diffing.
   signed enum values, recursive unions, parameter collisions, optional request
   bodies, range response codes, and path-segment encoding.
 
-[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/gpu-cli/openapi-to-rust/compare/v0.16.0...v0.17.0
