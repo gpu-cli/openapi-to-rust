@@ -370,6 +370,7 @@ fn test_generated_error_code() {
         enum_extensions: BTreeMap::new(),
         validation_context: Default::default(),
         untagged_union_branches: Default::default(),
+        multipart_file_type: None,
     };
 
     // Generate HTTP client code which includes error types

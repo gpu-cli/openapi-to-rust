@@ -36,6 +36,7 @@ fn create_test_analysis_with_operations(operations: Vec<OperationInfo>) -> Schem
         enum_extensions: BTreeMap::new(),
         validation_context: Default::default(),
         untagged_union_branches: Default::default(),
+        multipart_file_type: None,
     }
 }
 

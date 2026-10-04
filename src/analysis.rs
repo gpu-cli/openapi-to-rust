@@ -116,6 +116,11 @@ pub struct SchemaAnalysis {
     /// branch schemas exist. Side-channel keyed by analyzed-schema name so no
     /// object constructor has to carry it.
     pub untagged_union_branches: BTreeSet<String>,
+    /// The Rust name of the generated type of multipart file parts, which
+    /// the file fields of multipart request bodies take: `MultipartFile`,
+    /// unless a schema's type already has that name. `None` when no request
+    /// body has a file field.
+    pub multipart_file_type: Option<String>,
 }
 
 /// Every schema reachable as a branch of a [`SchemaType::Union`], which the
@@ -2167,6 +2172,7 @@ impl SchemaAnalyzer {
             enum_extensions: BTreeMap::new(),
             validation_context,
             untagged_union_branches: BTreeSet::new(),
+            multipart_file_type: None,
         };
 
         // First pass: detect patterns
@@ -2250,6 +2256,7 @@ impl SchemaAnalyzer {
         }
 
         disambiguate_analyzed_schema_names(&mut analysis, &self.schemas);
+        retype_multipart_file_fields(&mut analysis);
 
         // Snapshot the type-mapper's used-features set so the
         // generator can decide which helper modules to emit
@@ -9467,6 +9474,187 @@ fn disambiguate_component_schema_names(openapi_spec: &mut Value) {
 
     rewrite_component_schema_references(openapi_spec, &aliases);
 }
+
+/// The JSON Schema a multipart property is sent as: local `$ref`s followed,
+/// and a nullable union or a single-branch `allOf` reduced to its one
+/// concrete branch. `None` for a reference cycle or an unresolvable `$ref`.
+fn resolve_multipart_wire_schema<'a>(
+    schema: &'a Value,
+    component_schemas: &'a BTreeMap<String, Value>,
+    visited: &mut HashSet<String>,
+) -> Option<&'a Value> {
+    let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
+        for keyword in ["anyOf", "oneOf"] {
+            if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+                let concrete: Vec<_> = branches
+                    .iter()
+                    .filter(|branch| branch.get("type").and_then(Value::as_str) != Some("null"))
+                    .collect();
+                if concrete.len() == 1 && concrete.len() < branches.len() {
+                    return resolve_multipart_wire_schema(concrete[0], component_schemas, visited);
+                }
+            }
+        }
+        if let Some(branches) = schema.get("allOf").and_then(Value::as_array) {
+            if branches.len() == 1 {
+                return resolve_multipart_wire_schema(&branches[0], component_schemas, visited);
+            }
+        }
+        return Some(schema);
+    };
+    let name = reference.strip_prefix("#/components/schemas/")?;
+    if !visited.insert(name.to_string()) {
+        return None;
+    }
+    resolve_multipart_wire_schema(component_schemas.get(name)?, component_schemas, visited)
+}
+
+/// Whether a multipart property's wire schema is sent as a file part: a
+/// `format: binary` string, or a union of strings with a binary branch (text
+/// or bytes, such as Cloudflare's KV `value`), which a file part carries
+/// either way.
+fn is_multipart_file_schema(schema: &Value, component_schemas: &BTreeMap<String, Value>) -> bool {
+    let Some(schema) =
+        resolve_multipart_wire_schema(schema, component_schemas, &mut HashSet::new())
+    else {
+        return false;
+    };
+    let is_string = |schema: &Value| schema.get("type").and_then(Value::as_str) == Some("string");
+    let is_binary = |schema: &Value| {
+        is_string(schema) && schema.get("format").and_then(Value::as_str) == Some("binary")
+    };
+    if is_binary(schema) {
+        return true;
+    }
+    ["anyOf", "oneOf"].into_iter().any(|keyword| {
+        let Some(branches) = schema.get(keyword).and_then(Value::as_array) else {
+            return false;
+        };
+        let branches: Option<Vec<&Value>> = branches
+            .iter()
+            .filter(|branch| branch.get("type").and_then(Value::as_str) != Some("null"))
+            .map(|branch| {
+                resolve_multipart_wire_schema(branch, component_schemas, &mut HashSet::new())
+            })
+            .collect();
+        branches.is_some_and(|branches| {
+            branches.iter().all(|branch| is_string(branch)) && branches.iter().any(|b| is_binary(b))
+        })
+    })
+}
+
+/// Type the file fields of multipart request bodies as `MultipartFile`, the
+/// generated carrier for a part's bytes with its own filename and content
+/// type, and arrays of them as `Vec<MultipartFile>`, one part per file. Only
+/// the top-level properties of a body are parts, so nested objects keep
+/// their types.
+///
+/// The carrier is the generator's, not the document's, so it gives way to a
+/// schema whose type is already `MultipartFile`: it takes the first free name
+/// of `MultipartFile2`, `MultipartFile3` and so on, recorded in
+/// [`SchemaAnalysis::multipart_file_type`].
+fn retype_multipart_file_fields(analysis: &mut SchemaAnalysis) {
+    fn file_type(original: &SchemaType, type_name: &str) -> SchemaType {
+        match original {
+            SchemaType::Nullable { inner_type } => SchemaType::Nullable {
+                inner_type: Box::new(file_type(inner_type, type_name)),
+            },
+            _ => SchemaType::Primitive {
+                rust_type: type_name.to_string(),
+                serde_with: None,
+            },
+        }
+    }
+    fn file_array_type(original: &SchemaType, type_name: &str) -> SchemaType {
+        match original {
+            SchemaType::Nullable { inner_type } => SchemaType::Nullable {
+                inner_type: Box::new(file_array_type(inner_type, type_name)),
+            },
+            SchemaType::Array { item_type } => SchemaType::Array {
+                item_type: Box::new(file_type(item_type, type_name)),
+            },
+            _ => SchemaType::Array {
+                item_type: Box::new(file_type(original, type_name)),
+            },
+        }
+    }
+
+    let claimed: HashSet<String> = analysis
+        .schemas
+        .keys()
+        .map(|name| crate::generator::rust_type_name(name))
+        .collect();
+    let mut type_name = MULTIPART_FILE_TYPE.to_string();
+    let mut suffix = 2;
+    while claimed.contains(&type_name) {
+        type_name = format!("{MULTIPART_FILE_TYPE}{suffix}");
+        suffix += 1;
+    }
+
+    let bodies: Vec<(String, Value)> = analysis
+        .operations
+        .values()
+        .filter_map(|operation| match &operation.request_body {
+            Some(RequestBodyContent::Multipart {
+                schema_name,
+                validation_schema,
+                ..
+            }) => Some((schema_name.clone(), validation_schema.clone())),
+            _ => None,
+        })
+        .collect();
+    let components = analysis.validation_context.component_schemas.clone();
+    for (schema_name, validation_schema) in bodies {
+        let Some(wire_properties) =
+            resolve_multipart_wire_schema(&validation_schema, &components, &mut HashSet::new())
+                .and_then(|schema| schema.get("properties"))
+                .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        let mut name = schema_name;
+        let mut seen = HashSet::new();
+        while let Some(SchemaType::Reference { target }) = analysis
+            .schemas
+            .get(&name)
+            .map(|schema| &schema.schema_type)
+        {
+            if !seen.insert(target.clone()) {
+                break;
+            }
+            name = target.clone();
+        }
+        let Some(SchemaType::Object { properties, .. }) = analysis
+            .schemas
+            .get_mut(&name)
+            .map(|schema| &mut schema.schema_type)
+        else {
+            continue;
+        };
+        for (wire_name, property) in properties.iter_mut() {
+            let Some(wire_property) = wire_properties.get(wire_name) else {
+                continue;
+            };
+            if is_multipart_file_schema(wire_property, &components) {
+                property.schema_type = file_type(&property.schema_type, &type_name);
+                analysis.multipart_file_type = Some(type_name.clone());
+                continue;
+            }
+            let items =
+                resolve_multipart_wire_schema(wire_property, &components, &mut HashSet::new())
+                    .filter(|schema| schema.get("type").and_then(Value::as_str) == Some("array"))
+                    .and_then(|schema| schema.get("items"));
+            if items.is_some_and(|items| is_multipart_file_schema(items, &components)) {
+                property.schema_type = file_array_type(&property.schema_type, &type_name);
+                analysis.multipart_file_type = Some(type_name.clone());
+            }
+        }
+    }
+}
+
+/// The name of the generated type of a multipart file part, unless a
+/// schema's type has it. See [`retype_multipart_file_fields`].
+pub(crate) const MULTIPART_FILE_TYPE: &str = "MultipartFile";
 
 fn disambiguate_analyzed_schema_names(
     analysis: &mut SchemaAnalysis,

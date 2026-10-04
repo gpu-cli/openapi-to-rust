@@ -4,10 +4,23 @@
 //! `encoding.<field>.contentType` is the type of any part, and a list of them
 //! is the set the server accepts, so the part gets none.
 //!
-//! The generated client sends a form to a local server, which records each
-//! part's name, content type and body.
+//! A file field is a `MultipartFile`, which carries its own filename and
+//! content type; its own content type wins over the declared one. A list is
+//! one part per item under the field's name, which is how Cloudflare takes a
+//! Worker's modules. A union of text and bytes is a file too, so it can send
+//! either.
+//!
+//! The generated client sends forms to a local server, which records each
+//! part's name, filename, content type and body. The client is generated
+//! under each `types.binary` strategy, since `MultipartFile` holds its content
+//! in that carrier.
+//!
+//! A null item of a list of files is no part, and a schema named
+//! `MultipartFile` keeps its name: the generated file type takes the next free
+//! one, `MultipartFile2`.
 
 use openapi_to_rust::config::ClientSection;
+use openapi_to_rust::type_mapping::{BinaryStrategy, TypeMapper, TypeMappingConfig};
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::json;
 use std::process::Command;
@@ -18,7 +31,8 @@ fn spec() -> serde_json::Value {
         "info": { "title": "multipart encoding", "version": "1" },
         "components": { "schemas": {
             "Plain": { "type": "object", "properties": { "plain": { "type": "string" } } },
-            "Styled": { "type": "object", "properties": { "styled": { "type": "boolean" } } }
+            "Styled": { "type": "object", "properties": { "styled": { "type": "boolean" } } },
+            "Value": { "anyOf": [{ "type": "string" }, { "type": "string", "format": "binary" }] }
         }},
         "paths": {
             "/scripts": { "put": {
@@ -37,18 +51,62 @@ fn spec() -> serde_json::Value {
                                 { "$ref": "#/components/schemas/Plain" },
                                 { "$ref": "#/components/schemas/Styled" }
                             ]},
+                            "files": { "type": "array", "items": { "type": "string", "format": "binary" } },
                             "logo": { "type": "string", "format": "binary" },
-                            "module": { "type": "string", "format": "binary" },
+                            "icon": { "type": "string", "format": "binary" },
                             "caption": { "type": "string" },
-                            "count": { "type": "integer" }
+                            "count": { "type": "integer" },
+                            "tags": { "type": "array", "items": { "type": "string" } }
                         }
                     },
                     "encoding": {
                         "metadata": { "contentType": "application/vnd.script+json" },
+                        "files": { "contentType": "application/javascript+module, text/javascript" },
                         "logo": { "contentType": "image/png" },
-                        "module": { "contentType": "application/javascript+module, text/javascript" },
+                        "icon": { "contentType": "image/png" },
                         "caption": { "contentType": "text/plain; charset=utf-8" },
                         "count": { "contentType": "text/*" }
+                    }
+                }}},
+                "responses": { "204": { "description": "ok" } }
+            }},
+            "/values": { "put": {
+                "operationId": "writeValue",
+                "requestBody": { "required": true, "content": { "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["value"],
+                        "properties": { "value": { "$ref": "#/components/schemas/Value" } }
+                    }
+                }}},
+                "responses": { "204": { "description": "ok" } }
+            }}
+        }
+    })
+}
+
+/// A list of files whose items may be null, and a schema whose type is named
+/// like the generated file type.
+fn colliding_spec() -> serde_json::Value {
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "multipart collisions", "version": "1" },
+        "components": { "schemas": {
+            "MultipartFile": { "type": "object", "properties": { "label": { "type": "string" } } }
+        }},
+        "paths": {
+            "/attachments": { "put": {
+                "operationId": "uploadAttachments",
+                "requestBody": { "required": true, "content": { "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "files": { "type": "array", "items": { "anyOf": [
+                                { "type": "string", "format": "binary" },
+                                { "type": "null" }
+                            ]}},
+                            "manifest": { "$ref": "#/components/schemas/MultipartFile" }
+                        }
                     }
                 }}},
                 "responses": { "204": { "description": "ok" } }
@@ -60,35 +118,72 @@ fn spec() -> serde_json::Value {
 #[test]
 fn multipart_parts_follow_openapi_encoding() {
     let temp = tempfile::TempDir::new().unwrap();
-    let mut analyzer = SchemaAnalyzer::new(spec()).unwrap();
-    let mut analysis = analyzer.analyze().unwrap();
-    let generator = CodeGenerator::new(GeneratorConfig {
-        output_dir: temp.path().join("src/generated"),
-        enable_async_client: true,
-        tracing_enabled: false,
-        client: Some(ClientSection {
-            operations: vec!["uploadScript".into()],
-            prune_models: true,
-        }),
-        ..Default::default()
-    });
-    let result = generator.generate_all(&mut analysis).unwrap();
-    generator.write_files(&result).unwrap();
-    let client = result
-        .files
-        .iter()
-        .find(|file| file.path.ends_with("client.rs"))
-        .unwrap();
-    assert!(
-        !client
-            .content
-            .contains("must be binary or a scalar text field"),
-        "object fields are sent, not rejected:\n{}",
-        client.content
-    );
+    let mut dependencies = String::new();
+    for (module, binary, spec, operations) in [
+        (
+            "with_bytes",
+            BinaryStrategy::Bytes,
+            spec(),
+            vec!["uploadScript", "writeValue"],
+        ),
+        (
+            "with_vec",
+            BinaryStrategy::VecU8,
+            spec(),
+            vec!["uploadScript", "writeValue"],
+        ),
+        (
+            "with_string",
+            BinaryStrategy::String,
+            spec(),
+            vec!["uploadScript", "writeValue"],
+        ),
+        (
+            "colliding",
+            BinaryStrategy::Bytes,
+            colliding_spec(),
+            vec!["uploadAttachments"],
+        ),
+    ] {
+        let types = TypeMappingConfig {
+            binary,
+            ..TypeMappingConfig::default()
+        };
+        let mut analyzer =
+            SchemaAnalyzer::with_type_mapper(spec, TypeMapper::new(types.clone())).unwrap();
+        let mut analysis = analyzer.analyze().unwrap();
+        let generator = CodeGenerator::new(GeneratorConfig {
+            output_dir: temp.path().join("src").join(module),
+            types,
+            enable_async_client: true,
+            tracing_enabled: false,
+            client: Some(ClientSection {
+                operations: operations.into_iter().map(String::from).collect(),
+                prune_models: true,
+            }),
+            ..Default::default()
+        });
+        let result = generator.generate_all(&mut analysis).unwrap();
+        generator.write_files(&result).unwrap();
+        let client = result
+            .files
+            .iter()
+            .find(|file| file.path.ends_with("client.rs"))
+            .unwrap();
+        assert!(
+            !client
+                .content
+                .contains("HttpError::Config(\"multipart field"),
+            "every field is sent, none rejected:\n{}",
+            client.content
+        );
+        if module == "with_bytes" {
+            dependencies =
+                std::fs::read_to_string(temp.path().join("src/with_bytes/REQUIRED_DEPS.toml"))
+                    .unwrap();
+        }
+    }
 
-    let dependencies =
-        std::fs::read_to_string(temp.path().join("src/generated/REQUIRED_DEPS.toml")).unwrap();
     std::fs::write(
         temp.path().join("Cargo.toml"),
         format!(
@@ -151,66 +246,185 @@ tokio = {{version="1", features=["macros","net","rt-multi-thread"]}}
     }
 }
 
-const RUNTIME: &str = r###"pub mod generated;
+const RUNTIME: &str = r###"pub mod with_bytes;
+pub mod with_vec;
+pub mod with_string;
+pub mod colliding;
 #[cfg(test)]
 mod tests {
-    use super::generated::{client::HttpClient, types::*};
     use axum::{extract::{Multipart, State}, http::StatusCode, routing::put, Router};
     use std::{collections::BTreeMap, sync::{Arc, Mutex}};
 
-    /// Each part's content type and body, by name.
-    type Parts = BTreeMap<String, (Option<String>, Vec<u8>)>;
+    /// A recorded part: its filename, content type and body.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Part { file_name: Option<String>, content_type: Option<String>, body: Vec<u8> }
 
-    async fn record(State(parts): State<Arc<Mutex<Parts>>>, mut multipart: Multipart) -> StatusCode {
+    impl Part {
+        fn new(file_name: Option<&str>, content_type: Option<&str>, body: &[u8]) -> Self {
+            Self { file_name: file_name.map(str::to_string), content_type: content_type.map(str::to_string), body: body.to_vec() }
+        }
+    }
+
+    /// Every part of the last form, in order, by name.
+    type Parts = Arc<Mutex<Vec<(String, Part)>>>;
+
+    async fn record(State(parts): State<Parts>, mut multipart: Multipart) -> StatusCode {
+        let mut form = Vec::new();
         while let Some(field) = multipart.next_field().await.unwrap() {
             let name = field.name().unwrap().to_string();
+            let file_name = field.file_name().map(str::to_string);
             let content_type = field.content_type().map(str::to_string);
             let body = field.bytes().await.unwrap().to_vec();
-            parts.lock().unwrap().insert(name, (content_type, body));
+            form.push((name, Part { file_name, content_type, body }));
         }
+        *parts.lock().unwrap() = form;
         StatusCode::NO_CONTENT
     }
 
-    #[tokio::test]
-    async fn parts_carry_their_encoding() {
-        let parts = Arc::new(Mutex::new(Parts::new()));
-        let app = Router::new().route("/scripts", put(record)).with_state(parts.clone());
+    async fn serve() -> (String, Parts) {
+        let parts = Parts::default();
+        let app = Router::new()
+            .route("/scripts", put(record))
+            .route("/values", put(record))
+            .route("/attachments", put(record))
+            .with_state(parts.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (base_url, parts)
+    }
 
-        let mut settings = BTreeMap::new();
-        settings.insert("compatibility_date".to_string(), serde_json::json!("2026-10-01"));
-        let request = UploadScriptRequest {
-            metadata: UploadScriptRequestMetadata { main_module: Some("worker.js".into()) },
-            settings: Some(UploadScriptRequestSettings { additional_properties: settings }),
-            theme: Some(UploadScriptRequestTheme::Styled(Styled { styled: Some(true) })),
-            logo: Some(bytes::Bytes::from_static(b"\x89PNG")),
-            module: Some(bytes::Bytes::from_static(b"export default {}")),
-            caption: Some("hello".into()),
-            count: Some(3),
+    fn named<'a>(parts: &'a [(String, Part)], name: &str) -> Vec<&'a Part> {
+        parts.iter().filter(|(part, _)| part == name).map(|(_, part)| part).collect()
+    }
+
+    /// The same form, whatever carries a file's content.
+    macro_rules! upload_script_parts {
+        ($module:ident) => {{
+            use super::$module::{client::HttpClient, types::*};
+            let (base_url, parts) = serve().await;
+            let client = HttpClient::new().with_base_url(base_url);
+            let mut settings = BTreeMap::new();
+            settings.insert("compatibility_date".to_string(), serde_json::json!("2026-10-01"));
+            let request = UploadScriptRequest {
+                metadata: UploadScriptRequestMetadata { main_module: Some("worker.js".into()) },
+                settings: Some(UploadScriptRequestSettings { additional_properties: settings }),
+                theme: Some(UploadScriptRequestTheme::Styled(Styled { styled: Some(true) })),
+                files: Some(vec![
+                    MultipartFile::from("export default {}")
+                        .with_file_name("worker.js")
+                        .with_content_type("application/javascript+module"),
+                    MultipartFile::from("export const x = 1").with_file_name("lib.js"),
+                ]),
+                logo: Some(MultipartFile::from("PNG")),
+                icon: Some(MultipartFile::from("<svg/>").with_content_type("image/svg+xml")),
+                caption: Some("hello".into()),
+                count: Some(3),
+                tags: Some(vec!["a".into(), "b".into()]),
+            };
+            client.upload_script(request).await.unwrap();
+            let script = parts.lock().unwrap().clone();
+
+            client.write_value(WriteValueRequest { value: "text".into() }).await.unwrap();
+            let text = parts.lock().unwrap().clone();
+            client
+                .write_value(WriteValueRequest { value: MultipartFile::from("raw").with_file_name("value.bin") })
+                .await
+                .unwrap();
+            let file = parts.lock().unwrap().clone();
+            (script, text, file)
+        }};
+    }
+
+    fn check(script: Vec<(String, Part)>, text: Vec<(String, Part)>, file: Vec<(String, Part)>) {
+        let one = |name: &str| {
+            let parts = named(&script, name);
+            assert_eq!(parts.len(), 1, "{name}: {script:?}");
+            parts[0].clone()
         };
-        HttpClient::new().with_base_url(base_url).upload_script(request).await.unwrap();
-
-        let parts = parts.lock().unwrap().clone();
-        let part = |name: &str| parts.get(name).unwrap_or_else(|| panic!("no part {name}: {parts:?}"));
-        let json = |name: &str| serde_json::from_slice::<serde_json::Value>(&part(name).1).unwrap();
+        let json = |name: &str| serde_json::from_slice::<serde_json::Value>(&one(name).body).unwrap();
 
         // Objects are JSON, typed by `encoding` or `application/json`.
-        assert_eq!(part("metadata").0.as_deref(), Some("application/vnd.script+json"));
+        assert_eq!(one("metadata").content_type.as_deref(), Some("application/vnd.script+json"));
         assert_eq!(json("metadata"), serde_json::json!({ "main_module": "worker.js" }));
-        assert_eq!(part("settings").0.as_deref(), Some("application/json"));
+        assert_eq!(one("settings").content_type.as_deref(), Some("application/json"));
         assert_eq!(json("settings"), serde_json::json!({ "compatibility_date": "2026-10-01" }));
-        assert_eq!(part("theme").0.as_deref(), Some("application/json"));
+        assert_eq!(one("theme").content_type.as_deref(), Some("application/json"));
         assert_eq!(json("theme"), serde_json::json!({ "styled": true }));
 
-        // A single media type applies to any part.
-        assert_eq!(part("logo"), &(Some("image/png".to_string()), b"\x89PNG".to_vec()));
-        assert_eq!(part("caption"), &(Some("text/plain; charset=utf-8".to_string()), b"hello".to_vec()));
+        // A list of files is one part each, with its own filename and
+        // content type. The declared list isn't a type for the part.
+        assert_eq!(named(&script, "files"), [
+            &Part::new(Some("worker.js"), Some("application/javascript+module"), b"export default {}"),
+            &Part::new(Some("lib.js"), None, b"export const x = 1"),
+        ]);
 
-        // A list or a range is what the server accepts, not the part's type.
-        assert_eq!(part("module"), &(None, b"export default {}".to_vec()));
-        assert_eq!(part("count"), &(None, b"3".to_vec()));
+        // A declared media type applies when the file has none, and the
+        // file's own wins.
+        assert_eq!(one("logo"), Part::new(None, Some("image/png"), b"PNG"));
+        assert_eq!(one("icon"), Part::new(None, Some("image/svg+xml"), b"<svg/>"));
+        assert_eq!(one("caption"), Part::new(None, Some("text/plain; charset=utf-8"), b"hello"));
+
+        // A range is what the server accepts, not the part's type.
+        assert_eq!(one("count"), Part::new(None, None, b"3"));
+
+        // A list of scalars is one text part each.
+        assert_eq!(named(&script, "tags"), [&Part::new(None, None, b"a"), &Part::new(None, None, b"b")]);
+
+        // Text or bytes: a plain value, or a file with a filename.
+        assert_eq!(named(&text, "value"), [&Part::new(None, None, b"text")]);
+        assert_eq!(named(&file, "value"), [&Part::new(Some("value.bin"), None, b"raw")]);
+    }
+
+    #[tokio::test]
+    async fn bytes_files() {
+        let (script, text, file) = upload_script_parts!(with_bytes);
+        check(script, text, file);
+    }
+
+    #[tokio::test]
+    async fn vec_files() {
+        let (script, text, file) = upload_script_parts!(with_vec);
+        check(script, text, file);
+    }
+
+    #[tokio::test]
+    async fn string_files() {
+        let (script, text, file) = upload_script_parts!(with_string);
+        check(script, text, file);
+    }
+
+    #[tokio::test]
+    async fn null_files_and_colliding_names() {
+        use super::colliding::{client::HttpClient, types::*};
+        let (base_url, parts) = serve().await;
+        let client = HttpClient::new().with_base_url(base_url);
+        client
+            .upload_attachments(UploadAttachmentsRequest {
+                files: Some(vec![
+                    Some(MultipartFile2::from("a").with_file_name("a.txt")),
+                    None,
+                    Some(MultipartFile2::from("b")),
+                ]),
+                manifest: Some(MultipartFile { label: Some("both".into()) }),
+            })
+            .await
+            .unwrap();
+        let form = parts.lock().unwrap().clone();
+
+        // A null item is no part.
+        assert_eq!(named(&form, "files"), [
+            &Part::new(Some("a.txt"), None, b"a"),
+            &Part::new(None, None, b"b"),
+        ]);
+        // The document's `MultipartFile` is its own object, sent as JSON.
+        let manifest = named(&form, "manifest");
+        assert_eq!(manifest.len(), 1, "{form:?}");
+        assert_eq!(manifest[0].content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&manifest[0].body).unwrap(),
+            serde_json::json!({ "label": "both" })
+        );
     }
 }
 "###;

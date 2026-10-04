@@ -72,14 +72,14 @@ mod tests {
 
     #[derive(Clone)]
     struct Api {
-        captured: UnboundedSender<(Vec<u8>, u64, bool, Option<String>)>,
+        captured: UnboundedSender<(MultipartFile, u64, bool, Option<String>)>,
     }
 
     #[async_trait::async_trait]
     impl ServerApi for Api {
         async fn upload_file(&self, body: UploadFileRequest) -> UploadFileResponse {
             self.captured.send((
-                body.file.to_vec(),
+                body.file,
                 body.count,
                 body.enabled,
                 body.display_name,
@@ -99,8 +99,12 @@ mod tests {
         let base_url = format!("http://{address}");
         let client = HttpClient::new().with_base_url(base_url.clone());
         let payload = vec![0, 1, 2, 255];
+        // The handler gets the part's filename and content type with its bytes.
+        let file = MultipartFile::from(payload)
+            .with_file_name("data.bin")
+            .with_content_type("application/vnd.demo");
         let request = UploadFileRequest {
-            file: bytes::Bytes::from(payload.clone()),
+            file: file.clone(),
             count: 9_223_372_036_854_775_808_u64,
             enabled: true,
             display_name: Some("demo".into()),
@@ -109,7 +113,7 @@ mod tests {
         assert_eq!(
             rx.recv().await.unwrap(),
             (
-                payload,
+                file,
                 9_223_372_036_854_775_808_u64,
                 true,
                 Some("demo".into())
@@ -188,6 +192,95 @@ mod tests {
         output.status.success(),
         "generated multipart roundtrip failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A schema named `MultipartFile` keeps its name, and the server takes file
+/// parts into the generated file type under the next free one.
+#[test]
+fn generated_server_compiles_with_a_schema_named_like_the_file_type() {
+    let spec = json!({
+        "openapi": "3.1.0",
+        "info": { "title": "multipart collision", "version": "1" },
+        "components": { "schemas": {
+            "MultipartFile": { "type": "object", "properties": { "label": { "type": "string" } } }
+        }},
+        "paths": { "/upload": { "post": {
+            "operationId": "uploadFile",
+            "requestBody": { "required": true, "content": {
+                "multipart/form-data": { "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": { "file": { "type": "string", "format": "binary" } }
+                }}
+            }},
+            "responses": { "200": { "description": "stored", "content": {
+                "application/json": { "schema": { "$ref": "#/components/schemas/MultipartFile" } }
+            }}}
+        }}}
+    });
+    let temp = tempfile::TempDir::new().expect("temp crate");
+    let output_dir = temp.path().join("src/generated");
+    let config = GeneratorConfig {
+        output_dir: output_dir.clone(),
+        module_name: "multipart_collision".into(),
+        enable_async_client: true,
+        tracing_enabled: false,
+        server: Some(ServerSection {
+            framework: "axum".into(),
+            operations: vec!["uploadFile".into()],
+            prune_models: true,
+            validation: ServerValidationSection {
+                enabled: true,
+                max_body_bytes: 1024,
+                max_errors: 4,
+            },
+        }),
+        ..Default::default()
+    };
+    let mut analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+    let generator = CodeGenerator::new(config);
+    let result = generator.generate_all(&mut analysis).expect("generation");
+    generator
+        .write_files(&result)
+        .expect("write generated files");
+
+    let deps = std::fs::read_to_string(output_dir.join("REQUIRED_DEPS.toml")).unwrap();
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"generated-multipart-collision\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n{deps}"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("src/lib.rs"),
+        r#"pub mod generated;
+use generated::*;
+
+pub struct Api;
+
+#[async_trait::async_trait]
+impl ServerApi for Api {
+    async fn upload_file(&self, body: UploadFileRequest) -> UploadFileResponse {
+        let file: MultipartFile2 = body.file;
+        UploadFileResponse::Ok(MultipartFile { label: file.file_name })
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("cargo")
+        .args(["check", "--quiet", "--lib"])
+        .current_dir(temp.path())
+        .env("CARGO_TARGET_DIR", "target/generated-multipart-roundtrip")
+        .output()
+        .expect("scratch cargo check");
+    assert!(
+        output.status.success(),
+        "generated multipart server failed to compile:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
