@@ -6,6 +6,16 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Generated `HttpClient::with_client(reqwest::Client)` accepts a preconfigured
+  transport for custom TLS identities, trusted roots, proxies, timeouts, and
+  default headers on HTTP and SSE requests (#99). When retry or tracing is
+  generated, `with_client_and_config` also accepts the existing middleware
+  configuration arguments. Existing constructors and defaults are preserved.
+  Operations whose Rust names collide with the new constructors receive the
+  existing numeric collision suffix.
+
 ## [0.20.0] - 2026-10-04
 
 ### Added

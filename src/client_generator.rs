@@ -34,6 +34,7 @@
 //!
 //! impl HttpClient {
 //!     pub fn new() -> Self { /* ... */ }
+//!     pub fn with_client(client: reqwest::Client) -> Self { /* ... */ }
 //!     pub fn with_config(retry_config: Option<RetryConfig>, enable_tracing: bool) -> Self { /* ... */ }
 //!     pub fn with_base_url(self, base_url: String) -> Self { /* ... */ }
 //!     pub fn with_api_key(self, api_key: String) -> Self { /* ... */ }
@@ -456,29 +457,40 @@ impl CodeGenerator {
             quote! {
                 /// Create a new HTTP client with default configuration
                 pub fn new() -> Self {
-                    let reqwest_client = reqwest::Client::new();
-                    let client_builder = ClientBuilder::new(reqwest_client);
-                    let http_client = client_builder.build();
-
-                    Self {
-                        base_url: #default_base_url,
-                        api_key: None,
-                        http_client,
-                        custom_headers: BTreeMap::new(),
-                        max_response_body_bytes: #max_response_body_bytes,
-                    }
+                    Self::with_client(reqwest::Client::new())
                 }
             }
         };
 
         if has_retry || has_tracing {
+            let retry_arg = has_retry.then(|| quote! { retry_config, });
+            let tracing_arg = has_tracing.then(|| quote! { enable_tracing, });
+            let default_retry_arg = has_retry.then(|| quote! { None, });
+            let default_tracing_arg = has_tracing.then(|| quote! { true, });
+
             quote! {
                 #default_constructor
 
                 /// Create a new HTTP client with custom configuration
                 pub fn with_config(#retry_param #tracing_param) -> Self {
-                    let reqwest_client = reqwest::Client::new();
-                    let mut client_builder = ClientBuilder::new(reqwest_client);
+                    Self::with_client_and_config(reqwest::Client::new(), #retry_arg #tracing_arg)
+                }
+
+                /// Create an HTTP client using a preconfigured reqwest client.
+                ///
+                /// Preserves the supplied client's transport settings (for example,
+                /// TLS identity, trusted roots, proxy, timeout, and default headers).
+                /// Uses the same middleware defaults as `new()`.
+                pub fn with_client(client: reqwest::Client) -> Self {
+                    Self::with_client_and_config(client, #default_retry_arg #default_tracing_arg)
+                }
+
+                /// Create an HTTP client using a preconfigured reqwest client
+                /// and explicit retry/tracing configuration.
+                ///
+                /// Wraps the supplied client with the generated middleware stack.
+                pub fn with_client_and_config(client: reqwest::Client, #retry_param #tracing_param) -> Self {
+                    let mut client_builder = ClientBuilder::new(client);
 
                     #tracing_middleware
                     #retry_middleware
@@ -495,7 +507,25 @@ impl CodeGenerator {
                 }
             }
         } else {
-            default_constructor
+            quote! {
+                #default_constructor
+
+                /// Create an HTTP client using a preconfigured reqwest client.
+                ///
+                /// Preserves the supplied client's transport settings (for example,
+                /// TLS identity, trusted roots, proxy, timeout, and default headers).
+                pub fn with_client(client: reqwest::Client) -> Self {
+                    let http_client = ClientBuilder::new(client).build();
+
+                    Self {
+                        base_url: #default_base_url,
+                        api_key: None,
+                        http_client,
+                        custom_headers: BTreeMap::new(),
+                        max_response_body_bytes: #max_response_body_bytes,
+                    }
+                }
+            }
         }
     }
 
@@ -598,6 +628,8 @@ impl CodeGenerator {
         let mut used: std::collections::HashSet<String> = [
             "new",
             "with_config",
+            "with_client",
+            "with_client_and_config",
             "with_base_url",
             "with_api_key",
             "with_max_response_body_bytes",
