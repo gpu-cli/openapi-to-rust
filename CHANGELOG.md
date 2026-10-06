@@ -6,6 +6,15 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Path parameters declared with `allowReserved: true` serialize with RFC 6570
+  reserved expansion: `:`, `@`, `[`, `]` and the sub-delimiters stay literal
+  and existing `%XX` triples pass through, while `/`, `?` and `#` remain
+  percent-encoded as path templating requires. A server that routes on the
+  literal form, such as `GET /prices/XLON:LLOY`, can now be described without
+  the client sending `%3A`. Default path encoding is unchanged.
+
 ## [0.21.0] - 2026-10-06
 
 ### Added

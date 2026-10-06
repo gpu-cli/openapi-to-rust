@@ -350,6 +350,7 @@ impl CodeGenerator {
                 }
                 out
             }
+
         };
 
         // Combine all parts
@@ -584,6 +585,54 @@ impl CodeGenerator {
     /// Generate every operation-owned client artifact from one resolved
     /// operation slice. This keeps methods, parameter enums, and typed error
     /// enums in lockstep for selective clients.
+    /// RFC 6570 reserved-expansion encoder, emitted only when an operation has a
+    /// path parameter with `allowReserved: true`.
+    pub(crate) fn generate_reserved_path_encoder(
+        &self,
+        operations: &[&crate::analysis::OperationInfo],
+    ) -> TokenStream {
+        let used = operations.iter().any(|op| {
+            op.parameters
+                .iter()
+                .any(|p| p.location == "path" && p.allow_reserved)
+        });
+        if !used {
+            return TokenStream::new();
+        }
+        quote! {
+            // RFC 6570 reserved expansion for path parameters with
+            // `allowReserved: true`: unreserved and reserved bytes and existing
+            // `%XX` triples pass through, except `/`, `?` and `#`, which OpenAPI
+            // path templating forbids unescaped in a parameter value.
+            fn __pct_encode_path_reserved(s: &str) -> String {
+                let bytes = s.as_bytes();
+                let mut out = String::with_capacity(bytes.len());
+                let mut i = 0;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+                        | b':' | b'@' | b'[' | b']' | b'!' | b'$' | b'&' | b'\'' | b'('
+                        | b')' | b'*' | b'+' | b',' | b';' | b'=' => out.push(b as char),
+                        b'%' if i + 2 < bytes.len()
+                            && bytes[i + 1].is_ascii_hexdigit()
+                            && bytes[i + 2].is_ascii_hexdigit() =>
+                        {
+                            out.push_str(&s[i..i + 3]);
+                            i += 2;
+                        }
+                        _ => {
+                            out.push('%');
+                            out.push_str(&format!("{:02X}", b));
+                        }
+                    }
+                    i += 1;
+                }
+                out
+            }
+        }
+    }
+
     pub(crate) fn generate_operation_methods_for(
         &self,
         analysis: &SchemaAnalysis,
@@ -4145,13 +4194,18 @@ impl CodeGenerator {
             format_string.push_str("{}");
             let param_name_snake = self.operation_param_ident(op, param);
             let param_ident = Self::to_field_ident(&param_name_snake);
+            let encoder = if param.allow_reserved {
+                quote! { __pct_encode_path_reserved }
+            } else {
+                quote! { __pct_encode_path_segment }
+            };
             if Self::param_uses_as_ref_str(param) {
                 format_args.push(quote! {
-                    __pct_encode_path_segment(#param_ident.as_ref())
+                    #encoder(#param_ident.as_ref())
                 });
             } else {
                 format_args.push(quote! {
-                    __pct_encode_path_segment(&#param_ident.to_string())
+                    #encoder(&#param_ident.to_string())
                 });
             }
         }
