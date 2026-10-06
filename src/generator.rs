@@ -1515,7 +1515,6 @@ impl CodeGenerator {
         let error_types = self.generate_http_error_types();
         let client_struct = self.generate_http_client_struct();
         let operation_methods = self.generate_operation_methods_for(analysis, operations);
-        let reserved_path_encoder = self.generate_reserved_path_encoder(operations);
 
         let generated = quote! {
             //! Generated HTTP client for regular API requests
@@ -1531,8 +1530,6 @@ impl CodeGenerator {
             #error_types
 
             #client_struct
-
-            #reserved_path_encoder
 
             #operation_methods
         };

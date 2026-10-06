@@ -13,7 +13,15 @@ when correcting output that was wrong or incomplete on the wire.
   and existing `%XX` triples pass through, while `/`, `?` and `#` remain
   percent-encoded as path templating requires. A server that routes on the
   literal form, such as `GET /prices/XLON:LLOY`, can now be described without
-  the client sending `%3A`. Default path encoding is unchanged.
+  the client sending `%3A`. This is OpenAPI 3.2 behavior, also supported as a
+  compatibility extension for 3.0/3.1 specs, where the standard defines
+  `allowReserved` only for query parameters. Default path encoding is unchanged.
+
+### Fixed
+
+- Low-level client generation includes the reserved path encoder with operation
+  methods, so composing the public client-generation helpers works for path
+  parameters with `allowReserved: true`.
 
 ## [0.21.0] - 2026-10-06
 
