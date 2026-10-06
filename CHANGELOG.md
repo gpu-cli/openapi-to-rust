@@ -6,6 +6,8 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-06
+
 ### Added
 
 - Generated `HttpClient::with_client(reqwest::Client)` accepts a preconfigured
