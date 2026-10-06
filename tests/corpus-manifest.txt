@@ -43,7 +43,7 @@ cerebras/client.rs                                        42274     1129 d6c9699
 cerebras/mod.rs                                             442       17 71f9d1b20905ad16
 cerebras/types.rs                                        231216     5923 aad1193fbff6a57a
 circleci/REQUIRED_DEPS.toml                                 626       15 082a47f05075776b
-circleci/client.rs                                       625906    16205 5c274d507425cf33
+circleci/client.rs                                       626997    16248 8e903224f1455d23
 circleci/mod.rs                                             442       17 7a8b5691342a9d62
 circleci/types.rs                                        384614    10072 6f277085e1ad9894
 cloudflare/REQUIRED_DEPS.toml                               787       19 09cccc57db93029b
@@ -235,4 +235,4 @@ writer/client.rs                                         191302     5007 33061e5
 writer/mod.rs                                               438       17 0435bf1552e493d1
 writer/types.rs                                          198394     4888 800dd8afe5798530
 #
-# specs: 56   files: 224   bytes: 330620818
+# specs: 56   files: 224   bytes: 330621909

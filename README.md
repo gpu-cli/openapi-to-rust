@@ -722,6 +722,14 @@ The generator accepts 3.0.x and 3.1.x specs; 3.2.x parses with an
 unrecognized field may be ignored by analysis and code generation. Add a
 focused fixture when relying on a less-common OpenAPI or JSON Schema keyword.
 
+Path parameters with `allowReserved: true` use OpenAPI 3.2 reserved expansion:
+reserved characters such as `:` and existing `%XX` triples pass through, while
+`/`, `?`, and `#` remain percent-encoded. The generator also accepts this path
+behavior in 3.0.x and 3.1.x specs as a compatibility extension; those versions
+define `allowReserved` only for query parameters. Omitting the flag or setting
+it to `false` preserves the default path encoding. Query `allowReserved` is
+currently parsed but does not change generated query serialization.
+
 **3.1 (JSON Schema 2020-12) keywords now modeled and read from typed fields:**
 
 | Keyword group | Status |
@@ -742,6 +750,7 @@ focused fixture when relying on a less-common OpenAPI or JSON Schema keyword.
 
 | Delta | Status |
 |---|---|
+| Path parameter `allowReserved` | emits reserved expansion; also supported as an extension in 3.0/3.1 |
 | `query` HTTP method + `PathItem.additionalOperations` | parses + emits client methods via `reqwest::Method::from_bytes(...)` |
 | OAuth `deviceAuthorization` flow + `oauth2MetadataUrl` | typed |
 | `Server.name`, `Tag.parent`/`kind`/`summary` | typed |

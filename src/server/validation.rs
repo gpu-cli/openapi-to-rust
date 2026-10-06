@@ -1380,6 +1380,7 @@ mod tests {
                 enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
+                allow_reserved: false,
                 validation_schema: Some(json!({"$ref": "#/components/schemas/Payload"})),
             }],
             ..Default::default()
@@ -1439,6 +1440,7 @@ mod tests {
                 enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
+                allow_reserved: false,
                 validation_schema: Some(json!({
                     "$ref": "#/components/schemas/Tag~1Kind/allOf/0"
                 })),
@@ -1486,6 +1488,7 @@ mod tests {
                 enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
+                allow_reserved: false,
                 validation_schema: Some(json!({"const": literal})),
             }],
             ..Default::default()
@@ -1529,6 +1532,7 @@ mod tests {
                 enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
+                allow_reserved: false,
                 validation_schema: Some(json!({
                     "type": "string",
                     "pattern": "[^/:|\\000-\\037]+"
@@ -1643,6 +1647,7 @@ mod tests {
                 enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
+                allow_reserved: false,
                 validation_schema: Some(json!({"type": "string", "maxLength": 4})),
             }],
             ..Default::default()

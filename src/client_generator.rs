@@ -350,6 +350,7 @@ impl CodeGenerator {
                 }
                 out
             }
+
         };
 
         // Combine all parts
@@ -569,6 +570,7 @@ impl CodeGenerator {
     /// Emits per-operation typed error enums (one variant per declared non-2xx
     /// response with a body schema) BEFORE the `impl HttpClient` block so the
     /// generated method signatures can reference them. This low-level helper
+    /// also emits operation-owned helpers such as the reserved path encoder.
     /// intentionally emits every analyzed operation; use
     /// [`Self::generate_http_client`] or [`Self::generate_all`] to honor the
     /// configured `[client].operations` scope.
@@ -581,15 +583,64 @@ impl CodeGenerator {
         CodeGenerator::new(config).generate_operation_methods_for(analysis, &operations)
     }
 
+    /// RFC 6570 reserved-expansion encoder, emitted only when an operation has a
+    /// path parameter with `allowReserved: true`.
+    fn generate_reserved_path_encoder(
+        &self,
+        operations: &[&crate::analysis::OperationInfo],
+    ) -> TokenStream {
+        let used = operations.iter().any(|op| {
+            op.parameters
+                .iter()
+                .any(|p| p.location == "path" && p.allow_reserved)
+        });
+        if !used {
+            return TokenStream::new();
+        }
+        quote! {
+            // RFC 6570 reserved expansion for path parameters with
+            // `allowReserved: true`: unreserved and reserved bytes and existing
+            // `%XX` triples pass through, except `/`, `?` and `#`, which OpenAPI
+            // path templating forbids unescaped in a parameter value.
+            fn __pct_encode_path_reserved(s: &str) -> String {
+                let bytes = s.as_bytes();
+                let mut out = String::with_capacity(bytes.len());
+                let mut i = 0;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    match b {
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+                        | b':' | b'@' | b'[' | b']' | b'!' | b'$' | b'&' | b'\'' | b'('
+                        | b')' | b'*' | b'+' | b',' | b';' | b'=' => out.push(b as char),
+                        b'%' if i + 2 < bytes.len()
+                            && bytes[i + 1].is_ascii_hexdigit()
+                            && bytes[i + 2].is_ascii_hexdigit() =>
+                        {
+                            out.push_str(&s[i..i + 3]);
+                            i += 2;
+                        }
+                        _ => {
+                            out.push('%');
+                            out.push_str(&format!("{:02X}", b));
+                        }
+                    }
+                    i += 1;
+                }
+                out
+            }
+        }
+    }
+
     /// Generate every operation-owned client artifact from one resolved
-    /// operation slice. This keeps methods, parameter enums, and typed error
-    /// enums in lockstep for selective clients.
+    /// operation slice, including any required path encoder. This keeps helpers,
+    /// methods, parameter enums, and typed errors in lockstep for selective clients.
     pub(crate) fn generate_operation_methods_for(
         &self,
         analysis: &SchemaAnalysis,
         operations: &[&OperationInfo],
     ) -> TokenStream {
         let param_enums = self.generate_param_enum_types(operations);
+        let reserved_path_encoder = self.generate_reserved_path_encoder(operations);
 
         let op_error_enums: Vec<TokenStream> = operations
             .iter()
@@ -606,6 +657,8 @@ impl CodeGenerator {
             self.generate_operation_builders(analysis, &plans);
 
         quote! {
+            #reserved_path_encoder
+
             #param_enums
 
             #(#op_error_enums)*
@@ -4145,13 +4198,18 @@ impl CodeGenerator {
             format_string.push_str("{}");
             let param_name_snake = self.operation_param_ident(op, param);
             let param_ident = Self::to_field_ident(&param_name_snake);
+            let encoder = if param.allow_reserved {
+                quote! { __pct_encode_path_reserved }
+            } else {
+                quote! { __pct_encode_path_segment }
+            };
             if Self::param_uses_as_ref_str(param) {
                 format_args.push(quote! {
-                    __pct_encode_path_segment(#param_ident.as_ref())
+                    #encoder(#param_ident.as_ref())
                 });
             } else {
                 format_args.push(quote! {
-                    __pct_encode_path_segment(&#param_ident.to_string())
+                    #encoder(&#param_ident.to_string())
                 });
             }
         }

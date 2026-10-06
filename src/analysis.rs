@@ -1093,6 +1093,11 @@ pub struct ParameterInfo {
     /// generated/resolved for the object schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_serialization: Option<QuerySerialization>,
+    /// `allowReserved: true` on the parameter: values use RFC 6570 reserved
+    /// expansion, so `:`, `@` and the sub-delimiters stay literal in a path
+    /// segment instead of being percent-encoded.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_reserved: bool,
     /// Original parameter schema retained for request validation. This is not
     /// exposed by serialized operation listings.
     #[serde(skip)]
@@ -8286,6 +8291,7 @@ impl SchemaAnalyzer {
                 enum_varnames: None,
                 rust_ident: None,
                 query_serialization: None,
+                allow_reserved: false,
                 validation_schema: None,
             });
         }
@@ -8819,6 +8825,7 @@ impl SchemaAnalyzer {
             enum_varnames,
             rust_ident: None,
             query_serialization,
+            allow_reserved: param.allow_reserved.unwrap_or(false),
             validation_schema,
         }))
     }
