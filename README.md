@@ -304,6 +304,40 @@ fixed-length body crosses the limit, the call returns
 exceed it. Successful SSE responses remain streaming; only SSE error responses
 are buffered under the same cap.
 
+### Custom HTTP transport
+
+Supply a preconfigured `reqwest::Client` to customize TLS, trusted roots, proxies,
+timeouts, or default headers for both HTTP and SSE requests:
+
+```rust
+let transport = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(30))
+    .build()?;
+let client = HttpClient::with_client(transport)
+    .with_base_url("https://api.example.com");
+```
+
+For mutual TLS, configure `.identity(identity)` and, when needed,
+`.add_root_certificate(certificate)` on the reqwest builder before calling
+`build()`. Enable the appropriate TLS features in your consuming crate.
+
+`with_client` uses the same middleware defaults as `new()` (retry disabled,
+tracing enabled when generated). When retry or tracing is generated,
+`with_client_and_config` accepts the transport followed by the same arguments
+as `with_config`. With both enabled, for example:
+
+```rust
+let client = HttpClient::with_client_and_config(
+    transport,
+    Some(RetryConfig::default()),
+    false, // disable tracing
+);
+```
+
+Existing `new()`, `Default`, and `with_config(...)` calls keep their signatures
+and behavior. These constructors do not automatically configure mutual TLS
+from an OpenAPI security scheme.
+
 ### Multipart files
 
 A file field of a typed multipart body (`format: binary`, or a union of text
