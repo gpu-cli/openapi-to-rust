@@ -6,6 +6,8 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-06
+
 ### Added
 
 - Path parameters declared with `allowReserved: true` serialize with RFC 6570
@@ -16,6 +18,8 @@ when correcting output that was wrong or incomplete on the wire.
   the client sending `%3A`. This is OpenAPI 3.2 behavior, also supported as a
   compatibility extension for 3.0/3.1 specs, where the standard defines
   `allowReserved` only for query parameters. Default path encoding is unchanged.
+- Analysis exposes `ParameterInfo::allow_reserved`. Callers constructing
+  `ParameterInfo` directly must initialize the new field.
 
 ### Fixed
 
