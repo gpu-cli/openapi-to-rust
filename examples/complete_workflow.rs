@@ -289,6 +289,7 @@ fn demonstrate_rust_api(
         enable_sse_client: false,
         enable_async_client: true,
         enable_specta: false,
+        derives: Default::default(),
         http_client_config: Some(HttpClientConfig {
             base_url: Some("https://api.example.com".to_string()),
             timeout_seconds: Some(30),

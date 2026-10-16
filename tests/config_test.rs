@@ -492,6 +492,7 @@ fn generator_section_retains_standalone_serde_compatibility() {
         effective_spec: None,
         bindings_metadata: None,
         builders: BuildersSection::default(),
+        derives: Default::default(),
     };
 
     let serialized = toml::to_string(&section).unwrap();

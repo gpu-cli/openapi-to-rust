@@ -285,6 +285,7 @@ pub fn run_generation_test(
         overlays: Vec::new(),
         effective_spec: None,
         bindings_metadata: None,
+        derives: Default::default(),
         http_client_config: None,
         retry_config: None,
         tracing_enabled: true,

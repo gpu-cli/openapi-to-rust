@@ -6,6 +6,21 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `[generator.derives].string_enums` and
+  `[generator.derives.types]` add derive traits to generated models and HTTP
+  parameter enums (#106). Group and per-type additions combine with existing
+  derives, including ordering and hashing for map keys. Qualified custom macro
+  paths are supported; consumers supply their dependencies. Defaults preserve
+  existing output and wire behavior.
+
+### Changed
+
+- `GeneratorConfig` and `config::GeneratorSection` expose a new `derives` field
+  of type `DerivesConfig`. Callers using exhaustive Rust struct literals must
+  initialize it; `GeneratorConfig { ..Default::default() }` needs no change.
+
 ### Fixed
 
 - An object that pairs shared fields with a union, through `allOf` or as

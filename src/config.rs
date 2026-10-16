@@ -64,6 +64,18 @@
 //! module_name = "api"              # Module name
 //! ```
 //!
+//! ## Additional Derives (Optional)
+//!
+//! ```toml
+//! [generator.derives]
+//! string_enums = ["PartialOrd", "Ord"]
+//!
+//! [generator.derives.types]
+//! DayOfWeek = ["Hash"]
+//! ```
+//!
+//! See [`crate::DerivesConfig`] for scope and trait-bound requirements.
+//!
 //! ## Features Section (Optional)
 //!
 //! ```toml
@@ -217,6 +229,9 @@ pub struct GeneratorSection {
     /// Additive operation-builder generation policy.
     #[serde(default)]
     pub builders: BuildersSection,
+    /// Additional derives for models and HTTP parameter enums.
+    #[serde(default)]
+    pub derives: crate::derives::DerivesConfig,
 }
 
 /// Configuration for additive `*_builder()` operation entry points.
@@ -496,6 +511,8 @@ struct GeneratorSectionWire {
     #[serde(default)]
     builders: BuildersSection,
     #[serde(default)]
+    derives: crate::derives::DerivesConfig,
+    #[serde(default)]
     types: Option<crate::type_mapping::TypeMappingConfig>,
 }
 
@@ -503,6 +520,10 @@ impl TryFrom<ConfigFileWire> for ConfigFile {
     type Error = String;
 
     fn try_from(wire: ConfigFileWire) -> Result<Self, Self::Error> {
+        wire.generator
+            .derives
+            .validate_paths()
+            .map_err(|error| error.to_string())?;
         let types = match (wire.generator.types, wire.types) {
             (Some(_), Some(_)) => {
                 return Err(
@@ -524,6 +545,7 @@ impl TryFrom<ConfigFileWire> for ConfigFile {
                 effective_spec: wire.generator.effective_spec,
                 bindings_metadata: wire.generator.bindings_metadata,
                 builders: wire.generator.builders,
+                derives: wire.generator.derives,
             },
             features: wire.features,
             http_client: wire.http_client,
@@ -578,6 +600,7 @@ struct GeneratorSectionRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     bindings_metadata: Option<&'a str>,
     builders: &'a BuildersSection,
+    derives: &'a crate::derives::DerivesConfig,
     types: &'a crate::type_mapping::TypeMappingConfig,
 }
 
@@ -596,6 +619,7 @@ impl Serialize for ConfigFile {
                 effective_spec: self.generator.effective_spec.as_deref(),
                 bindings_metadata: self.generator.bindings_metadata.as_deref(),
                 builders: &self.generator.builders,
+                derives: &self.generator.derives,
                 types: &self.types,
             },
             features: &self.features,
@@ -1025,6 +1049,7 @@ impl ConfigFile {
             registry_only: self.features.registry_only,
             types,
             builders: self.generator.builders,
+            derives: self.generator.derives,
             server: self.server,
             client: self.client,
         }

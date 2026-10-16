@@ -174,6 +174,8 @@ pub struct GeneratorConfig {
     pub types: crate::type_mapping::TypeMappingConfig,
     /// Additive operation-builder generation policy.
     pub builders: crate::config::BuildersSection,
+    /// Additional derives for models and HTTP parameter enums.
+    pub derives: crate::derives::DerivesConfig,
     /// Opt-in server codegen scope. `None` ⇒ emit no server code.
     /// Set by the `[server]` section in the TOML config.
     pub server: Option<crate::config::ServerSection>,
@@ -207,6 +209,7 @@ impl Default for GeneratorConfig {
             registry_only: false,
             types: crate::type_mapping::TypeMappingConfig::default(),
             builders: crate::config::BuildersSection::default(),
+            derives: crate::derives::DerivesConfig::default(),
             server: None,
             client: None,
         }
@@ -640,6 +643,7 @@ impl CodeGenerator {
         analysis: &mut SchemaAnalysis,
         collect_bindings: bool,
     ) -> Result<crate::bindings::GenerationWithBindings> {
+        self.validate_derives(analysis)?;
         if collect_bindings
             && (self.config.registry_only
                 || self.config.enable_registry
@@ -825,6 +829,7 @@ impl CodeGenerator {
 
     /// Generate just the types (legacy single-file interface)
     pub fn generate(&self, analysis: &mut SchemaAnalysis) -> Result<String> {
+        self.validate_derives(analysis)?;
         self.generate_types(analysis)
     }
 
@@ -1364,9 +1369,15 @@ impl CodeGenerator {
         };
 
         // Format the generated code
-        let syntax_tree = syn::parse2::<syn::File>(generated).map_err(|e| {
+        let mut syntax_tree = syn::parse2::<syn::File>(generated).map_err(|e| {
             GeneratorError::CodeGenError(format!("Failed to parse generated code: {e}"))
         })?;
+
+        if !self.config.derives.is_empty() {
+            self.config
+                .derives
+                .apply(&mut syntax_tree, &self.model_derive_targets(analysis))?;
+        }
 
         if let Some(bindings) = bindings {
             bindings.collect("types", &syntax_tree);
@@ -1486,6 +1497,7 @@ impl CodeGenerator {
     /// SSE variants use raw byte streams in this standalone file. The bundled
     /// entry point emits parsed SSE variants together with their `sse.rs` runtime.
     pub fn generate_http_client(&self, analysis: &SchemaAnalysis) -> Result<String> {
+        self.validate_derives(analysis)?;
         let client_ids = self.resolve_client_operation_ids(analysis)?;
         let operations = self.client_operations(analysis, client_ids.as_ref());
         let mut config = self.config.clone();
@@ -1534,12 +1546,18 @@ impl CodeGenerator {
             #operation_methods
         };
 
-        let syntax_tree = syn::parse2::<syn::File>(generated.clone()).map_err(|e| {
+        let mut syntax_tree = syn::parse2::<syn::File>(generated.clone()).map_err(|e| {
             if let Ok(dump) = std::env::var("OATR_DUMP_TOKENS_ON_PARSE_ERROR") {
                 let _ = std::fs::write(&dump, generated.to_string());
             }
             GeneratorError::CodeGenError(format!("Failed to parse HTTP client code: {e}"))
         })?;
+
+        if !self.config.derives.is_empty() {
+            self.config
+                .derives
+                .apply(&mut syntax_tree, &self.parameter_derive_targets(operations))?;
+        }
 
         if let Some(bindings) = bindings {
             bindings.collect("client", &syntax_tree);

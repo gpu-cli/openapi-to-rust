@@ -584,6 +584,49 @@ payload-only typed interface for callers that do not need transport metadata.
 
 The generator also **auto-detects** streaming endpoints: any response declaring `content: text/event-stream` flips `supports_streaming = true` automatically. Explicit `[[streaming.endpoints]]` config still wins when present.
 
+## Additional model derives
+
+Add traits to generated types without editing the generated files:
+
+```toml
+[generator.derives]
+string_enums = ["PartialOrd", "Ord"]
+
+[generator.derives.types]
+DayOfWeek = ["Hash"]
+Coordinates = ["PartialEq", "Eq", "PartialOrd", "Ord", "Hash"]
+```
+
+`string_enums` covers closed and extensible string enums, including inline
+property/array-item enums and HTTP parameter enums. Per-type entries use the exact
+emitted Rust name: a schema called `day-of-week` is selected as `DayOfWeek`.
+They also support model structs and payload enums. Group and per-type additions
+combine with existing derives; duplicate standard traits are emitted once.
+Both settings default to empty, preserving existing generated output.
+
+Derived enum ordering follows variant declaration order, preserving the order of
+values in the spec. Extensible enums place `Custom(String)` after known variants
+and compare custom strings lexicographically. Reordering spec values therefore
+changes ordering after regeneration. Serialization remains unchanged.
+
+Derives do not propagate to referenced models or add prerequisite traits:
+request `PartialEq`, `Eq`, `PartialOrd`, and `Ord` together for a struct that needs
+ordering. All fields and payloads must support the requested traits; for example,
+`f64` cannot derive `Eq` or `Ord`. Rust checks these bounds in the consuming crate.
+Qualified custom derive paths such as `my_crate::MyDerive` are supported; add their
+dependencies yourself alongside `REQUIRED_DEPS.toml`. Custom macro dependencies
+are not inferred.
+
+Malformed paths, unknown or ambiguous type names, explicit type-alias targets,
+and conflicts with known manual trait implementations are generation errors.
+Existing Specta derives keep their feature gate. Valid targets omitted by
+operation selection or model pruning are ignored. Runtime helpers, operation
+builders, client error enums, and server response enums are outside this policy.
+
+Library consumers can set `GeneratorConfig::derives` with the exported
+`DerivesConfig`. The policy applies to `generate`, `generate_all`,
+`generate_all_with_bindings`, and `generate_http_client`.
+
 ## Spec-quirk overrides
 
 Real specs lie. These TOML knobs let you patch quirks without forking the spec.

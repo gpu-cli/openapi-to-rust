@@ -573,7 +573,7 @@ impl CodeGenerator {
     /// also emits operation-owned helpers such as the reserved path encoder.
     /// intentionally emits every analyzed operation; use
     /// [`Self::generate_http_client`] or [`Self::generate_all`] to honor the
-    /// configured `[client].operations` scope.
+    /// configured `[client].operations` scope and additional derive policy.
     /// Generate standalone HTTP methods. Declared SSE alternatives return raw
     /// byte streams; `generate_all` bundles the optional parsed SSE runtime.
     pub fn generate_operation_methods(&self, analysis: &SchemaAnalysis) -> TokenStream {
