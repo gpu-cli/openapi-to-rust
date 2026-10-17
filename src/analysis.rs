@@ -1415,6 +1415,63 @@ fn schema_is_annotation_only(schema: &crate::openapi::Schema) -> bool {
         })
 }
 
+fn is_annotation_keyword(key: &str) -> bool {
+    matches!(
+        key,
+        "title"
+            | "description"
+            | "deprecated"
+            | "readOnly"
+            | "writeOnly"
+            | "examples"
+            | "example"
+            | "externalDocs"
+            | "xml"
+            | "$comment"
+    ) || key.starts_with("x-")
+}
+
+/// Remove annotation keywords from a schema and its subschemas, leaving the
+/// assertions. Member names under `properties` and similar maps are kept.
+fn strip_schema_annotations(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.retain(|key, _| !is_annotation_keyword(key));
+    for (key, child) in object.iter_mut() {
+        match key.as_str() {
+            "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas" => {
+                if let Some(members) = child.as_object_mut() {
+                    members.values_mut().for_each(strip_schema_annotations);
+                }
+            }
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                if let Some(items) = child.as_array_mut() {
+                    items.iter_mut().for_each(strip_schema_annotations);
+                }
+            }
+            "items" => match child {
+                Value::Array(items) => items.iter_mut().for_each(strip_schema_annotations),
+                _ => strip_schema_annotations(child),
+            },
+            "additionalProperties"
+            | "additionalItems"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
+            | "contains"
+            | "propertyNames"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "contentSchema" => strip_schema_annotations(child),
+            // Other keywords contain data, not schemas (notably dependentRequired).
+            // Preserve unknown keywords conservatively as well.
+            _ => {}
+        }
+    }
+}
+
 /// Load an extension file and parse it into the JSON representation used by
 /// the analyzer. YAML extensions follow the same conversion policy as YAML
 /// OpenAPI documents; every other extension is parsed as JSON.
@@ -4278,6 +4335,24 @@ impl SchemaAnalyzer {
         all_of_schemas: &[Schema],
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        let without_restated = self.without_restated_unions(all_of_schemas);
+        let all_of_schemas = without_restated.as_deref().unwrap_or(all_of_schemas);
+
+        // After deduplication, only an owner with no assertions beside allOf
+        // can collapse to a bare member. Otherwise keep the merge path, retaining
+        // the owner's object shape and fields.
+        let preserve_owner_shape = without_restated.is_some()
+            && !serde_json::to_value(owner_schema)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .is_some_and(|owner| {
+                    owner.keys().all(|key| {
+                        key == "allOf"
+                            || is_annotation_keyword(key)
+                            || matches!(key.as_str(), "default" | "nullable")
+                    })
+                });
+
         // A scalar/array carrier intersected only with annotation-only
         // siblings keeps its wire type. This is deliberately narrower than
         // "pick the first non-object": multiple carriers or assertion-bearing
@@ -4298,7 +4373,8 @@ impl SchemaAnalyzer {
         let only_reference_and_annotations = all_of_schemas
             .iter()
             .all(|schema| schema.reference().is_some() || schema_is_annotation_only(schema));
-        if referenced_targets.len() == 1 && only_reference_and_annotations {
+        if !preserve_owner_shape && referenced_targets.len() == 1 && only_reference_and_annotations
+        {
             let target = referenced_targets[0];
             dependencies.insert(target.to_string());
             return Ok(SchemaType::Reference {
@@ -4309,7 +4385,8 @@ impl SchemaAnalyzer {
         // A single member composes with nothing: `allOf: [{type: string}]` is
         // that string. Specs write it to hang a description off a scalar or a
         // `$ref`, and merging it as an object would lose the type entirely.
-        if let [only] = all_of_schemas
+        if !preserve_owner_shape
+            && let [only] = all_of_schemas
             && !matches!(
                 only.schema_type(),
                 Some(OpenApiSchemaType::Object) | Some(OpenApiSchemaType::Null)
@@ -4644,6 +4721,80 @@ impl SchemaAnalyzer {
                 _ => return Ok(false),
             }
         }
+    }
+
+    /// Drop `allOf` members that repeat an earlier member's union, compared
+    /// without annotations. Returns `None` when nothing repeats.
+    fn without_restated_unions(&self, members: &[Schema]) -> Option<Vec<Schema>> {
+        let mut seen = Vec::new();
+        let mut kept = Vec::with_capacity(members.len());
+        for member in members {
+            if let Some(signature) = self.union_signature(member) {
+                if seen.contains(&signature) {
+                    continue;
+                }
+                seen.push(signature);
+            }
+            kept.push(member.clone());
+        }
+        (kept.len() < members.len()).then_some(kept)
+    }
+
+    /// The assertions of a member that is only a union, following one `$ref`.
+    /// `type: object` is ignored only when every branch already requires an
+    /// object, so a named object union can match an inline restatement.
+    fn union_signature(&self, member: &Schema) -> Option<Value> {
+        let schema = match member.reference() {
+            Some(reference) => self.schemas.get(self.extract_schema_name(reference)?)?,
+            None => member,
+        };
+        let mut value = serde_json::to_value(schema).ok()?;
+        strip_schema_annotations(&mut value);
+        let object = value.as_object_mut()?;
+        if object.get("type").and_then(Value::as_str) == Some("object")
+            && ["anyOf", "oneOf"].iter().any(|keyword| {
+                object
+                    .get(*keyword)
+                    .and_then(Value::as_array)
+                    .is_some_and(|branches| {
+                        !branches.is_empty()
+                            && branches
+                                .iter()
+                                .all(|branch| self.union_branch_requires_object(branch))
+                    })
+            })
+        {
+            object.remove("type");
+        }
+        let is_union = object.contains_key("anyOf") || object.contains_key("oneOf");
+        let only_union = object
+            .keys()
+            .all(|key| matches!(key.as_str(), "anyOf" | "oneOf" | "discriminator"));
+        (is_union && only_union).then_some(value)
+    }
+
+    /// A conservative proof: require an explicit object type, optionally
+    /// following one reference. Do not infer a type from object-only keywords
+    /// such as properties/required, which also accept scalars in JSON Schema.
+    fn union_branch_requires_object(&self, branch: &Value) -> bool {
+        let resolved;
+        let branch = if let Some(reference) = branch.get("$ref").and_then(Value::as_str) {
+            let Some(schema) = self
+                .extract_schema_name(reference)
+                .and_then(|name| self.schemas.get(name))
+            else {
+                return false;
+            };
+            let Ok(value) = serde_json::to_value(schema) else {
+                return false;
+            };
+            resolved = value;
+            &resolved
+        } else {
+            branch
+        };
+        branch.get("type").and_then(Value::as_str) == Some("object")
+            && branch.get("nullable").and_then(Value::as_bool) != Some(true)
     }
 
     /// Property names declared by any object reachable through the branches

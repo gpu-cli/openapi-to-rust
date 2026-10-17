@@ -1,9 +1,11 @@
+#![recursion_limit = "256"]
+
 use openapi_to_rust::analysis::SchemaType;
 use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::{Value, json};
 
 fn object_union_allof_spec() -> Value {
-    json!({
+    let mut spec = json!({
         "openapi": "3.1.0",
         "info": { "title": "object union allOf", "version": "1" },
         "paths": {},
@@ -188,6 +190,61 @@ fn object_union_allof_spec() -> Value {
                         { "$ref": "#/components/schemas/RecordWithData" }
                     ]
                 },
+                "FilterLeaf": {
+                    "type": "object",
+                    "required": ["key", "operation"],
+                    "properties": {
+                        "key": { "type": "string" },
+                        "operation": { "type": "string" },
+                        "value": { "type": "string" }
+                    }
+                },
+                "FilterNode": {
+                    "description": "A leaf filter or a nested group.",
+                    "type": "object",
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "required": ["kind", "filters"],
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["group"] },
+                                "filters": {
+                                    "type": "array",
+                                    "items": { "$ref": "#/components/schemas/FilterNode" }
+                                }
+                            }
+                        },
+                        { "$ref": "#/components/schemas/FilterLeaf" }
+                    ]
+                },
+                "RestatedFilter": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/FilterNode" },
+                        {
+                            "description": "Supports nested groups.",
+                            "anyOf": [
+                                {
+                                    "description": "A group of child filters.",
+                                    "type": "object",
+                                    "required": ["kind", "filters"],
+                                    "properties": {
+                                        "kind": {
+                                            "description": "Marks a group.",
+                                            "type": "string",
+                                            "enum": ["group"]
+                                        },
+                                        "filters": {
+                                            "description": "Child filters.",
+                                            "type": "array",
+                                            "items": { "$ref": "#/components/schemas/FilterNode" }
+                                        }
+                                    }
+                                },
+                                { "$ref": "#/components/schemas/FilterLeaf" }
+                            ]
+                        }
+                    ]
+                },
                 "GitpodOutputSpec": {
                     "type": "object",
                     "additionalProperties": false,
@@ -231,7 +288,47 @@ fn object_union_allof_spec() -> Value {
                 }
             }
         }
-    })
+    });
+    let schemas = spec["components"]["schemas"]
+        .as_object_mut()
+        .expect("schema map");
+    let reference = json!({ "$ref": "#/components/schemas/FilterNode" });
+    let inline = schemas["FilterNode"].clone();
+    for (name, members) in [
+        ("RepeatedFilterWithOwner", json!([reference, reference])),
+        ("InlineRestatedFilterWithOwner", json!([inline, reference])),
+    ] {
+        schemas.insert(
+            name.into(),
+            json!({
+                "type": "object",
+                "properties": { "owner_field": { "type": "string" } },
+                "required": ["owner_field"],
+                "allOf": members
+            }),
+        );
+    }
+    schemas.insert(
+        "MixedFilter".into(),
+        json!({"anyOf": [
+            {"type": "string"},
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}
+        ]}),
+    );
+    for (name, mut owner) in [
+        ("RepeatedMixedFilterObject", json!({"type": "object"})),
+        (
+            "RepeatedMixedFilterNotString",
+            json!({"not": {"type": "string"}}),
+        ),
+    ] {
+        owner["allOf"] = json!([
+            {"$ref": "#/components/schemas/MixedFilter"},
+            {"$ref": "#/components/schemas/MixedFilter"}
+        ]);
+        schemas.insert(name.into(), owner);
+    }
+    spec
 }
 
 fn analyze() -> openapi_to_rust::SchemaAnalysis {
@@ -445,6 +542,41 @@ fn main() {
         "boolean": {}
     }));
     round_trip::<generated::GitpodOutputSpec>(serde_json::json!({}));
+    round_trip::<generated::RestatedFilter>(serde_json::json!({
+        "kind": "group",
+        "filters": [
+            { "key": "service", "operation": "eq", "value": "api" },
+            { "kind": "group", "filters": [] }
+        ]
+    }));
+    round_trip::<generated::RestatedFilter>(serde_json::json!({
+        "key": "status",
+        "operation": "exists"
+    }));
+    round_trip::<generated::RepeatedFilterWithOwner>(serde_json::json!({
+        "owner_field": "request-1",
+        "key": "status",
+        "operation": "exists"
+    }));
+    round_trip::<generated::InlineRestatedFilterWithOwner>(serde_json::json!({
+        "owner_field": "request-2",
+        "kind": "group",
+        "filters": [{ "key": "status", "operation": "exists" }]
+    }));
+    assert!(serde_json::from_value::<generated::RepeatedFilterWithOwner>(
+        serde_json::json!({ "key": "status", "operation": "exists" })
+    ).is_err());
+    assert!(serde_json::from_value::<generated::InlineRestatedFilterWithOwner>(
+        serde_json::json!({ "kind": "group", "filters": [] })
+    ).is_err());
+    round_trip::<generated::RepeatedMixedFilterObject>(serde_json::json!({ "key": "status" }));
+    assert!(serde_json::from_value::<generated::RepeatedMixedFilterObject>(
+        serde_json::json!("scalar")
+    ).is_err());
+    round_trip::<generated::RepeatedMixedFilterNotString>(serde_json::json!({ "key": "status" }));
+    assert!(serde_json::from_value::<generated::RepeatedMixedFilterNotString>(
+        serde_json::json!("scalar")
+    ).is_err());
 }
 "##,
     )
@@ -466,6 +598,127 @@ fn main() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn allof_restating_a_union_up_to_annotations_resolves_to_that_union() {
+    let analysis = analyze();
+    let SchemaType::Reference { target } = &analysis.schemas["RestatedFilter"].schema_type else {
+        panic!(
+            "RestatedFilter should alias FilterNode, got {:?}",
+            analysis.schemas["RestatedFilter"].schema_type
+        );
+    };
+    assert_eq!(target, "FilterNode");
+}
+
+#[test]
+fn restated_unions_retain_owner_properties_and_required_names() {
+    for keyword in ["anyOf", "oneOf"] {
+        let union = json!({keyword: [
+            {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+            {"type": "object", "properties": {"b": {"type": "integer"}}, "required": ["b"]}
+        ]});
+        let reference = json!({"$ref": "#/components/schemas/Union"});
+        for members in [
+            json!([reference, reference]),
+            json!([reference, union]),
+            json!([union, reference]),
+            json!([union, union]),
+        ] {
+            for (declares_property, requires_property) in
+                [(true, true), (true, false), (false, true)]
+            {
+                let mut owner = json!({"allOf": members});
+                if declares_property {
+                    owner["properties"] = json!({"owner_field": {"type": "string"}});
+                }
+                if requires_property {
+                    owner["required"] = json!(["owner_field"]);
+                }
+                let spec = json!({
+                    "openapi": "3.1.0",
+                    "info": {"title": "restated union owner", "version": "1"},
+                    "paths": {},
+                    "components": {"schemas": {"Union": union, "Owner": owner}}
+                });
+                let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+                let SchemaType::Object {
+                    properties,
+                    required,
+                    variant,
+                    ..
+                } = &analysis.schemas["Owner"].schema_type
+                else {
+                    panic!(
+                        "owner fields were dropped for {owner}: {:?}",
+                        analysis.schemas["Owner"].schema_type
+                    );
+                };
+                assert!(variant.is_some(), "owner must retain its union for {owner}");
+                assert_eq!(
+                    required.contains("owner_field"),
+                    requires_property,
+                    "{owner}"
+                );
+                let property = &properties["owner_field"];
+                if declares_property {
+                    assert!(
+                        matches!(
+                            &property.schema_type,
+                            SchemaType::Primitive { rust_type, .. } if rust_type == "String"
+                        ),
+                        "declared owner field must keep its type for {owner}"
+                    );
+                } else {
+                    assert!(property.synthesized_required, "{owner}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn restated_unions_preserve_owner_assertions_for_mixed_branches() {
+    for keyword in ["anyOf", "oneOf"] {
+        let union = json!({keyword: [
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+            {"type": "string"}
+        ]});
+        assert!(jsonschema::is_valid(&union, &json!("scalar")));
+        for mut owner in [
+            json!({"type": "object"}),
+            json!({"not": {"type": "string"}}),
+        ] {
+            owner["allOf"] = json!([union, union]);
+            assert!(!jsonschema::is_valid(&owner, &json!("scalar")));
+            owner["allOf"] = json!([
+                {"$ref": "#/components/schemas/Union"},
+                {"$ref": "#/components/schemas/Union"}
+            ]);
+            let spec = json!({
+                "openapi": "3.1.0",
+                "info": {"title": "restated union owner type", "version": "1"},
+                "paths": {},
+                "components": {"schemas": {
+                    "Union": union,
+                    "Owner": owner
+                }}
+            });
+            let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+            assert!(
+                matches!(
+                    &analysis.schemas["Owner"].schema_type,
+                    SchemaType::Object {
+                        variant: Some(_),
+                        ..
+                    }
+                ),
+                "owner must still require an object: {:?}",
+                analysis.schemas["Owner"].schema_type
+            );
+        }
+    }
 }
 
 #[test]
@@ -496,4 +749,57 @@ fn multiple_union_intersections_are_reported_instead_of_silently_dropped() {
             .contains("intersects multiple union members"),
         "unexpected error: {error}"
     );
+}
+
+fn assert_distinct_unions_are_rejected(first: Value, second: Value, witness: Value) {
+    assert!(jsonschema::is_valid(&first, &witness));
+    assert!(!jsonschema::is_valid(&second, &witness));
+    for members in [json!([first, second]), json!([second, first])] {
+        let spec = json!({
+            "openapi": "3.1.0",
+            "info": { "title": "distinct unions", "version": "1" },
+            "paths": {},
+            "components": { "schemas": { "Intersection": { "allOf": members } } }
+        });
+        let error = SchemaAnalyzer::new(spec)
+            .unwrap()
+            .analyze()
+            .expect_err("different union assertions must not be deduplicated");
+        assert!(
+            error
+                .to_string()
+                .contains("intersects multiple union members"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn union_restatements_preserve_dependent_required_data() {
+    for keyword in ["anyOf", "oneOf"] {
+        let first = json!({keyword: [
+            {"type": "object", "dependentRequired": {"description": ["kind"]}},
+            {"type": "string"}
+        ]});
+        let second = json!({keyword: [
+            {"type": "object", "dependentRequired": {"description": ["value"]}},
+            {"type": "string"}
+        ]});
+        assert_distinct_unions_are_rejected(
+            first,
+            second,
+            json!({"description": "x", "kind": "y"}),
+        );
+    }
+}
+
+#[test]
+fn union_restatements_preserve_object_type_for_mixed_branches() {
+    for keyword in ["anyOf", "oneOf"] {
+        let first = json!({keyword: [{"type": "object"}, {"type": "string"}]});
+        let second = json!({"type": "object", keyword: [
+            {"type": "object"}, {"type": "string"}
+        ]});
+        assert_distinct_unions_are_rejected(first, second, json!("scalar"));
+    }
 }

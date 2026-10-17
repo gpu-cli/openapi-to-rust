@@ -30,6 +30,16 @@ when correcting output that was wrong or incomplete on the wire.
   optionality. Cloudflare's DNS record responses list `data` as required
   although only some record types carry it, so A and MX records failed to
   deserialize, and `name`, `content` and `ttl` were untyped.
+- An `allOf` whose members repeat the same union, differing only in
+  annotations such as `description`, resolves to that union instead of failing
+  with "intersects multiple union members". The current Cloudflare spec
+  restates its Workers Observability filter union inline next to a `$ref` to
+  it, which stopped the whole spec from generating. Members that are different
+  unions still fail with that diagnostic. Assertion data such as
+  `dependentRequired` is preserved, and `type: object` is ignored only when
+  every union branch explicitly requires an object. Object types, fields and
+  required names declared beside `allOf` survive when deduplication leaves a
+  single member.
 
 ## [0.22.0] - 2026-10-06
 
