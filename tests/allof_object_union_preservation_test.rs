@@ -308,6 +308,26 @@ fn object_union_allof_spec() -> Value {
             }),
         );
     }
+    schemas.insert(
+        "MixedFilter".into(),
+        json!({"anyOf": [
+            {"type": "string"},
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}
+        ]}),
+    );
+    for (name, mut owner) in [
+        ("RepeatedMixedFilterObject", json!({"type": "object"})),
+        (
+            "RepeatedMixedFilterNotString",
+            json!({"not": {"type": "string"}}),
+        ),
+    ] {
+        owner["allOf"] = json!([
+            {"$ref": "#/components/schemas/MixedFilter"},
+            {"$ref": "#/components/schemas/MixedFilter"}
+        ]);
+        schemas.insert(name.into(), owner);
+    }
     spec
 }
 
@@ -549,6 +569,14 @@ fn main() {
     assert!(serde_json::from_value::<generated::InlineRestatedFilterWithOwner>(
         serde_json::json!({ "kind": "group", "filters": [] })
     ).is_err());
+    round_trip::<generated::RepeatedMixedFilterObject>(serde_json::json!({ "key": "status" }));
+    assert!(serde_json::from_value::<generated::RepeatedMixedFilterObject>(
+        serde_json::json!("scalar")
+    ).is_err());
+    round_trip::<generated::RepeatedMixedFilterNotString>(serde_json::json!({ "key": "status" }));
+    assert!(serde_json::from_value::<generated::RepeatedMixedFilterNotString>(
+        serde_json::json!("scalar")
+    ).is_err());
 }
 "##,
     )
@@ -601,7 +629,7 @@ fn restated_unions_retain_owner_properties_and_required_names() {
             for (declares_property, requires_property) in
                 [(true, true), (true, false), (false, true)]
             {
-                let mut owner = json!({"type": "object", "allOf": members});
+                let mut owner = json!({"allOf": members});
                 if declares_property {
                     owner["properties"] = json!({"owner_field": {"type": "string"}});
                 }
@@ -646,6 +674,49 @@ fn restated_unions_retain_owner_properties_and_required_names() {
                     assert!(property.synthesized_required, "{owner}");
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn restated_unions_preserve_owner_assertions_for_mixed_branches() {
+    for keyword in ["anyOf", "oneOf"] {
+        let union = json!({keyword: [
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+            {"type": "string"}
+        ]});
+        assert!(jsonschema::is_valid(&union, &json!("scalar")));
+        for mut owner in [
+            json!({"type": "object"}),
+            json!({"not": {"type": "string"}}),
+        ] {
+            owner["allOf"] = json!([union, union]);
+            assert!(!jsonschema::is_valid(&owner, &json!("scalar")));
+            owner["allOf"] = json!([
+                {"$ref": "#/components/schemas/Union"},
+                {"$ref": "#/components/schemas/Union"}
+            ]);
+            let spec = json!({
+                "openapi": "3.1.0",
+                "info": {"title": "restated union owner type", "version": "1"},
+                "paths": {},
+                "components": {"schemas": {
+                    "Union": union,
+                    "Owner": owner
+                }}
+            });
+            let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+            assert!(
+                matches!(
+                    &analysis.schemas["Owner"].schema_type,
+                    SchemaType::Object {
+                        variant: Some(_),
+                        ..
+                    }
+                ),
+                "owner must still require an object: {:?}",
+                analysis.schemas["Owner"].schema_type
+            );
         }
     }
 }
