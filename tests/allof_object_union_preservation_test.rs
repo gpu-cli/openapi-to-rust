@@ -5,7 +5,7 @@ use openapi_to_rust::{CodeGenerator, GeneratorConfig, SchemaAnalyzer};
 use serde_json::{Value, json};
 
 fn object_union_allof_spec() -> Value {
-    json!({
+    let mut spec = json!({
         "openapi": "3.1.0",
         "info": { "title": "object union allOf", "version": "1" },
         "paths": {},
@@ -288,7 +288,27 @@ fn object_union_allof_spec() -> Value {
                 }
             }
         }
-    })
+    });
+    let schemas = spec["components"]["schemas"]
+        .as_object_mut()
+        .expect("schema map");
+    let reference = json!({ "$ref": "#/components/schemas/FilterNode" });
+    let inline = schemas["FilterNode"].clone();
+    for (name, members) in [
+        ("RepeatedFilterWithOwner", json!([reference, reference])),
+        ("InlineRestatedFilterWithOwner", json!([inline, reference])),
+    ] {
+        schemas.insert(
+            name.into(),
+            json!({
+                "type": "object",
+                "properties": { "owner_field": { "type": "string" } },
+                "required": ["owner_field"],
+                "allOf": members
+            }),
+        );
+    }
+    spec
 }
 
 fn analyze() -> openapi_to_rust::SchemaAnalysis {
@@ -513,6 +533,22 @@ fn main() {
         "key": "status",
         "operation": "exists"
     }));
+    round_trip::<generated::RepeatedFilterWithOwner>(serde_json::json!({
+        "owner_field": "request-1",
+        "key": "status",
+        "operation": "exists"
+    }));
+    round_trip::<generated::InlineRestatedFilterWithOwner>(serde_json::json!({
+        "owner_field": "request-2",
+        "kind": "group",
+        "filters": [{ "key": "status", "operation": "exists" }]
+    }));
+    assert!(serde_json::from_value::<generated::RepeatedFilterWithOwner>(
+        serde_json::json!({ "key": "status", "operation": "exists" })
+    ).is_err());
+    assert!(serde_json::from_value::<generated::InlineRestatedFilterWithOwner>(
+        serde_json::json!({ "kind": "group", "filters": [] })
+    ).is_err());
 }
 "##,
     )
@@ -546,6 +582,72 @@ fn allof_restating_a_union_up_to_annotations_resolves_to_that_union() {
         );
     };
     assert_eq!(target, "FilterNode");
+}
+
+#[test]
+fn restated_unions_retain_owner_properties_and_required_names() {
+    for keyword in ["anyOf", "oneOf"] {
+        let union = json!({keyword: [
+            {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]},
+            {"type": "object", "properties": {"b": {"type": "integer"}}, "required": ["b"]}
+        ]});
+        let reference = json!({"$ref": "#/components/schemas/Union"});
+        for members in [
+            json!([reference, reference]),
+            json!([reference, union]),
+            json!([union, reference]),
+            json!([union, union]),
+        ] {
+            for (declares_property, requires_property) in
+                [(true, true), (true, false), (false, true)]
+            {
+                let mut owner = json!({"type": "object", "allOf": members});
+                if declares_property {
+                    owner["properties"] = json!({"owner_field": {"type": "string"}});
+                }
+                if requires_property {
+                    owner["required"] = json!(["owner_field"]);
+                }
+                let spec = json!({
+                    "openapi": "3.1.0",
+                    "info": {"title": "restated union owner", "version": "1"},
+                    "paths": {},
+                    "components": {"schemas": {"Union": union, "Owner": owner}}
+                });
+                let analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
+                let SchemaType::Object {
+                    properties,
+                    required,
+                    variant,
+                    ..
+                } = &analysis.schemas["Owner"].schema_type
+                else {
+                    panic!(
+                        "owner fields were dropped for {owner}: {:?}",
+                        analysis.schemas["Owner"].schema_type
+                    );
+                };
+                assert!(variant.is_some(), "owner must retain its union for {owner}");
+                assert_eq!(
+                    required.contains("owner_field"),
+                    requires_property,
+                    "{owner}"
+                );
+                let property = &properties["owner_field"];
+                if declares_property {
+                    assert!(
+                        matches!(
+                            &property.schema_type,
+                            SchemaType::Primitive { rust_type, .. } if rust_type == "String"
+                        ),
+                        "declared owner field must keep its type for {owner}"
+                    );
+                } else {
+                    assert!(property.synthesized_required, "{owner}");
+                }
+            }
+        }
+    }
 }
 
 #[test]

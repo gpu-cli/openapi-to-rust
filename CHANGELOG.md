@@ -37,7 +37,8 @@ when correcting output that was wrong or incomplete on the wire.
   it, which stopped the whole spec from generating. Members that are different
   unions still fail with that diagnostic. Assertion data such as
   `dependentRequired` is preserved, and `type: object` is ignored only when
-  every union branch explicitly requires an object.
+  every union branch explicitly requires an object. Fields and required names
+  declared beside `allOf` survive when deduplication leaves a single member.
 
 ## [0.22.0] - 2026-10-06
 

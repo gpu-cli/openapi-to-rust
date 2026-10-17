@@ -4338,6 +4338,20 @@ impl SchemaAnalyzer {
         let without_restated = self.without_restated_unions(all_of_schemas);
         let all_of_schemas = without_restated.as_deref().unwrap_or(all_of_schemas);
 
+        // Deduplicating unions can leave a single member, but the owner may
+        // still contribute fields. Keep those compositions on the merge path
+        // instead of returning an alias before the owner's fields are merged.
+        let owner_details = owner_schema.details();
+        let preserve_owner_members = without_restated.is_some()
+            && (owner_details
+                .properties
+                .as_ref()
+                .is_some_and(|properties| !properties.is_empty())
+                || owner_details
+                    .required
+                    .as_ref()
+                    .is_some_and(|required| !required.is_empty()));
+
         // A scalar/array carrier intersected only with annotation-only
         // siblings keeps its wire type. This is deliberately narrower than
         // "pick the first non-object": multiple carriers or assertion-bearing
@@ -4358,7 +4372,10 @@ impl SchemaAnalyzer {
         let only_reference_and_annotations = all_of_schemas
             .iter()
             .all(|schema| schema.reference().is_some() || schema_is_annotation_only(schema));
-        if referenced_targets.len() == 1 && only_reference_and_annotations {
+        if !preserve_owner_members
+            && referenced_targets.len() == 1
+            && only_reference_and_annotations
+        {
             let target = referenced_targets[0];
             dependencies.insert(target.to_string());
             return Ok(SchemaType::Reference {
@@ -4369,7 +4386,8 @@ impl SchemaAnalyzer {
         // A single member composes with nothing: `allOf: [{type: string}]` is
         // that string. Specs write it to hang a description off a scalar or a
         // `$ref`, and merging it as an object would lose the type entirely.
-        if let [only] = all_of_schemas
+        if !preserve_owner_members
+            && let [only] = all_of_schemas
             && !matches!(
                 only.schema_type(),
                 Some(OpenApiSchemaType::Object) | Some(OpenApiSchemaType::Null)
