@@ -206,8 +206,8 @@ supabase/REQUIRED_DEPS.toml                                 771       18 5dbdfe5
 supabase/client.rs                                       604787    16340 bf8130b215c8f786
 supabase/mod.rs                                             442       17 331ec75d430bc0a8
 supabase/types.rs                                        503364    14054 1e07135f94046fd0
-telnyx/REQUIRED_DEPS.toml                                   787       19 09cccc57db93029b
-telnyx/client.rs                                        5418611   142119 fcf264fbacdd04d1
+telnyx/REQUIRED_DEPS.toml                                   800       20 cb118ed14994d373
+telnyx/client.rs                                        5439335   142633 258fa58de5e436e3
 telnyx/mod.rs                                               438       17 f3a44d93d532e621
 telnyx/types.rs                                         4503323   108157 13f4a8ab963b0d98
 terminal-shop/REQUIRED_DEPS.toml                            529       14 241dda1403a4b0ba
@@ -235,4 +235,4 @@ writer/client.rs                                         191302     5007 33061e5
 writer/mod.rs                                               438       17 0435bf1552e493d1
 writer/types.rs                                          198394     4888 800dd8afe5798530
 #
-# specs: 56   files: 224   bytes: 330613774
+# specs: 56   files: 224   bytes: 330634511
