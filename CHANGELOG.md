@@ -6,6 +6,8 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-25
+
 ### Added
 
 - Wildcard-only client request bodies gain additive `*_with_content_type()`
