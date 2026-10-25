@@ -37,7 +37,8 @@ when correcting output that was wrong or incomplete on the wire.
   while preserving its schema and sample coverage. Scratch conformance crates
   omit debug and incremental artifacts, and log compilation and round-trip
   stages separately. Full-tier CI reserves swap headroom and logs memory
-  pressure; manual runs can select individual specs for reproduction.
+  pressure, with four disjoint corpus shards to limit retained build artifacts;
+  manual runs can select individual specs for reproduction.
 - An object that pairs shared fields with a union, through `allOf` or as
   sibling `properties` and `anyOf`/`oneOf`, no longer turns a `required` name
   declared only by the union's branches into a required `serde_json::Value`

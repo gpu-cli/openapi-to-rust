@@ -224,18 +224,26 @@ jobs:
       - run: scripts/spec-compile.sh anthropic openai
 
   full-spec-compile:
-    name: ${{ inputs.specs && format('spec-compile ({0})', inputs.specs) || 'full-spec-compile' }}
+    name: ${{ inputs.specs && format('spec-compile ({0})', inputs.specs) || format('full-spec-compile ({0}/4)', matrix.shard) }}
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ inputs.specs && fromJSON('[1]') || fromJSON('[1,2,3,4]') }}
     env:
       SPEC_COMPILE_TARGET_DIR: ${{ github.workspace }}/target/spec-compile
       SPEC_COMPILE_NAMES: ${{ inputs.specs }}
+      SPEC_COMPILE_SHARD: ${{ matrix.shard }}
+      LC_ALL: C
       CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: full-spec-${{ matrix.shard }}
       - name: Provide memory headroom for large generated crates
         run: |
           # This Rust-only job does not use the preinstalled Android SDK.
@@ -252,13 +260,27 @@ jobs:
           vmstat -w 30 &
           monitor_pid=$!
           trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
-          read -r -a specs <<< "$SPEC_COMPILE_NAMES"
+          if [[ -n "$SPEC_COMPILE_NAMES" ]]; then
+            read -r -a specs <<< "$SPEC_COMPILE_NAMES"
+          else
+            # Partition the same sorted inventory as spec-compile.sh, including
+            # Swagger documents so its unsupported-spec summary stays visible.
+            mapfile -t specs < <(
+              find specs -maxdepth 1 -type f \( -name '*.yaml' -o -name '*.json' \) | sort |
+                awk -F/ -v shard="$SPEC_COMPILE_SHARD" '
+                  (NR - 1) % 4 == shard - 1 {
+                    name = $NF
+                    sub(/\.(json|yaml)$/, "", name)
+                    print name
+                  }'
+            )
+          fi
           scripts/spec-compile.sh "${specs[@]}"
       - name: Retain full-spec diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: full-spec-diagnostics
+          name: full-spec-diagnostics-${{ matrix.shard }}
           path: |
             tmp/spec-compile/*/*.log
             tmp/spec-compile/*/roundtrip.stats
