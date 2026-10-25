@@ -8,6 +8,13 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Added
 
+- Wildcard-only client request bodies gain additive `*_with_content_type()`
+  methods and operation-builder `.content_type()` setters (#108). A present
+  body requires a valid concrete media type matching a declared range; the
+  per-call header overrides configured values. Optional absent bodies keep
+  their bodyless behavior. HTTP, SSE, and live response variants share the
+  same handling. The README now shows how to enable, regenerate, and call
+  operation builders, including the strict optional-value threshold.
 - Opt-in `[generator.derives].string_enums` and
   `[generator.derives.types]` add derive traits to generated models and HTTP
   parameter enums (#106). Group and per-type additions combine with existing

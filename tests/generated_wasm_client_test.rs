@@ -35,12 +35,20 @@ use std::process::Command;
 
 /// A spec touching every place the bounded buffering helper is emitted:
 /// buffered JSON, buffered text, buffered binary, an error body, and an
-/// auto-detected `text/event-stream` response.
+/// auto-detected `text/event-stream` response, plus concrete media-type
+/// validation for wildcard request bodies.
 fn wasm_client_spec() -> serde_json::Value {
     json!({
         "openapi": "3.1.0",
         "info": { "title": "wasm client", "version": "1.0.0" },
         "paths": {
+            "/upload": { "post": {
+                "operationId": "uploadImage",
+                "requestBody": { "required": true, "content": {
+                    "image/*": { "schema": { "type": "string", "format": "binary" } }
+                }},
+                "responses": { "204": { "description": "uploaded" } }
+            }},
             "/json": { "get": {
                 "operationId": "getJson",
                 "responses": {

@@ -1584,6 +1584,10 @@ impl CodeGenerator {
                     ))
                 })?;
             let path = format!("client::HttpClient::{}", plan.method_ident);
+            let content_type_path = plan
+                .content_type_method_ident
+                .as_ref()
+                .map(|ident| format!("client::HttpClient::{ident}"));
             let builder_entry = plan
                 .builder_method_ident
                 .as_ref()
@@ -1607,6 +1611,7 @@ impl CodeGenerator {
             };
             for symbol in &mut bindings.symbols {
                 if symbol.path == path
+                    || content_type_path.as_ref() == Some(&symbol.path)
                     || builder_entry.as_ref() == Some(&symbol.path)
                     || builder_type.as_ref().is_some_and(|owner| {
                         symbol.path == *owner || symbol.path.starts_with(&format!("{owner}::"))

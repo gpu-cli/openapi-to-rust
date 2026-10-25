@@ -211,6 +211,7 @@ pub(crate) struct ClientMethodPlan<'a> {
     pub response: ClientResponsePlan,
     pub builder_method_ident: Option<syn::Ident>,
     pub builder_type_ident: Option<syn::Ident>,
+    pub content_type_method_ident: Option<syn::Ident>,
     success: ClientSuccessSelection<'a>,
     validate_content_type: bool,
 }
@@ -649,9 +650,20 @@ impl CodeGenerator {
             .collect();
 
         let plans = self.client_method_plans(analysis, operations);
+        let request_content_type_helper = plans
+            .iter()
+            .any(|plan| plan.content_type_method_ident.is_some())
+            .then(Self::generate_request_content_type_helper);
         let methods: Vec<TokenStream> = plans
             .iter()
-            .map(|plan| self.generate_planned_operation_method(analysis, plan))
+            .map(|plan| {
+                let method = self.generate_planned_operation_method(analysis, plan, false);
+                let companion = plan
+                    .content_type_method_ident
+                    .as_ref()
+                    .map(|_| self.generate_planned_operation_method(analysis, plan, true));
+                quote! { #method #companion }
+            })
             .collect();
         let (operation_builders, builder_entries) =
             self.generate_operation_builders(analysis, &plans);
@@ -662,6 +674,8 @@ impl CodeGenerator {
             #param_enums
 
             #(#op_error_enums)*
+
+            #request_content_type_helper
 
             #(#operation_builders)*
 
@@ -688,6 +702,7 @@ impl CodeGenerator {
             "with_max_response_body_bytes",
             "with_header",
             "with_headers",
+            "__request_content_type",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -858,6 +873,14 @@ impl CodeGenerator {
                 }
             }
         }
+        for plan in &mut plans {
+            if Self::wildcard_request_media_types(plan.operation).is_some() {
+                let base = plan.method_ident.to_string();
+                let base = base.strip_prefix("r#").unwrap_or(&base);
+                let name = Self::allocate_name(&format!("{base}_with_content_type"), &mut used);
+                plan.content_type_method_ident = Some(Self::to_field_ident(&name));
+            }
+        }
         self.plan_operation_builders(analysis, &mut plans);
         plans
     }
@@ -933,6 +956,7 @@ impl CodeGenerator {
             },
             builder_method_ident: None,
             builder_type_ident: None,
+            content_type_method_ident: None,
             success,
             validate_content_type,
         }
@@ -949,7 +973,13 @@ impl CodeGenerator {
 
         let mut used_entry_methods: std::collections::HashSet<String> = plans
             .iter()
-            .map(|plan| plan.method_ident.to_string())
+            .flat_map(|plan| {
+                std::iter::once(plan.method_ident.to_string()).chain(
+                    plan.content_type_method_ident
+                        .as_ref()
+                        .map(ToString::to_string),
+                )
+            })
             .collect();
         let mut used_type_names = std::collections::HashSet::new();
         for schema_name in analysis.schemas.keys() {
@@ -1005,7 +1035,10 @@ impl CodeGenerator {
                         )
                 })
                 .map_or(0, |plan| plan.optional_fields.len());
-            let optional_count = optional_param_count + optional_body_count + body_field_count;
+            let optional_count = optional_param_count
+                + optional_body_count
+                + body_field_count
+                + usize::from(plan.content_type_method_ident.is_some());
             if optional_count <= self.config().builders.threshold {
                 continue;
             }
@@ -1074,6 +1107,22 @@ impl CodeGenerator {
         let mut setters = Vec::new();
         let mut used_entry_params = std::collections::HashSet::new();
         let mut used_methods = std::collections::HashSet::from(["send".to_string()]);
+        let content_type_field = plan.content_type_method_ident.as_ref().map(|_| {
+            let ident = self.request_content_type_ident(operation, "content_type");
+            fields.push(quote! { #ident: Option<String> });
+            initializers.push(quote! { #ident: None });
+            // Reserve this setter before allocating setters for spec parameters.
+            used_methods.insert("content_type".to_string());
+            setters.push(quote! {
+                /// Set a concrete request Content-Type matching a declared media range.
+                #[must_use]
+                pub fn content_type(mut self, value: impl Into<String>) -> Self {
+                    self.#ident = Some(value.into());
+                    self
+                }
+            });
+            ident
+        });
 
         for allocated in allocated_params {
             let field_ident = &allocated.ident;
@@ -1289,7 +1338,27 @@ impl CodeGenerator {
         let response_type = self.response_type_for_body(plan.success.body);
         let error_type = &plan.error_type;
         let operation_id = &operation.operation_id;
-        let send = quote! { self.client.#flat_method(#(#call_arguments),*).await };
+        let send = if let (Some(companion), Some(field)) =
+            (&plan.content_type_method_ident, content_type_field)
+        {
+            let (with_type, without_type) =
+                if matches!(plan.success.body, ClientSuccessBody::EventStream) {
+                    (
+                        quote! { .map(futures_util::future::Either::Left) },
+                        quote! { .map(futures_util::future::Either::Right) },
+                    )
+                } else {
+                    (TokenStream::new(), TokenStream::new())
+                };
+            quote! {
+                match self.#field {
+                    Some(content_type) => self.client.#companion(#(#call_arguments,)* &content_type).await #with_type,
+                    None => self.client.#flat_method(#(#call_arguments),*).await #without_type,
+                }
+            }
+        } else {
+            quote! { self.client.#flat_method(#(#call_arguments),*).await }
+        };
         // The entry point is deprecated with its operation. `send` calls the
         // deprecated method on the caller's behalf, who was warned at the entry.
         let deprecated = Self::deprecated_attribute(operation);
@@ -1414,6 +1483,43 @@ impl CodeGenerator {
             .find(|allocated| std::ptr::eq(allocated.param, parameter))
             .map(|allocated| allocated.ident.to_string())
             .unwrap_or_else(|| self.param_ident_str(parameter))
+    }
+
+    /// Wildcard-only raw bodies need a caller-selected concrete representation.
+    /// Keep their analysis classification and concrete request defaults intact.
+    fn wildcard_request_media_types(operation: &OperationInfo) -> Option<&[String]> {
+        match &operation.request_body {
+            Some(crate::analysis::RequestBodyContent::Unsupported { media_types })
+                if !media_types.is_empty()
+                    && media_types
+                        .iter()
+                        .all(|media_type| crate::openapi::is_wildcard_media_type(media_type)) =>
+            {
+                Some(media_types)
+            }
+            Some(
+                crate::analysis::RequestBodyContent::TextPlain { media_type }
+                | crate::analysis::RequestBodyContent::Binary { media_type }
+                | crate::analysis::RequestBodyContent::OctetStream { media_type },
+            ) if crate::openapi::is_wildcard_media_type(media_type) => {
+                Some(std::slice::from_ref(media_type))
+            }
+            _ => None,
+        }
+    }
+
+    fn request_content_type_ident(&self, operation: &OperationInfo, preferred: &str) -> syn::Ident {
+        let mut used: std::collections::HashSet<_> = self
+            .allocated_operation_params(operation)
+            .into_iter()
+            .map(|parameter| parameter.ident.to_string())
+            .chain([
+                "body".to_string(),
+                "request".to_string(),
+                "client".to_string(),
+            ])
+            .collect();
+        Self::to_field_ident(&Self::allocate_name(preferred, &mut used))
     }
 
     fn builder_param_is_required(parameter: &ParameterInfo) -> bool {
@@ -1853,14 +1959,63 @@ impl CodeGenerator {
         &self,
         analysis: &SchemaAnalysis,
         plan: &ClientMethodPlan<'_>,
+        with_content_type: bool,
     ) -> TokenStream {
         let op = plan.operation;
-        let method_name = &plan.method_ident;
+        let method_name = if with_content_type {
+            plan.content_type_method_ident
+                .as_ref()
+                .unwrap_or(&plan.method_ident)
+        } else {
+            &plan.method_ident
+        };
         let http_method_call = self.http_method_call(op);
         let path = &op.path;
-        let request_param = &plan.request_parameters;
+        let content_type_ident = self.request_content_type_ident(op, "content_type");
+        let content_type_header =
+            self.request_content_type_ident(op, "__request_content_type_header");
+        let request_param = if with_content_type {
+            let parameters = &plan.request_parameters;
+            quote! { #parameters, #content_type_ident: &str }
+        } else {
+            plan.request_parameters.clone()
+        };
         let generics = &plan.generics;
-        let request_body = self.generate_request_body(op, analysis);
+        let request_body = self.generate_request_body(op, analysis, with_content_type);
+        let request_content_type_validation = if with_content_type {
+            self.generate_request_content_type_validation(
+                op,
+                &content_type_ident,
+                &content_type_header,
+            )
+        } else {
+            TokenStream::new()
+        };
+        let skip_content_type_header = if with_content_type {
+            quote! { && (#content_type_header.is_none() || !name.eq_ignore_ascii_case("content-type")) }
+        } else {
+            TokenStream::new()
+        };
+        let add_custom_header = if with_content_type {
+            quote! {
+                if #content_type_header.is_none() || !name.eq_ignore_ascii_case("content-type") {
+                    req = req.header(name, value);
+                }
+            }
+        } else {
+            quote! { req = req.header(name, value); }
+        };
+        let apply_content_type_header = if with_content_type {
+            quote! {
+                if let Some(value) = #content_type_header {
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    headers.insert(reqwest::header::CONTENT_TYPE, value);
+                    req = req.headers(headers);
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let query_params = self.generate_query_params(op);
         let header_params = self.generate_header_params(op);
         let cookie_params = self.generate_cookie_params(op);
@@ -1879,7 +2034,7 @@ impl CodeGenerator {
             (
                 quote! {
                     for (name, value) in &self.custom_headers {
-                        if !name.eq_ignore_ascii_case("accept") {
+                        if !name.eq_ignore_ascii_case("accept") #skip_content_type_header {
                             req = req.header(name, value);
                         }
                     }
@@ -1892,7 +2047,7 @@ impl CodeGenerator {
             (
                 quote! {
                     for (name, value) in &self.custom_headers {
-                        req = req.header(name, value);
+                        #add_custom_header
                     }
                 },
                 TokenStream::new(),
@@ -1916,6 +2071,18 @@ impl CodeGenerator {
         } else {
             TokenStream::new()
         };
+        let request_content_type_doc = if with_content_type {
+            quote! {
+                #[doc = "Send a raw body with a concrete Content-Type matching a declared request media range. The per-call value overrides configured Content-Type headers. When the optional body is absent, this value is ignored."]
+            }
+        } else if let Some(companion) = &plan.content_type_method_ident {
+            let doc = format!(
+                "A present request body requires a concrete Content-Type; use [`Self::{companion}`] or the operation builder's `content_type` setter."
+            );
+            quote! { #[doc = #doc] }
+        } else {
+            TokenStream::new()
+        };
 
         let deprecated = Self::deprecated_attribute(op);
 
@@ -1923,6 +2090,7 @@ impl CodeGenerator {
             #doc_comment
             #variant_doc
             #stream_doc
+            #request_content_type_doc
             #deprecated
             pub async fn #method_name #generics(
                 &self,
@@ -1931,6 +2099,7 @@ impl CodeGenerator {
                 #url_construction
 
                 let mut req = #http_method_call;
+                #request_content_type_validation
                 #request_body
 
                 #query_params
@@ -1947,6 +2116,7 @@ impl CodeGenerator {
                 // Keep content negotiation aligned with the generated return type,
                 // replacing any custom Accept value for this operation.
                 #accept_header
+                #apply_content_type_header
 
                 let response = req.send().await?;
                 #content_validation
@@ -3409,12 +3579,66 @@ impl CodeGenerator {
         }
     }
 
+    fn generate_request_content_type_validation(
+        &self,
+        operation: &OperationInfo,
+        input: &syn::Ident,
+        header: &syn::Ident,
+    ) -> TokenStream {
+        let ranges = Self::wildcard_request_media_types(operation).unwrap_or_default();
+        let operation_id = &operation.operation_id;
+        let validate =
+            quote! { Self::__request_content_type(#input, &[#(#ranges),*], #operation_id)? };
+        if operation.request_body_required {
+            quote! { let #header = Some(#validate); }
+        } else {
+            quote! {
+                let #header = if body.is_some() { Some(#validate) } else { None };
+            }
+        }
+    }
+
+    fn generate_request_content_type_helper() -> TokenStream {
+        quote! {
+            impl HttpClient {
+                fn __request_content_type(input: &str, ranges: &[&str], operation_id: &str) -> Result<reqwest::header::HeaderValue, HttpError> {
+                    let actual = input.parse::<::mime::Mime>().map_err(|error| {
+                        HttpError::Config(format!("invalid request Content-Type `{}` for operation `{}`: {}", input, operation_id, error))
+                    })?;
+                    if actual.type_().as_str().contains('*') || actual.subtype().as_str().contains('*') {
+                        return Err(HttpError::Config(format!("request Content-Type `{}` for operation `{}` must be concrete", input, operation_id)));
+                    }
+                    let matches = ranges.iter().any(|range| {
+                        let Ok(expected) = range.parse::<::mime::Mime>() else { return false };
+                        (expected.type_() == ::mime::STAR || expected.type_() == actual.type_())
+                            && (expected.subtype() == ::mime::STAR
+                                || (expected.subtype() == actual.subtype() && expected.suffix() == actual.suffix()))
+                            && expected.params().all(|(name, value)| {
+                                actual.get_param(name).is_some_and(|actual| actual == value)
+                            })
+                    });
+                    if !matches {
+                        return Err(HttpError::Config(format!("request Content-Type `{}` for operation `{}` does not match declared media ranges ({})", input, operation_id, ranges.join(", "))));
+                    }
+                    input.parse::<reqwest::header::HeaderValue>().map_err(|error| {
+                        HttpError::Config(format!("invalid request Content-Type header for operation `{}`: {}", operation_id, error))
+                    })
+                }
+            }
+        }
+    }
+
     /// Generate request body serialization based on content type
     /// Emit statements that mutate `req` to apply the request body. Returns
     /// explicit zero-length framing for bodyless POST, PUT, and PATCH requests.
     /// Optional bodies (T11) gate the application on `Some(_)`; required bodies
     /// apply unconditionally.
-    fn generate_request_body(&self, op: &OperationInfo, analysis: &SchemaAnalysis) -> TokenStream {
+    fn generate_request_body(
+        &self,
+        op: &OperationInfo,
+        analysis: &SchemaAnalysis,
+        with_content_type: bool,
+    ) -> TokenStream {
         let empty_request_framing = Self::generate_empty_request_framing(op);
         let Some(rb) = op.request_body.as_ref() else {
             return empty_request_framing;
@@ -3422,6 +3646,13 @@ impl CodeGenerator {
         use crate::analysis::RequestBodyContent;
         let required = op.request_body_required;
         let (ident, apply): (TokenStream, TokenStream) = match rb {
+            _ if with_content_type => (quote! { body }, quote! { req = req.body(body); }),
+            _ if Self::wildcard_request_media_types(op).is_some() => {
+                return Self::generate_missing_request_content_type(
+                    op,
+                    Self::wildcard_request_media_types(op).unwrap_or_default(),
+                );
+            }
             RequestBodyContent::Json { media_type, .. } => (
                 quote! { request },
                 quote! {
@@ -3476,24 +3707,7 @@ impl CodeGenerator {
                     .find(|media_type| !crate::openapi::is_wildcard_media_type(media_type))
                     .map(String::as_str);
                 let Some(media_type) = media_type else {
-                    let ranges = media_types.join(", ");
-                    let message = format!(
-                        "request body for operation `{}` declares only wildcard media ranges ({ranges}); a concrete Content-Type is required",
-                        op.operation_id,
-                    );
-                    return if required {
-                        quote! {
-                            let _ = body;
-                            return Err(HttpError::Config(#message.to_string()).into());
-                        }
-                    } else {
-                        quote! {
-                            if body.is_some() {
-                                return Err(HttpError::Config(#message.to_string()).into());
-                            }
-                            #empty_request_framing
-                        }
-                    };
+                    return Self::generate_missing_request_content_type(op, media_types);
                 };
                 (
                     quote! { body },
@@ -3515,6 +3729,31 @@ impl CodeGenerator {
                 } else {
                     #empty_request_framing
                 }
+            }
+        }
+    }
+
+    fn generate_missing_request_content_type(
+        op: &OperationInfo,
+        media_types: &[String],
+    ) -> TokenStream {
+        let ranges = media_types.join(", ");
+        let message = format!(
+            "request body for operation `{}` declares only wildcard media ranges ({ranges}); a concrete Content-Type is required",
+            op.operation_id,
+        );
+        if op.request_body_required {
+            quote! {
+                let _ = body;
+                return Err(HttpError::Config(#message.to_string()).into());
+            }
+        } else {
+            let empty_request_framing = Self::generate_empty_request_framing(op);
+            quote! {
+                if body.is_some() {
+                    return Err(HttpError::Config(#message.to_string()).into());
+                }
+                #empty_request_framing
             }
         }
     }

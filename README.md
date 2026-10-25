@@ -123,6 +123,7 @@ module_name = "api"
 
 [generator.builders]
 # Add `*_builder()` when an operation has more than three optional values.
+# See "additive operation builders" below for fluent calls and threshold = 0.
 enabled = true
 threshold = 3
 
@@ -362,6 +363,41 @@ types, or a range such as `image/*`, sets none. An array field is one part per
 item under the field's name, so `Vec<MultipartFile>` sends several files, each
 with its own filename. An object field is one JSON part, typed
 `application/json` unless `encoding` names another type.
+
+### Wildcard request bodies
+
+An operation whose request body declares only media ranges such as `image/*`
+or `*/*` needs a concrete `Content-Type` for each upload. Its generated
+`*_with_content_type()` method takes the existing arguments followed by a media
+type. For example, an `uploadImage` operation with an optional body and no other
+arguments supports:
+
+```rust
+client
+    .upload_image_with_content_type(Some(image_bytes), "image/png")
+    .await?;
+```
+
+The media type must be valid, concrete, and match at least one declared range.
+Parameters such as `charset=utf-8` are preserved. The per-call value overrides
+configured `Content-Type` headers. When an optional body is `None`, the value is
+ignored. The original method still reports a configuration error if a body is
+present without a concrete type.
+
+With [operation builders](#generatorbuilders--additive-operation-builders)
+enabled, the same upload can be written as:
+
+```rust
+client
+    .upload_image_builder()
+    .body(image_bytes)
+    .content_type("image/png")
+    .send()
+    .await?;
+```
+
+The content-type setter counts as an optional value for builder generation;
+use `threshold = 0` to include a small upload operation like this one.
 
 ### Response representations and live downloads
 
@@ -748,7 +784,8 @@ The CLI also supports `--types-conservative`, which collapses every typed scalar
 
 ### `[generator.builders]` — additive operation builders
 
-Large operations can keep their existing flat async method and also expose a `*_builder()` entry point:
+Operation builders are opt-in methods on the generated `HttpClient` in
+`client.rs`. Enable them in `openapi-to-rust.toml` and regenerate:
 
 ```toml
 [generator.builders]
@@ -756,7 +793,45 @@ enabled = true
 threshold = 3
 ```
 
-A builder is emitted when its optional query/header/body values and reachable optional request-body fields exceed `threshold`. Required path, query, header, and request-model values stay explicit. Setters own their values, and `.send().await` delegates to the existing flat method, so request serialization and response errors stay identical. Builder generation is disabled by default to preserve existing generated call sites.
+```bash
+openapi-to-rust generate --config openapi-to-rust.toml
+```
+
+A builder is emitted only when its optional parameters, optional body,
+eligible optional request-body fields, and content-type setter for wildcard
+bodies exceed `threshold`. The default threshold is `3`, so four optional values qualify.
+Set `threshold = 0` to include operations with at least one optional value;
+operations with no optional values do not gain builders.
+
+Required operation parameters and required request-model values are arguments to
+`*_builder(...)`. Optional values become named setters. For example, an
+`updateWidget` operation with required widget ID, tenant ID, and name can use:
+
+```rust
+let widget = client
+    .update_widget_builder("widget-1", "tenant-1", "New name".to_string())
+    .search("needle")
+    .limit(20)
+    .send()
+    .await?;
+```
+
+Setters own their values; `.send().await` uses the same serialization and error
+handling as the flat operation method. For wildcard request bodies, add
+`.content_type("image/png")` alongside `.body(bytes)` as shown
+[above](#wildcard-request-bodies). Existing flat async methods remain available.
+Builder generation is disabled by default.
+
+When using the Rust library:
+
+```rust
+use openapi_to_rust::{GeneratorConfig, config::BuildersSection};
+
+let config = GeneratorConfig {
+    builders: BuildersSection { enabled: true, threshold: 0 },
+    ..Default::default()
+};
+```
 
 ## OpenAPI 3.1 / 3.2 support
 
