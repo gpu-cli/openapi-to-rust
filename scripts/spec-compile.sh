@@ -247,6 +247,17 @@ EOF
       echo "[dev-dependencies]"
       echo 'jsonschema = { version = "0.49", default-features = false }'
     fi
+    # These disposable crates verify generated code, not debug artifacts.
+    # Large models otherwise retain substantial debug/incremental state while
+    # compiling the round-trip test executable on a memory-limited runner.
+    echo
+    echo '[profile.dev]'
+    echo 'debug = 0'
+    echo 'incremental = false'
+    echo
+    echo '[profile.test]'
+    echo 'debug = 0'
+    echo 'incremental = false'
   } >"$dir/Cargo.toml"
 
   if [ "$roundtrip_ready" = "1" ]; then
@@ -273,6 +284,7 @@ elif [ ${#gen_ok[@]} -gt 0 ]; then
       continue
     fi
     log="$ROOT/$name/check.log"
+    printf "%-30s CHECK\n" "$name"
     if ! ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo check $OFFLINE ) >"$log" 2>&1; then
       err_count=$(grep -cE "^error" "$log" || true)
       printf "%-30s CHECK-FAIL (%s errs)\n" "$name" "$err_count"
@@ -281,6 +293,7 @@ elif [ ${#gen_ok[@]} -gt 0 ]; then
     fi
     if [ -f "$ROOT/$name/src/schema_roundtrip_test.rs" ]; then
       rt_log="$ROOT/$name/roundtrip.log"
+      printf "%-30s ROUNDTRIP\n" "$name"
       if ( cd "$ROOT/$name" && CARGO_TARGET_DIR="$SCRATCH_TARGET" cargo test --lib generated_models_preserve_schema_valid_json $OFFLINE ) >"$rt_log" 2>&1; then
         printf "%-30s PASS + ROUNDTRIP\n" "$name"
         roundtrip_tested+=("$name")

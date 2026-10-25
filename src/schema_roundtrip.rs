@@ -13,6 +13,8 @@ use crate::{
 use serde_json::{Map, Number, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+include!("schema_roundtrip/validators.rs");
+
 const MAX_ATTEMPTS_PER_SCHEMA: usize = 96;
 const MAX_SYNTHESIS_DEPTH: usize = 20;
 const MAX_DYNAMIC_REF_OCCURRENCES: usize = 2;
@@ -47,6 +49,13 @@ impl Dialect {
         match self {
             Self::Draft4 => "http://json-schema.org/draft-04/schema#",
             Self::Draft202012 => "https://json-schema.org/draft/2020-12/schema",
+        }
+    }
+
+    fn draft(self) -> jsonschema::Draft {
+        match self {
+            Self::Draft4 => jsonschema::Draft::Draft4,
+            Self::Draft202012 => jsonschema::Draft::Draft202012,
         }
     }
 
@@ -159,7 +168,7 @@ pub fn build_round_trip_plan(
         dialect.definitions_key(): Value::Object(valid_components),
     });
 
-    let validators = validator_options(dialect).build_map(&document)?;
+    let validators = SchemaValidators::new(&document, dialect.draft())?;
     let generator = SyntheticGenerator::with_validators(&document, &validators);
     let mut cases = Vec::new();
     let mut skipped = Vec::new();
@@ -280,6 +289,7 @@ pub fn build_round_trip_plan(
     })
 }
 
+#[cfg(test)]
 fn validator_options(dialect: Dialect) -> jsonschema::ValidationOptions<'static> {
     jsonschema::options()
         .with_draft(match dialect {
@@ -484,6 +494,8 @@ fn render_test_source(
 use serde::{{Serialize, de::DeserializeOwned}};
 use serde_json::Value;
 
+{oracle_helpers}
+
 fn errors(validator: &jsonschema::Validator, value: &Value) -> String {{
     validator
         .iter_errors(value)
@@ -493,7 +505,7 @@ fn errors(validator: &jsonschema::Validator, value: &Value) -> String {{
 }}
 
 fn check_model<T>(
-    validators: &jsonschema::ValidatorMap,
+    validators: &SchemaValidators,
     schema_name: &str,
     pointer: &str,
     samples_json: &str,
@@ -517,7 +529,7 @@ where
         if !validator.is_valid(&input) {{
             failures.push(format!(
                 "{{schema_name}} sample {{sample_index}} synthetic precondition failed: {{}}; input={{input}}",
-                errors(validator, &input),
+                errors(&validator, &input),
             ));
             continue;
         }}
@@ -542,7 +554,7 @@ where
         if !validator.is_valid(&output) {{
             failures.push(format!(
                 "{{schema_name}} sample {{sample_index}} emitted schema-invalid JSON: {{}}; input={{input}}; output={{output}}",
-                errors(validator, &output),
+                errors(&validator, &output),
             ));
         }}
         let hydrated_again: T = match serde_json::from_value(output.clone()) {{
@@ -588,11 +600,7 @@ fn generated_models_preserve_schema_valid_json() {{
 fn run_generated_models_preserve_schema_valid_json() {{
     let document: Value = serde_json::from_str({document_literal})
         .unwrap_or_else(|error| panic!("invalid embedded schema bundle: {{error}}"));
-    let validators = jsonschema::options()
-        .with_draft({draft})
-        .should_validate_formats(true)
-        .with_pattern_options(jsonschema::PatternOptions::regex())
-        .build_map(&document)
+    let validators = SchemaValidators::new(&document, {draft})
         .unwrap_or_else(|error| panic!("schema bundle did not compile: {{error}}"));
     let mut failures: Vec<String> = Vec::new();
 {calls}    if !failures.is_empty() {{
@@ -605,6 +613,7 @@ fn run_generated_models_preserve_schema_valid_json() {{
 }}
 "#,
         draft = dialect.rust_variant(),
+        oracle_helpers = include_str!("schema_roundtrip/validators.rs"),
     ))
 }
 
@@ -848,15 +857,40 @@ fn escape_pointer_segment(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
+#[derive(Default)]
+struct BinaryFormatTraversal {
+    required_refs: BTreeMap<String, usize>,
+    all_refs: BTreeMap<String, usize>,
+}
+
+impl BinaryFormatTraversal {
+    fn follow_reference(&mut self, reference: &str, depth: usize, required: bool) -> bool {
+        let visited = if required {
+            &mut self.required_refs
+        } else {
+            &mut self.all_refs
+        };
+        if visited
+            .get(reference)
+            .is_some_and(|previous| *previous <= depth)
+        {
+            return false;
+        }
+        // A shallower path has more remaining depth, so it must be explored.
+        visited.insert(reference.to_string(), depth);
+        true
+    }
+}
+
 fn contains_required_binary_format(schema: &Value, root: &Value) -> bool {
-    contains_required_binary_format_inner(schema, root, 0, &mut BTreeSet::new())
+    contains_required_binary_format_inner(schema, root, 0, &mut BinaryFormatTraversal::default())
 }
 
 fn contains_required_binary_format_inner(
     schema: &Value,
     root: &Value,
     depth: usize,
-    visited_refs: &mut BTreeSet<String>,
+    visited_refs: &mut BinaryFormatTraversal,
 ) -> bool {
     if depth > MAX_SYNTHESIS_DEPTH {
         return false;
@@ -868,14 +902,11 @@ fn contains_required_binary_format_inner(
         return true;
     }
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if !visited_refs.insert(reference.to_string()) {
-            return false;
-        }
-        let result = resolve_local_ref(root, reference).is_some_and(|target| {
-            contains_required_binary_format_inner(target, root, depth + 1, visited_refs)
-        });
-        visited_refs.remove(reference);
-        if result {
+        if visited_refs.follow_reference(reference, depth, true)
+            && resolve_local_ref(root, reference).is_some_and(|target| {
+                contains_required_binary_format_inner(target, root, depth + 1, visited_refs)
+            })
+        {
             return true;
         }
     }
@@ -934,14 +965,14 @@ fn contains_required_binary_format_inner(
 }
 
 fn schema_contains_binary_format(schema: &Value, root: &Value) -> bool {
-    schema_contains_binary_format_inner(schema, root, 0, &mut BTreeSet::new())
+    schema_contains_binary_format_inner(schema, root, 0, &mut BinaryFormatTraversal::default())
 }
 
 fn schema_contains_binary_format_inner(
     schema: &Value,
     root: &Value,
     depth: usize,
-    visited_refs: &mut BTreeSet<String>,
+    visited_refs: &mut BinaryFormatTraversal,
 ) -> bool {
     if depth > MAX_SYNTHESIS_DEPTH {
         return false;
@@ -953,14 +984,11 @@ fn schema_contains_binary_format_inner(
         return true;
     }
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if !visited_refs.insert(reference.to_string()) {
-            return false;
-        }
-        let result = resolve_local_ref(root, reference).is_some_and(|target| {
-            schema_contains_binary_format_inner(target, root, depth + 1, visited_refs)
-        });
-        visited_refs.remove(reference);
-        if result {
+        if visited_refs.follow_reference(reference, depth, false)
+            && resolve_local_ref(root, reference).is_some_and(|target| {
+                schema_contains_binary_format_inner(target, root, depth + 1, visited_refs)
+            })
+        {
             return true;
         }
     }
@@ -1020,7 +1048,7 @@ fn schema_contains_binary_format_inner(
 struct SyntheticGenerator<'a> {
     root: &'a Value,
     dynamic_anchors: BTreeMap<String, &'a Value>,
-    validators: Option<&'a jsonschema::ValidatorMap>,
+    validators: Option<&'a SchemaValidators>,
 }
 
 impl<'a> SyntheticGenerator<'a> {
@@ -1029,11 +1057,11 @@ impl<'a> SyntheticGenerator<'a> {
         Self::new_inner(root, None)
     }
 
-    fn with_validators(root: &'a Value, validators: &'a jsonschema::ValidatorMap) -> Self {
+    fn with_validators(root: &'a Value, validators: &'a SchemaValidators) -> Self {
         Self::new_inner(root, Some(validators))
     }
 
-    fn new_inner(root: &'a Value, validators: Option<&'a jsonschema::ValidatorMap>) -> Self {
+    fn new_inner(root: &'a Value, validators: Option<&'a SchemaValidators>) -> Self {
         let mut dynamic_anchors = BTreeMap::new();
         collect_dynamic_anchors(root, &mut dynamic_anchors);
         Self {
@@ -1060,21 +1088,19 @@ impl<'a> SyntheticGenerator<'a> {
             _ => return Some(any_value(seed, depth)),
         }
         let object = schema.as_object()?;
-        let contains_raw_binary = schema_contains_binary_format(schema, self.root);
-
-        if !contains_raw_binary
-            && seed == 0
+        if seed == 0
             && let Some(default) = object.get("default")
+            && !schema_contains_binary_format(schema, self.root)
         {
             return Some(default.clone());
         }
-        if !contains_raw_binary
-            && seed == 1
+        if seed == 1
             && let Some(example) = object
                 .get("examples")
                 .and_then(Value::as_array)
                 .and_then(|values| values.first())
                 .or_else(|| object.get("example"))
+            && !schema_contains_binary_format(schema, self.root)
         {
             return Some(example.clone());
         }
@@ -1513,11 +1539,11 @@ impl<'a> SyntheticGenerator<'a> {
         depth: usize,
         refs: &mut Vec<String>,
     ) -> Option<Value> {
+        let empty_properties = Map::new();
         let properties = object
             .get("properties")
             .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+            .unwrap_or(&empty_properties);
         let required: BTreeSet<String> = object
             .get("required")
             .and_then(Value::as_array)
@@ -1561,7 +1587,7 @@ impl<'a> SyntheticGenerator<'a> {
         {
             output.insert(format!("synthetic_extra_{seed}"), value);
         }
-        apply_dependent_required(self, object, &properties, seed, depth, refs, &mut output)?;
+        apply_dependent_required(self, object, properties, seed, depth, refs, &mut output)?;
 
         let min_properties = object
             .get("minProperties")
@@ -2006,6 +2032,101 @@ mod tests {
                 .expect("optional binary fields must not block safe synthesis");
             assert!(generated.get("name").is_some(), "{generated}");
             assert!(generated.get("file").is_none(), "{generated}");
+        }
+    }
+
+    #[test]
+    fn binary_detection_does_not_expand_every_shared_reference_path() {
+        let mut definitions = Map::new();
+        for index in 0..10 {
+            let branches: Vec<_> = (0..8)
+                .map(|_| json!({"$ref": format!("#/$defs/Layer{}", index + 1)}))
+                .collect();
+            definitions.insert(format!("Layer{index}"), json!({"anyOf": branches}));
+        }
+        definitions.insert("Layer10".to_string(), json!({"type": "string"}));
+        let document = json!({"$defs": definitions});
+        let schema = &document["$defs"]["Layer0"];
+        assert!(!schema_contains_binary_format(schema, &document));
+        assert!(!contains_required_binary_format(schema, &document));
+    }
+
+    #[test]
+    fn binary_detection_keeps_shallower_paths_and_ref_sibling_assertions() {
+        let document = json!({"$defs": {
+            "Binary": {"type": "string", "format": "binary"},
+            "Plain": {"type": "object"}
+        }});
+        let mut deep = json!({"$ref": "#/$defs/Binary"});
+        for _ in 0..MAX_SYNTHESIS_DEPTH - 1 {
+            deep = json!({"allOf": [deep]});
+        }
+        let schema = json!({"anyOf": [deep, {"$ref": "#/$defs/Binary"}]});
+        assert!(schema_contains_binary_format(&schema, &document));
+        assert!(contains_required_binary_format(&schema, &document));
+
+        let siblings = json!({"anyOf": [
+            {"$ref": "#/$defs/Plain"},
+            {"$ref": "#/$defs/Plain", "required": ["file"], "properties": {
+                "file": {"type": "string", "format": "binary"}
+            }}
+        ]});
+        assert!(schema_contains_binary_format(&siblings, &document));
+        assert!(contains_required_binary_format(&siblings, &document));
+    }
+
+    #[test]
+    fn binary_detection_keeps_required_and_optional_searches_separate() {
+        let document = json!({"$defs": {"Upload": {
+            "type": "object", "properties": {"file": {"type": "string", "format": "binary"}}
+        }}});
+        let schema = json!({"type": "object", "required": ["a_metadata", "z_files"], "properties": {
+            "a_metadata": {"$ref": "#/$defs/Upload"},
+            "z_files": {"type": "array", "items": {"$ref": "#/$defs/Upload"}}
+        }});
+        assert!(contains_required_binary_format(&schema, &document));
+    }
+
+    #[test]
+    fn target_validators_preserve_escaped_names_and_survive_cache_eviction() {
+        for dialect in [Dialect::Draft4, Dialect::Draft202012] {
+            let mut definitions = Map::new();
+            let unusual = "value/with~% 雪";
+            definitions.insert(
+                unusual.to_string(),
+                json!({"type": "integer", "const": 7, "enum": [7]}),
+            );
+            for index in 0..MAX_CACHED_SCHEMA_VALIDATORS + 1 {
+                definitions.insert(
+                    format!("Value{index}"),
+                    json!({"type": "integer", "enum": [index]}),
+                );
+            }
+            let document =
+                json!({"$schema": dialect.schema_uri(), dialect.definitions_key(): definitions});
+            let validators = SchemaValidators::new(&document, dialect.draft()).expect("registry");
+            let pointer = format!(
+                "#/{}/{}",
+                dialect.definitions_key(),
+                escape_pointer_segment(unusual)
+            );
+            let retained = validators
+                .get(&pointer)
+                .expect("escaped component validator");
+            for index in 0..MAX_CACHED_SCHEMA_VALIDATORS + 1 {
+                let pointer = format!("#/{}/Value{index}", dialect.definitions_key());
+                let validator = validators.get(&pointer).expect("component validator");
+                assert!(validator.is_valid(&json!(index)));
+                assert!(!validator.is_valid(&json!("wrong type")));
+                assert!(validators.cache.borrow().len() <= MAX_CACHED_SCHEMA_VALIDATORS);
+            }
+            assert_eq!(
+                validators.cache.borrow().len(),
+                MAX_CACHED_SCHEMA_VALIDATORS
+            );
+            drop(validators);
+            assert!(retained.is_valid(&json!(7)));
+            assert!(!retained.is_valid(&json!(8)));
         }
     }
 
@@ -2678,7 +2799,9 @@ mod tests {
         let validators = validator_options(Dialect::Draft202012)
             .build_map(&document)
             .expect("validator map");
-        let generator = SyntheticGenerator::with_validators(&document, &validators);
+        let oracle =
+            SchemaValidators::new(&document, Dialect::Draft202012.draft()).expect("oracle");
+        let generator = SyntheticGenerator::with_validators(&document, &oracle);
 
         for schema_name in [
             "Mapped",
@@ -2752,7 +2875,9 @@ mod tests {
         let validators = validator_options(Dialect::Draft202012)
             .build_map(&document)
             .expect("validator map");
-        let generator = SyntheticGenerator::with_validators(&document, &validators);
+        let oracle =
+            SchemaValidators::new(&document, Dialect::Draft202012.draft()).expect("oracle");
+        let generator = SyntheticGenerator::with_validators(&document, &oracle);
         let branches = document["$defs"]["Choice"]["anyOf"]
             .as_array()
             .expect("anyOf branches");
@@ -2798,7 +2923,8 @@ mod tests {
         let validators = validator_options(dialect)
             .build_map(&document)
             .expect("Coda validator map");
-        let generator = SyntheticGenerator::with_validators(&document, &validators);
+        let oracle = SchemaValidators::new(&document, dialect.draft()).expect("oracle");
+        let generator = SyntheticGenerator::with_validators(&document, &oracle);
         let pointer = format!("#/{}/ColumnFormat", dialect.definitions_key());
         let schema = document
             .pointer(pointer.trim_start_matches('#'))

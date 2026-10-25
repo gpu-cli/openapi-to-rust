@@ -30,6 +30,13 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Fixed
 
+- Corpus round-trip validation compiles schema validators on demand with a
+  bounded cache instead of retaining a validator for every JSON node. Binary
+  schema detection also reuses shared reference visits. This reduces the
+  Stripe planner's observed memory footprint from 16.2 GiB to under 600 MB
+  while preserving its schema and sample coverage. Scratch conformance crates
+  omit debug and incremental artifacts, and log compilation and round-trip
+  stages separately.
 - An object that pairs shared fields with a union, through `allOf` or as
   sibling `properties` and `anyOf`/`oneOf`, no longer turns a `required` name
   declared only by the union's branches into a required `serde_json::Value`
