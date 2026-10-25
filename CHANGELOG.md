@@ -36,7 +36,8 @@ when correcting output that was wrong or incomplete on the wire.
   Stripe planner's observed memory footprint from 16.2 GiB to under 600 MB
   while preserving its schema and sample coverage. Scratch conformance crates
   omit debug and incremental artifacts, and log compilation and round-trip
-  stages separately.
+  stages separately. Full-tier CI reserves swap headroom and logs memory
+  pressure; manual runs can select individual specs for reproduction.
 - An object that pairs shared fields with a union, through `allOf` or as
   sibling `properties` and `anyOf`/`oneOf`, no longer turns a `required` name
   declared only by the union's branches into a required `serde_json::Value`

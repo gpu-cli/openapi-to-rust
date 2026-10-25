@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: "17 6 * * 1"
   workflow_dispatch:
+    inputs:
+      specs:
+        description: Space-separated spec names (empty runs the full corpus)
+        required: false
+        default: ""
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -218,16 +224,36 @@ jobs:
       - run: scripts/spec-compile.sh anthropic openai
 
   full-spec-compile:
+    name: ${{ inputs.specs && format('spec-compile ({0})', inputs.specs) || 'full-spec-compile' }}
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:
       SPEC_COMPILE_TARGET_DIR: ${{ github.workspace }}/target/spec-compile
+      SPEC_COMPILE_NAMES: ${{ inputs.specs }}
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/spec-compile.sh
+      - name: Provide memory headroom for large generated crates
+        run: |
+          # This Rust-only job does not use the preinstalled Android SDK.
+          sudo rm -rf /usr/local/lib/android
+          sudo fallocate -l 8G /mnt/spec-compile.swap
+          sudo chmod 600 /mnt/spec-compile.swap
+          sudo mkswap /mnt/spec-compile.swap
+          sudo swapon /mnt/spec-compile.swap
+          free -h
+          df -h /
+      - name: Compile specs and log memory pressure
+        shell: bash
+        run: |
+          vmstat -w 30 &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+          read -r -a specs <<< "$SPEC_COMPILE_NAMES"
+          scripts/spec-compile.sh "${specs[@]}"
       - name: Retain full-spec diagnostics
         if: always()
         uses: actions/upload-artifact@v4
