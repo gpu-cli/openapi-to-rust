@@ -139,6 +139,7 @@ serde_json = "1"
 serde_urlencoded = "0.7"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
 url = "2"
 "#,
     )
@@ -147,6 +148,8 @@ url = "2"
     std::fs::write(
         temp.path().join("src/lib.rs"),
         r####"pub mod generated;
+
+include!("customize-validation.rs");
 
 #[cfg(test)]
 mod tests {
@@ -160,6 +163,50 @@ mod tests {
     use tokio::sync::oneshot;
 
     const SECRET: &str = "TOP_SECRET_MARKER";
+
+    #[tokio::test]
+    async fn documented_response_middleware_customizes_generated_rejections() {
+        use axum::{body::{Body, to_bytes}, http::{Request, StatusCode, header}, response::IntoResponse};
+        use tower::ServiceExt;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = server_api_router(Api { calls: calls.clone() })
+            .layer(axum::middleware::map_response(crate::customize_validation));
+        let response = app.oneshot(Request::builder()
+            .method("POST").uri("/widgets/acme?limit=2")
+            .header("x-mode", "sync").header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"x","secret":"ok"}"#)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/problem+json");
+        let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let problem: ProblemDetails = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem.r#type, "https://api.example.com/problems/validation");
+        assert_eq!(problem.code, "request_validation_failed");
+        assert_eq!(problem.errors[0].location, "/body/name");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // Normal bodies pass through, even above the problem buffer limit.
+        let normal = "x".repeat(70 * 1024).into_response();
+        let normal = crate::customize_validation(normal).await;
+        assert_eq!(to_bytes(normal.into_body(), 100 * 1024).await.unwrap().len(), 70 * 1024);
+
+        for raw in ["not json", r#"{"type":"https://other.example/problem","title":"Other","status":422,"code":"other"}"#] {
+            let response = (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "application/problem+json")], raw).into_response();
+            let response = crate::customize_validation(response).await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(to_bytes(response.into_body(), 64 * 1024).await.unwrap(), raw);
+        }
+
+        let raw = r#"{"type":"https://openapi-to-rust.dev/problems/validation","title":"Request validation failed","status":422,"code":"request_validation_failed"}"#;
+        let mut response = (StatusCode::UNPROCESSABLE_ENTITY, [(header::CONTENT_TYPE, "application/problem+json")], raw).into_response();
+        response.headers_mut().insert(header::CONTENT_LENGTH, raw.len().into());
+        response.headers_mut().insert("x-request-id", "example".parse().unwrap());
+        let response = crate::customize_validation(response).await;
+        assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        assert_eq!(response.headers()["x-request-id"], "example");
+
+        let oversized = ([(header::CONTENT_TYPE, "application/problem+json")], "x".repeat(70 * 1024)).into_response();
+        assert_eq!(crate::customize_validation(oversized).await.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[derive(Clone)]
     struct Api {
@@ -372,6 +419,12 @@ mod tests {
 "####,
     )
     .expect("scratch lib");
+
+    std::fs::write(
+        temp.path().join("src/customize-validation.rs"),
+        include_str!("../docs/examples/customize-validation.rs"),
+    )
+    .expect("documented middleware example");
 
     let output = Command::new("cargo")
         .args(["test", "--quiet", "--offline"])

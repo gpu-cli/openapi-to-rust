@@ -7,10 +7,11 @@
     "predev": "node scripts/fetch-playground-wasm.mjs",
     "dev": "astro dev",
     "prebuild": "node scripts/fetch-playground-wasm.mjs",
-    "build": "astro check && astro build",
+    "build": "astro check && astro build && node scripts/audit-problems.mjs",
     "check": "astro check",
     "audit:html": "html-validate 'dist/**/*.html'",
     "audit:seo": "node scripts/audit-seo.mjs",
+    "audit:problems": "node scripts/audit-problems.mjs",
     "preview": "astro preview"
   },
   "dependencies": {

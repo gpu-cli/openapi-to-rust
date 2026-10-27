@@ -6,6 +6,13 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Fixed
+
+- Publish documentation at all six generated Axum Problem Details type URIs
+  so existing validation error links resolve (#109). Website builds now check
+  that every emitted problem URI has a page. Document response middleware for
+  customizing the existing public validation error profile.
+
 ## [0.23.0] - 2026-10-25
 
 ### Added

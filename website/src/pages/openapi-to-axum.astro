@@ -68,7 +68,7 @@ const toc = [
     <li>A typed response enum per operation, with variants tied to documented status codes.</li>
     <li>Axum handlers and a combined <code>build_router(...)</code> factory.</li>
     <li>Path, query, header, and request-body extraction.</li>
-    <li>An HTTP 400 short-circuit when required parameters are missing or invalid at the handler boundary.</li>
+    <li>Request validation before your implementation runs, with sanitized Problem Details responses.</li>
     <li>SSE-ready response variants when streaming behavior is declared.</li>
   </ul>
   <p>
@@ -105,8 +105,14 @@ openapi-to-rust generate`} />
     to documented responses. A successful JSON response, a typed 4xx body, and an empty 204 become distinct Rust variants.
   </p>
   <p>
-    This makes the implementation’s possible wire responses visible in its return type. It does not add general runtime schema
-    validation: minimums, maximums, patterns, and similar constraints are included as documentation rather than validators.
+    This makes the implementation’s possible wire responses visible in its return type. Request schema validation is enabled
+    by default; response bodies are not automatically validated against their schemas at runtime.
+  </p>
+  <p>
+    Missing required inputs and schema violations return <a href="/problems/validation">HTTP 422 validation problems</a>.
+    Malformed input returns HTTP 400; size and media-type failures use HTTP 413 and 415.
+    See the <a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/docs/server-validation.md">validation configuration and response customization guide</a>
+    for limits and a tested response-middleware example.
   </p>
 
   <h2 id="sse">Generate SSE-ready Axum responses</h2>
