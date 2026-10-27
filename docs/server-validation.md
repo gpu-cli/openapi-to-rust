@@ -64,9 +64,53 @@ traversed, then sorted before the bounded response is returned.
 | 422 | `request_validation_failed` | A decoded value violates the OpenAPI schema |
 | 500 | `generated_contract_error` | Generated Rust types disagree with a schema that already accepted the value |
 
+The six type URIs resolve to human-readable documentation:
+
+- [Malformed request](https://openapi-to-rust.dev/problems/malformed-request)
+- [Malformed parameter](https://openapi-to-rust.dev/problems/malformed-parameter)
+- [Validation failure](https://openapi-to-rust.dev/problems/validation)
+- [Body too large](https://openapi-to-rust.dev/problems/request-body-too-large)
+- [Unsupported media type](https://openapi-to-rust.dev/problems/unsupported-media-type)
+- [Generated contract error](https://openapi-to-rust.dev/problems/generated-contract-error)
+
+These identifiers remain stable for previously generated servers. Clients do
+not need to fetch the documentation while processing a rejection.
+
 Generated clients preserve their operation-specific typed error and raw body.
 `ApiError::problem_details()` lazily decodes this profile only when the response
 declares `application/problem+json`.
+
+## Customizing responses
+
+Generated `ProblemDetails` and `InvalidParameter` fields are public, as is the
+`RequestValidationRejection.0` field. Generated handlers reject invalid requests
+before calling your API trait and immediately convert the rejection into an
+Axum response. Implementing your API trait therefore cannot intercept it, and
+the generated type already has an `IntoResponse` implementation.
+
+Attach Axum 0.8 response middleware to the generated router instead:
+
+```rust,ignore
+let app = build_router(api)
+    .layer(axum::middleware::map_response(customize_validation));
+```
+
+The [tested middleware example](examples/customize-validation.rs) reads bounded
+`application/problem+json` bodies, decodes the generated `ProblemDetails`, and
+replaces the project type URI prefix with `https://api.example.com/problems/`.
+Copy it into your application and adjust the `crate::generated` import to match
+your generated module. It preserves the HTTP status, other headers, and normal
+or streaming responses; malformed or unrelated JSON passes through unchanged.
+A problem body that exceeds the example's 64 KiB bound or fails to read becomes
+an empty HTTP 500 response. Choose an appropriate bound for your service.
+
+You can also change `title` or individual violations before serialization. For
+a custom JSON shape, serialize your own type instead and set the response
+Content-Type accordingly. Keep the status and body consistent, remove any stale
+Content-Length after rewriting, and preserve the sanitized error policy below.
+Custom profiles may no longer decode through generated clients'
+`problem_details()` helper. Serve documentation for any replacement type URIs
+you publish. There is currently no `problem_base_url` TOML option.
 
 ## Information disclosure and logging
 

@@ -1,0 +1,59 @@
+---
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import CodeBlock from "../../components/CodeBlock.astro";
+import { problems } from "../../data/problems";
+
+export function getStaticPaths() {
+  return problems.map((problem) => ({ params: { slug: problem.slug }, props: { problem } }));
+}
+
+const { problem } = Astro.props;
+const uri = `https://openapi-to-rust.dev/problems/${problem.slug}`;
+const example = JSON.stringify({
+  type: uri, title: problem.title, status: problem.status, code: problem.code,
+  ...(problem.slug === "validation" ? { errors: [{ code: "required", location: "/body/name", message: "is required" }] } : {}),
+  ...(problem.slug === "malformed-parameter" ? { errors: [{ code: "malformed", location: "/query/limit", message: "is malformed" }] } : {}),
+}, null, 2);
+---
+
+<DocsLayout
+  title={`${problem.slug === "generated-contract-error" ? "Generated contract error" : problem.title} | Axum Problem Details`}
+  description={problem.description}
+  h1={problem.title}
+  lead={problem.meaning}
+  canonicalPath={`/problems/${problem.slug}`}
+  updated="2026-10-27"
+>
+  <h2>Problem identity</h2>
+  <p>HTTP status: <strong>{problem.status}</strong>. Stable code: <code>{problem.code}</code>.</p>
+  <p>Type URI: <a href={uri}>{uri}</a>.</p>
+  <h2>How to respond</h2>
+  <p>{problem.action}</p>
+  <h2>Example response</h2>
+  <p>The response uses <code>application/problem+json</code>. This is an illustrative body; individual violations depend on the request.</p>
+  <CodeBlock label="Response body" language="json" code={example} />
+  <h2>Error fields</h2>
+  <p>
+    <code>type</code> identifies the problem category, <code>title</code> summarizes it,
+    <code>status</code> mirrors the HTTP status, and <code>code</code> is a stable machine-readable label.
+    The optional <code>errors</code> array contains sanitized <code>code</code>, <code>location</code>,
+    and <code>message</code> fields. Empty arrays are omitted.
+  </p>
+  <p>
+    Locations are JSON Pointers rooted at <code>/body</code>, <code>/path</code>, <code>/query</code>,
+    <code>/header</code>, or <code>/cookie</code>. Violations are deduplicated, capped (16 by default),
+    then sorted. Messages omit submitted values and internal diagnostics.
+  </p>
+  <p>
+    Clients can use the type URI as an identifier without fetching this page for every error.
+    See <a href="https://www.rfc-editor.org/rfc/rfc9457.html#section-3.1.1">RFC 9457, section 3.1.1</a>.
+  </p>
+  <h2>Related documentation</h2>
+  <ul>
+    {problems.filter((item) => item.slug !== problem.slug).map((item) => (
+      <li><a href={`/problems/${item.slug}`}>{item.title}</a> ({item.status})</li>
+    ))}
+    <li><a href="https://github.com/gpu-cli/openapi-to-rust/blob/main/docs/server-validation.md">Validation configuration and response customization</a></li>
+    <li><a href="/openapi-to-axum">Generated Axum servers</a></li>
+  </ul>
+</DocsLayout>
