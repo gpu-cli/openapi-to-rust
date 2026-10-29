@@ -12,6 +12,17 @@ when correcting output that was wrong or incomplete on the wire.
   so existing validation error links resolve (#109). Website builds now check
   that every emitted problem URI has a page. Document response middleware for
   customizing the existing public validation error profile.
+- An object schema whose `allOf` holds only `if`/`then`/`else` rules now
+  generates as its struct instead of `serde_json::Value`, so a discriminated
+  `oneOf` with it as a branch stays tagged (#111). Conditional-only members are
+  value rules and no longer shape the composed type, and an owner's own
+  `properties` are kept when its `allOf` has a single `$ref` or untyped member.
+- Error variants that wrap a source with `#[from]` no longer repeat it in their
+  message, so error-chain reporters print each cause once (#112). This covers
+  generated `HttpError::{Network, Middleware}` and `StreamingError::Json`, plus
+  this crate's `GeneratorError`, `HttpError`, and `server` edit errors. Use
+  `std::error::Error::source()` (or a chain reporter such as `anyhow`'s `{:#}`)
+  to show the cause; the CLI and playground now render the full chain.
 
 ## [0.23.0] - 2026-10-25
 

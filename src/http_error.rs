@@ -151,7 +151,7 @@ pub mod openapi_to_rust_problem {
 #[derive(Error, Debug)]
 pub enum HttpError {
     /// Network or connection error
-    #[error("Network error: {0}")]
+    #[error("Network error")]
     Network(#[from] reqwest::Error),
 
     /// Request serialization error

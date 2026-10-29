@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use openapi_to_rust::cli::load_spec;
+use openapi_to_rust::error::error_chain;
 use openapi_to_rust::server::{
     OperationIndex, Selector,
     edit::Editor as ServerEditor,
@@ -182,15 +183,16 @@ fn main() {
         Commands::Generate { json: true, .. } | Commands::Init { json: true, .. }
     );
     if let Err(e) = run(cli) {
+        let message = error_chain(e.as_ref());
         if machine_readable_error {
             println!(
                 "{}",
-                serde_json::json!({ "status": "error", "error": e.to_string() })
+                serde_json::json!({ "status": "error", "error": message })
             );
         } else {
             // Use Display, not Debug, so thiserror messages render with
             // fuzzy-match suggestions instead of raw enum debug output.
-            eprintln!("Error: {e}");
+            eprintln!("Error: {message}");
         }
         std::process::exit(1);
     }
@@ -209,7 +211,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(e) => {
                     eprintln!("❌ Configuration validation failed:");
-                    eprintln!("{}", e);
+                    eprintln!("{}", error_chain(&e));
                     std::process::exit(1);
                 }
             }

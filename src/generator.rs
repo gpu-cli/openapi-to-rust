@@ -1820,11 +1820,11 @@ impl CodeGenerator {
             #[derive(Error, Debug)]
             pub enum HttpError {
                 /// Network or connection error (from reqwest)
-                #[error("Network error: {0}")]
+                #[error("Network error")]
                 Network(#[from] reqwest::Error),
 
                 /// Middleware error (from reqwest-middleware)
-                #[error("Middleware error: {0}")]
+                #[error("Middleware error")]
                 Middleware(#[from] reqwest_middleware::Error),
 
                 /// Request serialization error
@@ -5484,7 +5484,7 @@ impl CodeGenerator {
                 Timeout(String),
                 #[error("Response body exceeded configured limit of {limit} bytes")]
                 ResponseTooLarge { limit: usize },
-                #[error("JSON serialization/deserialization error: {0}")]
+                #[error("JSON serialization/deserialization error")]
                 Json(#[from] serde_json::Error),
                 #[error("Request error: {0}")]
                 Request(reqwest::Error),
