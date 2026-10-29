@@ -1415,6 +1415,27 @@ fn schema_is_annotation_only(schema: &crate::openapi::Schema) -> bool {
         })
 }
 
+/// Whether an `allOf` member holds only `if`/`then`/`else` conditionals beside
+/// annotations. Such a member constrains values (for example "if `zone` is
+/// `utc`, `name` must end with `Z`") but never the wire shape, and generated
+/// code does not validate, so it contributes nothing to the composed type.
+fn schema_is_conditional_only(schema: &crate::openapi::Schema) -> bool {
+    serde_json::to_value(schema)
+        .ok()
+        .and_then(|value| value.as_object().cloned())
+        .is_some_and(|object| {
+            object
+                .keys()
+                .any(|key| matches!(key.as_str(), "if" | "then" | "else"))
+                && object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "if" | "then" | "else" | "default" | "nullable"
+                    ) || is_annotation_keyword(key)
+                })
+        })
+}
+
 fn is_annotation_keyword(key: &str) -> bool {
     matches!(
         key,
@@ -2437,15 +2458,32 @@ impl SchemaAnalyzer {
             return result;
         }
         // An allOf wrapper around one scalar/array carrier and neutral
-        // annotation siblings remains that non-object carrier. Other allOf
-        // shapes are object-like only when at least one meaningful member is.
-        if let Schema::AllOf { all_of, .. } = schema {
+        // annotation siblings remains that non-object carrier. An owner that
+        // declares `type: object` or its own properties is object-like itself.
+        // Other allOf shapes are object-like only when at least one meaningful
+        // (neither annotation- nor conditional-only) member is.
+        if let Schema::AllOf {
+            all_of,
+            schema_type,
+            details,
+        } = schema
+        {
             if Self::single_non_object_allof_carrier(all_of).is_some() {
                 return false;
             }
+            if matches!(schema_type, Some(OpenApiSchemaType::Object))
+                || details
+                    .properties
+                    .as_ref()
+                    .is_some_and(|properties| !properties.is_empty())
+            {
+                return true;
+            }
             return all_of
                 .iter()
-                .filter(|member| !schema_is_annotation_only(member))
+                .filter(|member| {
+                    !schema_is_annotation_only(member) && !schema_is_conditional_only(member)
+                })
                 .any(|member| self.branch_resolves_to_object_inner(member, visited_refs));
         }
         // A nested anyOf/oneOf can carry an object discriminator only when
@@ -4338,20 +4376,43 @@ impl SchemaAnalyzer {
         let without_restated = self.without_restated_unions(all_of_schemas);
         let all_of_schemas = without_restated.as_deref().unwrap_or(all_of_schemas);
 
-        // After deduplication, only an owner with no assertions beside allOf
-        // can collapse to a bare member. Otherwise keep the merge path, retaining
-        // the owner's object shape and fields.
-        let preserve_owner_shape = without_restated.is_some()
-            && !serde_json::to_value(owner_schema)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .is_some_and(|owner| {
-                    owner.keys().all(|key| {
-                        key == "allOf"
-                            || is_annotation_keyword(key)
-                            || matches!(key.as_str(), "default" | "nullable")
-                    })
+        // Conditional-only members are value rules, not shape. Leaving them in
+        // would make `allOf: [{if, then}]` look like a single untyped member
+        // and collapse the whole owner to `serde_json::Value`.
+        let without_conditionals =
+            all_of_schemas
+                .iter()
+                .any(schema_is_conditional_only)
+                .then(|| {
+                    all_of_schemas
+                        .iter()
+                        .filter(|member| !schema_is_conditional_only(member))
+                        .cloned()
+                        .collect::<Vec<_>>()
                 });
+        let all_of_schemas = without_conditionals.as_deref().unwrap_or(all_of_schemas);
+
+        // An owner that declares its own properties is an object no matter
+        // what its members are, so it must never collapse to a bare member.
+        // After deduplication, only an owner with no assertions beside allOf
+        // can collapse to a bare member. Otherwise keep the merge path,
+        // retaining the owner's object shape and fields.
+        let preserve_owner_shape = owner_schema
+            .details()
+            .properties
+            .as_ref()
+            .is_some_and(|properties| !properties.is_empty())
+            || (without_restated.is_some()
+                && !serde_json::to_value(owner_schema)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .is_some_and(|owner| {
+                        owner.keys().all(|key| {
+                            key == "allOf"
+                                || is_annotation_keyword(key)
+                                || matches!(key.as_str(), "default" | "nullable")
+                        })
+                    }));
 
         // A scalar/array carrier intersected only with annotation-only
         // siblings keeps its wire type. This is deliberately narrower than
@@ -4612,9 +4673,9 @@ impl SchemaAnalyzer {
     /// schemas, and multiple assertion-bearing members are intentionally not
     /// collapsed by this narrow recovery path.
     fn single_non_object_allof_carrier(all_of_schemas: &[Schema]) -> Option<&Schema> {
-        let mut meaningful = all_of_schemas
-            .iter()
-            .filter(|schema| !schema_is_annotation_only(schema));
+        let mut meaningful = all_of_schemas.iter().filter(|schema| {
+            !schema_is_annotation_only(schema) && !schema_is_conditional_only(schema)
+        });
         let carrier = meaningful.next()?;
         if meaningful.next().is_some() {
             return None;

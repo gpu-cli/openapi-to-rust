@@ -29,6 +29,40 @@ pub struct CreateTodoRequest {
     ///The todo item title
     pub title: String,
 }
+impl CreateTodoRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(title: String) -> Self {
+        Self { title, description: None }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(title: String) -> CreateTodoRequestBuilder {
+        CreateTodoRequestBuilder::new(title)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct CreateTodoRequestBuilder {
+    value: CreateTodoRequest,
+}
+impl CreateTodoRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(title: String) -> Self {
+        Self {
+            value: CreateTodoRequest::new(title),
+        }
+    }
+    #[doc = concat!("Set the optional `", "description", "` request field.")]
+    #[must_use]
+    pub fn description(mut self, description: String) -> Self {
+        self.value.description = Some(description);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> CreateTodoRequest {
+        self.value
+    }
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UpdateTodoRequest {
     ///Whether the todo is completed
@@ -38,4 +72,42 @@ pub struct UpdateTodoRequest {
     pub description: Option<String>,
     ///The todo item title
     pub title: String,
+}
+impl UpdateTodoRequest {
+    /// Construct this request with every required wire field.
+    pub fn new(completed: bool, title: String) -> Self {
+        Self {
+            completed,
+            title,
+            description: None,
+        }
+    }
+    /// Start a dependency-free builder with every required wire field.
+    pub fn builder(completed: bool, title: String) -> UpdateTodoRequestBuilder {
+        UpdateTodoRequestBuilder::new(completed, title)
+    }
+}
+/// Dependency-free builder for [`#struct_name`].
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct UpdateTodoRequestBuilder {
+    value: UpdateTodoRequest,
+}
+impl UpdateTodoRequestBuilder {
+    /// Start a builder with every required wire field.
+    pub fn new(completed: bool, title: String) -> Self {
+        Self {
+            value: UpdateTodoRequest::new(completed, title),
+        }
+    }
+    #[doc = concat!("Set the optional `", "description", "` request field.")]
+    #[must_use]
+    pub fn description(mut self, description: String) -> Self {
+        self.value.description = Some(description);
+        self
+    }
+    /// Finish building the request model.
+    pub fn build(self) -> UpdateTodoRequest {
+        self.value
+    }
 }

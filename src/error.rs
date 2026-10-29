@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum GeneratorError {
-    #[error("Failed to parse OpenAPI spec: {0}")]
+    #[error("Failed to parse OpenAPI spec")]
     ParseError(#[from] serde_json::Error),
 
     /// Document-level parse failure located to the node that failed. Serde's
@@ -24,7 +24,7 @@ pub enum GeneratorError {
     #[error("Code generation failed: {0}")]
     CodeGenError(String),
 
-    #[error("IO error: {0}")]
+    #[error("IO error")]
     IoError(#[from] std::io::Error),
 
     #[error("Invalid schema: {0}")]
@@ -49,4 +49,21 @@ impl GeneratorError {
             other => other,
         }
     }
+}
+
+/// Render an error and its `source()` chain as `outer: inner: ...`.
+///
+/// Error types in this crate (and the clients it generates) keep a wrapped
+/// source out of their own message, so chain-aware reporters do not print the
+/// cause twice. Callers that print only the outermost `Display` use this to
+/// keep the cause.
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }

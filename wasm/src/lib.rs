@@ -4,6 +4,7 @@
 //! `CodeGenerator::generate_all`) for the browser. No filesystem or network
 //! access — the page hands us a spec string, we hand back rendered files.
 
+use openapi_to_rust::error::error_chain;
 use openapi_to_rust::spec_source::{
     json_from_str_lossy, sanitize_source_provenance, validate_oas_document, yaml_to_json_value,
 };
@@ -73,10 +74,10 @@ pub fn generate(spec: &str, source_label: &str) -> Result<JsValue, JsError> {
     let crate_name = crate_name_from_spec(&value);
 
     let mut analyzer =
-        SchemaAnalyzer::new(value).map_err(|error| JsError::new(&error.to_string()))?;
+        SchemaAnalyzer::new(value).map_err(|error| JsError::new(&error_chain(&error)))?;
     let mut analysis = analyzer
         .analyze()
-        .map_err(|error| JsError::new(&error.to_string()))?;
+        .map_err(|error| JsError::new(&error_chain(&error)))?;
 
     // Mirror the CLI's `generate <SOURCE>` configuration so playground output
     // is byte-identical to a local run (modulo the source label).
@@ -91,7 +92,7 @@ pub fn generate(spec: &str, source_label: &str) -> Result<JsValue, JsError> {
         CodeGenerator::new(config).with_source_provenance(sanitize_source_provenance(source_label));
     let result = generator
         .generate_all(&mut analysis)
-        .map_err(|error| JsError::new(&error.to_string()))?;
+        .map_err(|error| JsError::new(&error_chain(&error)))?;
 
     let files: Vec<PlaygroundFile> = generator
         .output_artifacts(&result)

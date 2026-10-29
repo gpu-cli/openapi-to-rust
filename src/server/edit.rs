@@ -7,19 +7,19 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EditError {
-    #[error("failed to read {path}: {source}")]
+    #[error("failed to read {path}")]
     Read {
         path: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to write {path}: {source}")]
+    #[error("failed to write {path}")]
     Write {
         path: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("config is not valid TOML: {0}")]
+    #[error("config is not valid TOML")]
     Parse(#[from] toml_edit::TomlError),
     #[error("[server].operations exists but is not an array of strings — refusing to edit")]
     NotAnArray,
