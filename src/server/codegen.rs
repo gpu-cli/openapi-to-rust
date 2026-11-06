@@ -306,6 +306,14 @@ pub enum ServerCodegenError {
         status: String,
         media_types: String,
     },
+    #[error(
+        "cannot generate response for `{operation_id}` status `{status}`: header name `{name}` is not a valid HTTP field name"
+    )]
+    InvalidResponseHeaderName {
+        operation_id: String,
+        status: String,
+        name: String,
+    },
 }
 
 pub struct ServerCodegen<'a> {
@@ -799,6 +807,17 @@ impl<'a> ServerCodegen<'a> {
                     // Generation is viable whenever at least one buffered or SSE
                     // representation can be emitted; unsupported alternatives
                     // do not invalidate that supported path.
+                    if let Some(header) = response
+                        .headers
+                        .iter()
+                        .find(|header| !is_http_token(&header.name))
+                    {
+                        return Err(ServerCodegenError::InvalidResponseHeaderName {
+                            operation_id: operation.operation_id.clone(),
+                            status: status.clone(),
+                            name: header.name.clone(),
+                        });
+                    }
                     if response.has_content
                         && response.body.is_none()
                         && response.schema_name.is_none()
@@ -3315,6 +3334,7 @@ impl<'a> ServerCodegen<'a> {
                             has_content: true,
                             unsupported_media_types: Vec::new(),
                             representations: BTreeMap::new(),
+                            headers: Vec::new(),
                         },
                     )
                 })
@@ -3322,12 +3342,26 @@ impl<'a> ServerCodegen<'a> {
             &fallback_responses
         };
 
+        let mut header_structs: Vec<TokenStream> = Vec::new();
         for (status, response) in responses {
             let base_name = status_variant_name(status);
             let variant = format_ident!("{}", base_name);
             let runtime_status = response_uses_runtime_status(status);
             let status_expr = status_token(status);
             let status_guard = runtime_status_guard(status, quote! { status });
+
+            // Declared response headers ride along as the variant's last
+            // field. Responses without any keep their exact previous shape:
+            // the three pieces below are then empty token streams.
+            let headers_plan = response_headers_plan(op, enum_ident, &base_name, status, response);
+            let (headers_field, headers_binding, apply_headers) = match &headers_plan {
+                Some(plan) => {
+                    header_structs.push(plan.definition.clone());
+                    let ty = &plan.ty;
+                    (quote! { , #ty }, quote! { , headers }, plan.apply.clone())
+                }
+                None => (quote! {}, quote! {}, quote! {}),
+            };
 
             let buffered_body = response.body.clone().or_else(|| {
                 response
@@ -3369,10 +3403,10 @@ impl<'a> ServerCodegen<'a> {
                 if wildcard {
                     if runtime_status {
                         variants.push(quote! {
-                            #variant(StatusCode, ::axum::http::HeaderValue, #body_ty)
+                            #variant(StatusCode, ::axum::http::HeaderValue, #body_ty #headers_field)
                         });
                         arms.push(quote! {
-                            Self::#variant(status, content_type, body) => {
+                            Self::#variant(status, content_type, body #headers_binding) => {
                                 if !(#status_guard) {
                                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                                 }
@@ -3381,28 +3415,30 @@ impl<'a> ServerCodegen<'a> {
                                     ::axum::http::header::CONTENT_TYPE,
                                     content_type,
                                 );
+                                #apply_headers
                                 response
                             }
                         });
                     } else {
                         variants.push(quote! {
-                            #variant(::axum::http::HeaderValue, #body_ty)
+                            #variant(::axum::http::HeaderValue, #body_ty #headers_field)
                         });
                         arms.push(quote! {
-                            Self::#variant(content_type, body) => {
+                            Self::#variant(content_type, body #headers_binding) => {
                                 let mut response = (#status_expr, #response_body).into_response();
                                 response.headers_mut().insert(
                                     ::axum::http::header::CONTENT_TYPE,
                                     content_type,
                                 );
+                                #apply_headers
                                 response
                             }
                         });
                     }
                 } else if runtime_status {
-                    variants.push(quote! { #variant(StatusCode, #body_ty) });
+                    variants.push(quote! { #variant(StatusCode, #body_ty #headers_field) });
                     arms.push(quote! {
-                        Self::#variant(status, body) => {
+                        Self::#variant(status, body #headers_binding) => {
                             if !(#status_guard) {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             }
@@ -3414,13 +3450,14 @@ impl<'a> ServerCodegen<'a> {
                                 ::axum::http::header::CONTENT_TYPE,
                                 content_type,
                             );
+                            #apply_headers
                             response
                         }
                     });
                 } else {
-                    variants.push(quote! { #variant(#body_ty) });
+                    variants.push(quote! { #variant(#body_ty #headers_field) });
                     arms.push(quote! {
-                        Self::#variant(body) => {
+                        Self::#variant(body #headers_binding) => {
                             let mut response = (#status_expr, #response_body).into_response();
                             let Ok(content_type) = ::axum::http::HeaderValue::from_bytes(#media_type.as_bytes()) else {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -3429,12 +3466,37 @@ impl<'a> ServerCodegen<'a> {
                                 ::axum::http::header::CONTENT_TYPE,
                                 content_type,
                             );
+                            #apply_headers
                             response
                         }
                     });
                 }
             } else if !response.has_content {
-                if runtime_status {
+                if let Some(plan) = &headers_plan {
+                    let ty = &plan.ty;
+                    if runtime_status {
+                        variants.push(quote! { #variant(StatusCode, #ty) });
+                        arms.push(quote! {
+                            Self::#variant(status, headers) => {
+                                if !(#status_guard) {
+                                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                                }
+                                let mut response = status.into_response();
+                                #apply_headers
+                                response
+                            }
+                        });
+                    } else {
+                        variants.push(quote! { #variant(#ty) });
+                        arms.push(quote! {
+                            Self::#variant(headers) => {
+                                let mut response = #status_expr.into_response();
+                                #apply_headers
+                                response
+                            }
+                        });
+                    }
+                } else if runtime_status {
                     variants.push(quote! { #variant(StatusCode) });
                     arms.push(quote! {
                         Self::#variant(status) => {
@@ -3459,26 +3521,28 @@ impl<'a> ServerCodegen<'a> {
                 let stream_variant = format_ident!("{}Stream", base_name);
                 if runtime_status {
                     variants.push(quote! {
-                        #stream_variant(StatusCode, ::axum::response::sse::Sse<ServerEventStream>)
+                        #stream_variant(StatusCode, ::axum::response::sse::Sse<ServerEventStream> #headers_field)
                     });
                     arms.push(quote! {
-                        Self::#stream_variant(status, sse) => {
+                        Self::#stream_variant(status, sse #headers_binding) => {
                             if !(#status_guard) {
                                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                             }
                             let mut response = sse.into_response();
                             *response.status_mut() = status;
+                            #apply_headers
                             response
                         }
                     });
                 } else {
                     variants.push(quote! {
-                        #stream_variant(::axum::response::sse::Sse<ServerEventStream>)
+                        #stream_variant(::axum::response::sse::Sse<ServerEventStream> #headers_field)
                     });
                     arms.push(quote! {
-                        Self::#stream_variant(sse) => {
+                        Self::#stream_variant(sse #headers_binding) => {
                             let mut response = sse.into_response();
                             *response.status_mut() = #status_expr;
+                            #apply_headers
                             response
                         }
                     });
@@ -3502,6 +3566,8 @@ impl<'a> ServerCodegen<'a> {
         );
 
         quote! {
+            #(#header_structs)*
+
             #[doc = #doc]
             pub enum #enum_ident {
                 #(#variants),*
@@ -3516,6 +3582,119 @@ impl<'a> ServerCodegen<'a> {
             }
         }
     }
+}
+
+/// Generated pieces for one response's declared headers.
+struct ResponseHeadersPlan {
+    /// `{Enum}{Variant}Headers`, the variant's trailing field type.
+    ty: syn::Ident,
+    /// The struct definition.
+    definition: TokenStream,
+    /// Statements appending `headers`' values to `response` (both locals in
+    /// the generated `into_response` arm). Invalid values yield a 500.
+    apply: TokenStream,
+}
+
+/// Plan the headers struct for a response, or `None` when it declares none.
+///
+/// Values are strings already serialized for the wire (OpenAPI `simple`
+/// style). Optional headers are `Option<String>`; `multiple` headers are
+/// `Vec<String>` with one header line per item, which is the only valid
+/// encoding of `Set-Cookie`.
+fn response_headers_plan(
+    op: &OperationInfo,
+    enum_ident: &syn::Ident,
+    base_name: &str,
+    status: &str,
+    response: &OperationResponse,
+) -> Option<ResponseHeadersPlan> {
+    if response.headers.is_empty() {
+        return None;
+    }
+    let ty = format_ident!("{}{}Headers", enum_ident, base_name);
+    let mut used = std::collections::HashSet::new();
+    let mut fields = Vec::new();
+    let mut apply = Vec::new();
+    for header in &response.headers {
+        let mut field_name = header_field_name(&header.name);
+        let base = field_name.clone();
+        let mut suffix = 2;
+        while !used.insert(field_name.clone()) {
+            field_name = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        let field = format_ident!("{}", field_name);
+        let wire = header.name.to_ascii_lowercase();
+        let name = quote! { ::axum::http::HeaderName::from_static(#wire) };
+        let mut docs: Vec<String> = header
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map(|description| {
+                description
+                    .lines()
+                    .map(|line| format!(" {line}"))
+                    .chain([String::new()])
+                    .collect()
+            })
+            .unwrap_or_default();
+        docs.push(format!(" `{}` response header.", header.name));
+        let append_value = quote! {
+            match ::axum::http::HeaderValue::try_from(value) {
+                Ok(value) => {
+                    response.headers_mut().append(#name, value);
+                }
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        };
+        if header.multiple {
+            fields.push(quote! { #(#[doc = #docs])* pub #field: ::std::vec::Vec<String> });
+            apply.push(quote! { for value in headers.#field { #append_value } });
+        } else if header.required {
+            fields.push(quote! { #(#[doc = #docs])* pub #field: String });
+            apply.push(quote! { { let value = headers.#field; #append_value } });
+        } else {
+            fields.push(quote! { #(#[doc = #docs])* pub #field: ::std::option::Option<String> });
+            apply.push(quote! { if let Some(value) = headers.#field { #append_value } });
+        }
+    }
+    let doc = format!(
+        " Headers of the `{status}` response for `{} {}` (operationId `{}`).",
+        op.method, op.path, op.operation_id
+    );
+    Some(ResponseHeadersPlan {
+        definition: quote! {
+            #[doc = #doc]
+            #[derive(Debug, Clone, Default, PartialEq, Eq)]
+            pub struct #ty {
+                #(#fields),*
+            }
+        },
+        ty,
+        apply: quote! { #(#apply)* },
+    })
+}
+
+/// A Rust field name for a header: snake case, never a keyword, never
+/// starting with a digit.
+fn header_field_name(header: &str) -> String {
+    let mut name = header.to_snake_case();
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+        name = format!("header_{name}");
+    }
+    if syn::parse_str::<syn::Ident>(&name).is_err() {
+        name.push('_');
+    }
+    name
+}
+
+/// RFC 9110 `token`: the grammar of an HTTP field name.
+fn is_http_token(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
 fn parameter_location(location: &str, name: &str) -> String {

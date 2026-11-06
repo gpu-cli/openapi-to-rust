@@ -2261,14 +2261,17 @@ impl CodeGenerator {
         for parameter in cookie_params {
             let ident = Self::to_field_ident(&self.operation_param_ident(op, parameter));
             let wire_name = parameter.name.as_str();
+            // String cookies are `impl AsRef<str>` (not `Display`), like
+            // header parameters above.
+            let as_str = Self::param_uses_as_ref_str(parameter).then(|| quote! { .as_ref() });
             if parameter.required {
                 emit.push(quote! {
-                    __cookie_fields.push(format!("{}={}", #wire_name, #ident));
+                    __cookie_fields.push(format!("{}={}", #wire_name, #ident #as_str));
                 });
             } else {
                 emit.push(quote! {
                     if let Some(value) = #ident {
-                        __cookie_fields.push(format!("{}={}", #wire_name, value));
+                        __cookie_fields.push(format!("{}={}", #wire_name, value #as_str));
                     }
                 });
             }

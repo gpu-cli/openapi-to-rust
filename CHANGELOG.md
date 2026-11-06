@@ -6,8 +6,23 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Generated Axum servers emit the response headers a Response Object
+  declares. A response with `headers` gets a `{Enum}{Variant}Headers` struct
+  as its variant's last field (`String` when required, `Option<String>`
+  otherwise, `Vec<String>` for `array` schemas and always for `Set-Cookie`,
+  one header line per value), and `into_response` appends them; an invalid
+  value yields a 500. Header `$ref`s to `#/components/headers` resolve, a
+  declared `Content-Type` is ignored as the specification requires, and
+  header names that are not HTTP tokens fail generation. Responses without
+  declared headers generate exactly as before.
+
 ### Fixed
 
+- Generated clients format string cookie parameters through `.as_ref()`;
+  they are `impl AsRef<str>`, which is not `Display`, so any operation with
+  a string cookie parameter previously failed to compile.
 - Publish documentation at all six generated Axum Problem Details type URIs
   so existing validation error links resolve (#109). Website builds now check
   that every emitted problem URI has a page. Document response middleware for
