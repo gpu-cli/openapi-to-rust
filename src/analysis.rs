@@ -595,6 +595,25 @@ pub struct OperationResponse {
     pub unsupported_media_types: Vec<String>,
     /// Every supported representation, keyed by exact declared media type.
     pub representations: BTreeMap<String, OperationRepresentation>,
+    /// Headers the Response Object declares, sorted by name. `Content-Type`
+    /// is excluded: the body representation owns it, and the OpenAPI
+    /// specification says a `Content-Type` response header is ignored.
+    pub headers: Vec<OperationResponseHeader>,
+}
+
+/// One header declared by a Response Object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct OperationResponseHeader {
+    /// Header name exactly as declared.
+    pub name: String,
+    /// Header Object `description`, for generated docs.
+    pub description: Option<String>,
+    /// Header Object `required`.
+    pub required: bool,
+    /// Whether the header carries a list of values, each sent as its own
+    /// header line. True for `array` schemas, and always for `Set-Cookie`,
+    /// which RFC 9110 section 5.3 forbids combining into one line.
+    pub multiple: bool,
 }
 
 /// Stable identity of an operation in the effective OpenAPI document.
@@ -8293,6 +8312,7 @@ impl SchemaAnalyzer {
                         .content
                         .as_ref()
                         .is_some_and(|content| !content.is_empty()),
+                    headers: self.response_headers(&response)?,
                     ..Default::default()
                 };
                 if let Some((media_type, schema)) = response.json_content() {
@@ -8716,6 +8736,85 @@ impl SchemaAnalyzer {
             })?;
         }
         Ok(current)
+    }
+
+    /// Resolve a Header Object `$ref` chain to the local Header Object it
+    /// names, with the same pointer rules as [`Self::resolve_response`].
+    fn resolve_header(&self, header: &crate::openapi::Header) -> Result<crate::openapi::Header> {
+        let mut current = header.clone();
+        let mut visited = HashSet::new();
+        while let Some(reference) = current.reference.clone() {
+            if !visited.insert(reference.clone()) {
+                return Err(GeneratorError::CircularDependency(format!(
+                    "header reference {reference}"
+                )));
+            }
+            let pointer = reference.strip_prefix('#').ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "external header reference `{reference}` is not supported"
+                ))
+            })?;
+            let value = self.openapi_spec.pointer(pointer).ok_or_else(|| {
+                GeneratorError::UnresolvedReference(format!(
+                    "header reference `{reference}` does not exist"
+                ))
+            })?;
+            current = serde_json::from_value(value.clone()).map_err(|error| {
+                GeneratorError::InvalidSchema(format!(
+                    "header reference `{reference}` is not a valid OpenAPI Header Object: {error}"
+                ))
+            })?;
+        }
+        Ok(current)
+    }
+
+    /// The headers a resolved Response Object declares, sorted by name.
+    fn response_headers(
+        &self,
+        response: &crate::openapi::Response,
+    ) -> Result<Vec<OperationResponseHeader>> {
+        let Some(headers) = &response.headers else {
+            return Ok(Vec::new());
+        };
+        let mut declared = Vec::with_capacity(headers.len());
+        for (name, header) in headers {
+            if name.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            let header = self.resolve_header(header)?;
+            let multiple = name.eq_ignore_ascii_case("set-cookie")
+                || header
+                    .schema
+                    .as_ref()
+                    .is_some_and(|schema| self.header_schema_is_array(schema));
+            declared.push(OperationResponseHeader {
+                name: name.clone(),
+                description: header.description.clone(),
+                required: header.required.unwrap_or(false),
+                multiple,
+            });
+        }
+        Ok(declared)
+    }
+
+    /// Whether a header schema (following one local `$ref`) is an array.
+    fn header_schema_is_array(&self, schema: &crate::openapi::Schema) -> bool {
+        let Ok(mut value) = serde_json::to_value(schema) else {
+            return false;
+        };
+        if let Some(target) = value
+            .get("$ref")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|reference| reference.strip_prefix('#'))
+            .and_then(|pointer| self.openapi_spec.pointer(pointer))
+        {
+            value = target.clone();
+        }
+        match value.get("type") {
+            Some(serde_json::Value::String(ty)) => ty == "array",
+            Some(serde_json::Value::Array(types)) => types.iter().any(|ty| ty == "array"),
+            _ => false,
+        }
     }
 
     /// Generate a type name for an inline response schema.
