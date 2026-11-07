@@ -16,7 +16,8 @@ when correcting output that was wrong or incomplete on the wire.
   value yields a 500. Header `$ref`s to `#/components/headers` resolve, a
   declared `Content-Type` is ignored as the specification requires, and
   header names that are not HTTP tokens fail generation. Responses without
-  declared headers generate exactly as before.
+  declared headers generate exactly as before. Header struct names receive a
+  numeric suffix when needed to avoid model and other generated type names.
 
 ### Fixed
 

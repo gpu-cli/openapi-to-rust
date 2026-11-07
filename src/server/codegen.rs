@@ -844,9 +844,8 @@ impl<'a> ServerCodegen<'a> {
         CodeGenerator::to_field_ident(&generator.param_ident_str(parameter))
     }
 
-    /// Allocate public response-enum identifiers without colliding with the
-    /// retained models that the generated server modules glob-import.
-    fn allocate_response_enum_names(&self, ops: &[&OperationInfo]) -> BTreeMap<String, syn::Ident> {
+    /// Names already occupied by models and parameter enums in server modules.
+    fn server_type_names(&self, ops: &[&OperationInfo]) -> std::collections::BTreeSet<String> {
         let generator = CodeGenerator::new(self.config.clone());
         let mut used_names: std::collections::BTreeSet<String> = self
             .analysis
@@ -864,6 +863,13 @@ impl<'a> ServerCodegen<'a> {
                 .filter(|parameter| parameter.enum_values.is_some())
                 .map(|parameter| parameter.rust_type.clone()),
         );
+        used_names
+    }
+
+    /// Allocate public response-enum identifiers without colliding with the
+    /// retained models that the generated server modules glob-import.
+    fn allocate_response_enum_names(&self, ops: &[&OperationInfo]) -> BTreeMap<String, syn::Ident> {
+        let mut used_names = self.server_type_names(ops);
 
         // Selector ordering is user-controlled. Allocate in operation-id order
         // so reversing selectors cannot change generated public identifiers.
@@ -887,6 +893,52 @@ impl<'a> ServerCodegen<'a> {
                 candidate
             };
             names.insert(operation.operation_id.clone(), format_ident!("{chosen}"));
+        }
+        names
+    }
+
+    /// Reserve header structs against every model, parameter enum, response
+    /// enum, and previously allocated header struct. Allocate in operation-id
+    /// order so selector order cannot change public names.
+    fn allocate_response_header_names(
+        &self,
+        ops: &[&OperationInfo],
+        response_enum_names: &BTreeMap<String, syn::Ident>,
+    ) -> BTreeMap<(String, String), syn::Ident> {
+        let mut used_names = self.server_type_names(ops);
+        used_names.extend(response_enum_names.values().map(ToString::to_string));
+        let mut sorted_ops = ops.to_vec();
+        sorted_ops.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+
+        let mut names = BTreeMap::new();
+        for operation in sorted_ops {
+            let Some(responses) = self
+                .analysis
+                .operation_responses
+                .get(&operation.operation_id)
+            else {
+                continue;
+            };
+            for (status, response) in responses {
+                if response.headers.is_empty() {
+                    continue;
+                }
+                let preferred = format!(
+                    "{}{}Headers",
+                    response_enum_names[&operation.operation_id],
+                    status_variant_name(status),
+                );
+                let mut candidate = preferred.clone();
+                let mut suffix = 2;
+                while !used_names.insert(candidate.clone()) {
+                    candidate = format!("{preferred}{suffix}");
+                    suffix += 1;
+                }
+                names.insert(
+                    (operation.operation_id.clone(), status.clone()),
+                    format_ident!("{candidate}"),
+                );
+            }
         }
         names
     }
@@ -3174,9 +3226,10 @@ impl<'a> ServerCodegen<'a> {
     ) -> TokenStream {
         let provenance_attribute = self.provenance_attribute();
         let any_streaming = ops.iter().any(|op| op.supports_streaming);
+        let response_header_names = self.allocate_response_header_names(ops, response_enum_names);
         let enums: Vec<TokenStream> = ops
             .iter()
-            .map(|op| self.emit_response_enum(op, response_enum_names))
+            .map(|op| self.emit_response_enum(op, response_enum_names, &response_header_names))
             .collect();
         let problem_types = validation_enabled.then(|| {
             quote! {
@@ -3299,6 +3352,7 @@ impl<'a> ServerCodegen<'a> {
         &self,
         op: &OperationInfo,
         response_enum_names: &BTreeMap<String, syn::Ident>,
+        response_header_names: &BTreeMap<(String, String), syn::Ident>,
     ) -> TokenStream {
         let enum_ident = &response_enum_names[&op.operation_id];
         let mut variants: Vec<TokenStream> = Vec::new();
@@ -3353,7 +3407,12 @@ impl<'a> ServerCodegen<'a> {
             // Declared response headers ride along as the variant's last
             // field. Responses without any keep their exact previous shape:
             // the three pieces below are then empty token streams.
-            let headers_plan = response_headers_plan(op, enum_ident, &base_name, status, response);
+            let headers_plan = response_headers_plan(
+                op,
+                response_header_names.get(&(op.operation_id.clone(), status.clone())),
+                status,
+                response,
+            );
             let (headers_field, headers_binding, apply_headers) = match &headers_plan {
                 Some(plan) => {
                     header_structs.push(plan.definition.clone());
@@ -3603,15 +3662,11 @@ struct ResponseHeadersPlan {
 /// encoding of `Set-Cookie`.
 fn response_headers_plan(
     op: &OperationInfo,
-    enum_ident: &syn::Ident,
-    base_name: &str,
+    ty: Option<&syn::Ident>,
     status: &str,
     response: &OperationResponse,
 ) -> Option<ResponseHeadersPlan> {
-    if response.headers.is_empty() {
-        return None;
-    }
-    let ty = format_ident!("{}{}Headers", enum_ident, base_name);
+    let ty = ty?.clone();
     let mut used = std::collections::HashSet::new();
     let mut fields = Vec::new();
     let mut apply = Vec::new();

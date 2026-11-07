@@ -137,12 +137,85 @@ fn invalid_header_names_are_rejected() {
 
 #[test]
 fn generated_variants_carry_and_emit_declared_headers() {
+    assert_generated_headers(headers_spec(), "Account", "LoginResponseOkHeaders");
+}
+
+#[test]
+fn response_headers_avoid_model_names_and_roundtrip() {
+    // Both the preferred name and the first fallback belong to retained models.
+    let mut spec: serde_json::Value = serde_json::from_str(
+        &headers_spec()
+            .to_string()
+            .replace("Account", "LoginResponseOkHeaders"),
+    )
+    .unwrap();
+    spec["components"]["schemas"]["LoginResponseOkHeaders"]["properties"]["nested"] =
+        json!({ "$ref": "#/components/schemas/LoginResponseOkHeaders2" });
+    spec["components"]["schemas"]["LoginResponseOkHeaders2"] =
+        json!({ "type": "object", "properties": { "value": { "type": "string" } } });
+    assert_generated_headers(spec, "LoginResponseOkHeaders", "LoginResponseOkHeaders3");
+}
+
+#[test]
+fn response_header_names_avoid_parameter_enums_and_are_stable_across_selectors() {
+    let mut spec = headers_spec();
+    spec["paths"]["/login"]["post"]["parameters"] = json!([{
+        "name": "responseOkHeaders", "in": "query",
+        "schema": { "type": "string", "enum": ["a", "b"] }
+    }]);
+    let temp = tempfile::TempDir::new().unwrap();
+    let mut outputs = Vec::new();
+    for operations in [["login", "plain"], ["plain", "login"]] {
+        let mut analysis = SchemaAnalyzer::new(spec.clone())
+            .unwrap()
+            .analyze()
+            .unwrap();
+        let generator = CodeGenerator::new(GeneratorConfig {
+            output_dir: temp.path().join("generated"),
+            module_name: "headers".into(),
+            enable_async_client: false,
+            server: Some(ServerSection {
+                framework: "axum".into(),
+                operations: operations.map(String::from).to_vec(),
+                prune_models: true,
+                validation: ServerValidationSection::default(),
+            }),
+            ..Default::default()
+        });
+        let result = generator.generate_all(&mut analysis).unwrap();
+        let errors = &result
+            .files
+            .iter()
+            .find(|file| file.path == std::path::Path::new("server/errors.rs"))
+            .unwrap()
+            .content;
+        assert!(
+            errors.contains("pub struct LoginResponseOkHeaders2"),
+            "{errors}"
+        );
+        // Declaration order follows selectors; public names and fields must not.
+        let declarations: std::collections::BTreeMap<_, _> = syn::parse_file(errors)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| {
+                let name = match &item {
+                    syn::Item::Struct(item) => item.ident.to_string(),
+                    syn::Item::Enum(item) => item.ident.to_string(),
+                    _ => return None,
+                };
+                Some((name, quote::quote!(#item).to_string()))
+            })
+            .collect();
+        outputs.push(declarations);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+}
+
+fn assert_generated_headers(spec: serde_json::Value, model: &str, ok_headers: &str) {
     let temp = tempfile::TempDir::new().unwrap();
     let output_dir = temp.path().join("src/generated");
-    let mut analysis = SchemaAnalyzer::new(headers_spec())
-        .unwrap()
-        .analyze()
-        .unwrap();
+    let mut analysis = SchemaAnalyzer::new(spec).unwrap().analyze().unwrap();
     let generator = CodeGenerator::new(GeneratorConfig {
         output_dir: output_dir.clone(),
         module_name: "headers".into(),
@@ -168,7 +241,7 @@ fn generated_variants_carry_and_emit_declared_headers() {
 #[cfg(test)]
 mod tests {
     use super::generated::server::*;
-    use super::generated::types::Account;
+    use super::generated::types::__BODY_MODEL__;
     use axum::{http::{header, StatusCode}, response::IntoResponse};
 
     fn values(response: &axum::response::Response, name: header::HeaderName) -> Vec<String> {
@@ -183,8 +256,8 @@ mod tests {
     #[test]
     fn declared_headers_are_emitted() {
         let response = LoginResponse::Ok(
-            Account::default(),
-            LoginResponseOkHeaders {
+            __BODY_MODEL__::default(),
+            __OK_HEADERS__ {
                 set_cookie: vec![
                     "session=abc; HttpOnly; Secure".to_owned(),
                     "theme=dark, light".to_owned(),
@@ -211,7 +284,7 @@ mod tests {
 
         let limited = LoginResponse::ClientError(
             StatusCode::TOO_MANY_REQUESTS,
-            Account::default(),
+            __BODY_MODEL__::default(),
             LoginResponseClientErrorHeaders { retry_after: Some("30".to_owned()) },
         )
         .into_response();
@@ -219,7 +292,7 @@ mod tests {
         assert_eq!(limited.headers()[header::RETRY_AFTER], "30");
         let unset = LoginResponse::ClientError(
             StatusCode::BAD_REQUEST,
-            Account::default(),
+            __BODY_MODEL__::default(),
             LoginResponseClientErrorHeaders::default(),
         )
         .into_response();
@@ -227,7 +300,7 @@ mod tests {
 
         // Responses without declared headers keep their previous shape.
         assert_eq!(
-            PlainResponse::Ok(Account::default()).into_response().status(),
+            PlainResponse::Ok(__BODY_MODEL__::default()).into_response().status(),
             StatusCode::OK,
         );
     }
@@ -235,8 +308,8 @@ mod tests {
     #[test]
     fn invalid_header_values_fail_closed() {
         let response = LoginResponse::Ok(
-            Account::default(),
-            LoginResponseOkHeaders {
+            __BODY_MODEL__::default(),
+            __OK_HEADERS__ {
                 set_cookie: Vec::new(),
                 x_request_id: "line\nbreak".to_owned(),
             },
@@ -244,8 +317,53 @@ mod tests {
         .into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
+
+    #[derive(Clone)]
+    struct Api;
+
+    #[async_trait::async_trait]
+    impl AuthApi for Api {
+        async fn login(&self) -> LoginResponse {
+            LoginResponse::Ok(
+                __BODY_MODEL__::default(),
+                __OK_HEADERS__ {
+                    set_cookie: vec!["session=abc; HttpOnly".into(), "theme=dark".into()],
+                    x_request_id: "wire-1".into(),
+                },
+            )
+        }
+
+        async fn plain(&self) -> PlainResponse {
+            PlainResponse::Ok(__BODY_MODEL__::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn headers_and_model_body_reach_http_client() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, auth_api_router(Api)).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let response = client.post(format!("http://{address}/login")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()["x-request-id"], "wire-1");
+        let cookies: Vec<_> = response.headers().get_all(header::SET_COOKIE)
+            .iter().map(|value| value.to_str().unwrap()).collect();
+        assert_eq!(cookies, ["session=abc; HttpOnly", "theme=dark"]);
+        let _: __BODY_MODEL__ = response.json().await.unwrap();
+        let response = client.get(format!("http://{address}/plain")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let _: __BODY_MODEL__ = response.json().await.unwrap();
+        server.abort();
+    }
 }
-"#,
+"#
+        .replace("__BODY_MODEL__", model)
+        .replace("__OK_HEADERS__", ok_headers),
     )
     .unwrap();
     std::fs::write(
@@ -262,6 +380,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
 serde_urlencoded = "0.7"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 "#,
     )
     .unwrap();
