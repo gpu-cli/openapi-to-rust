@@ -174,6 +174,8 @@ pub struct GeneratorConfig {
     pub types: crate::type_mapping::TypeMappingConfig,
     /// Additive operation-builder generation policy.
     pub builders: crate::config::BuildersSection,
+    /// Generate extensible object models with construction methods.
+    pub non_exhaustive_models: bool,
     /// Additional derives for models and HTTP parameter enums.
     pub derives: crate::derives::DerivesConfig,
     /// Opt-in server codegen scope. `None` ⇒ emit no server code.
@@ -209,6 +211,7 @@ impl Default for GeneratorConfig {
             registry_only: false,
             types: crate::type_mapping::TypeMappingConfig::default(),
             builders: crate::config::BuildersSection::default(),
+            non_exhaustive_models: false,
             derives: crate::derives::DerivesConfig::default(),
             server: None,
             client: None,
@@ -3019,16 +3022,74 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        // Existing request builders already supply `new`. Other object models
+        // need a constructor when the attribute prevents external literals.
+        let constructor =
+            if self.config.non_exhaustive_models && !can_derive_default && builder.is_empty() {
+                let required_fields: Vec<_> = emitted_properties
+                    .iter()
+                    .filter(|property| property.is_required)
+                    .collect();
+                let required_parameters = required_fields.iter().map(|property| {
+                    let ident = &property.ident;
+                    let field_type = &property.field_type;
+                    quote! { #ident: #field_type }
+                });
+                let required_idents = required_fields.iter().map(|property| &property.ident);
+                let optional_initializers = emitted_properties
+                    .iter()
+                    .filter(|property| !property.is_required)
+                    .map(|property| {
+                        let ident = &property.ident;
+                        quote! { #ident: None }
+                    });
+                let additional_initializer = additional_properties.is_open().then(
+                    || quote! { additional_properties: ::std::collections::BTreeMap::new(), },
+                );
+                let variant_parameter =
+                    variant
+                        .zip(variant_field_ident.as_ref())
+                        .map(|(variant, ident)| {
+                            let ty = format_ident!("{}", self.to_rust_type_name(&variant.target));
+                            quote! { #ident: #ty, }
+                        });
+                let variant_initializer =
+                    variant_field_ident.as_ref().map(|ident| quote! { #ident, });
+                quote! {
+                    impl #struct_name {
+                        /// Construct this model with every required field.
+                        #[allow(clippy::too_many_arguments)]
+                        pub fn new(#(#required_parameters,)* #variant_parameter) -> Self {
+                            Self {
+                                #(#required_idents,)*
+                                #(#optional_initializers,)*
+                                #additional_initializer
+                                #variant_initializer
+                            }
+                        }
+                    }
+                }
+            } else {
+                TokenStream::new()
+            };
+
+        let non_exhaustive = self
+            .config
+            .non_exhaustive_models
+            .then(|| quote! { #[non_exhaustive] });
+
         Ok(quote! {
             #doc_comment
             #derives
             #deny_unknown_fields
+            #non_exhaustive
             pub struct #struct_name {
                 #(#fields)*
             }
 
             #shared_variant_serde
             #builder
+            #constructor
         })
     }
 

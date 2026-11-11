@@ -782,6 +782,26 @@ binary    = "string"        # default: "bytes"
 
 The CLI also supports `--types-conservative`, which collapses every typed scalar to `String`/`i64`/etc. Use it when you want zero optional-crate dependencies.
 
+### Extensible object models
+
+To allow adding optional object fields without breaking downstream struct
+construction or exhaustive field patterns, enable:
+
+```toml
+[generator]
+non_exhaustive_models = true
+```
+
+Direct CLI generation also accepts `--non-exhaustive-models`. Generated
+object structs are marked `#[non_exhaustive]`; construct models with required
+fields or a flattened union using `Model::new(...)`, and use `Default` for
+ordinary models with no required fields. Existing request builders remain available. Optional
+fields can be assigned after construction. Matching a model must use `..`.
+Enabling this option changes the Rust API for existing generated clients, but
+does not alter their serialized form. It does not make other schema changes
+compatible: required fields, field types, enum variants, operation signatures,
+and naming collisions may still change the Rust or wire API.
+
 ### `[generator.builders]` — additive operation builders
 
 Operation builders are opt-in methods on the generated `HttpClient` in

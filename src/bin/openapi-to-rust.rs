@@ -48,6 +48,9 @@ enum Commands {
         /// the TOML config.
         #[arg(long)]
         types_conservative: bool,
+        /// Generate non-exhaustive object models with constructors.
+        #[arg(long)]
+        non_exhaustive_models: bool,
         /// Apply an Overlay 1.1 file; repeat for ordered overlays after configured overlays.
         #[arg(long = "overlay")]
         overlays: Vec<PathBuf>,
@@ -223,6 +226,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             module_name,
             types_only,
             types_conservative,
+            non_exhaustive_models,
             overlays,
             effective_spec,
             bindings_metadata,
@@ -238,6 +242,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             module_name,
             types_only,
             types_conservative,
+            non_exhaustive_models,
             overlays,
             effective_spec,
             bindings_metadata,
@@ -301,6 +306,7 @@ struct GenerateArgs {
     module_name: Option<String>,
     types_only: bool,
     types_conservative: bool,
+    non_exhaustive_models: bool,
     overlays: Vec<PathBuf>,
     effective_spec: Option<PathBuf>,
     bindings_metadata: Option<String>,
@@ -432,6 +438,9 @@ fn run_generate(args: GenerateArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
     if args.types_conservative {
         generator_config.types = openapi_to_rust::TypeMappingConfig::conservative();
+    }
+    if args.non_exhaustive_models {
+        generator_config.non_exhaustive_models = true;
     }
 
     generator_config.overlays.extend(args.overlays);

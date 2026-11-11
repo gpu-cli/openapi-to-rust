@@ -321,6 +321,7 @@ fn demonstrate_rust_api(
         registry_only: false,
         types: openapi_to_rust::TypeMappingConfig::default(),
         builders: openapi_to_rust::config::BuildersSection::default(),
+        non_exhaustive_models: false,
         server: None,
         client: None,
     };
