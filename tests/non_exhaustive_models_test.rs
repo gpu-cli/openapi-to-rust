@@ -13,6 +13,9 @@ fn spec(add_optional: bool) -> Value {
         "components":{"schemas":{
             "CreateItem":{"type":"object","additionalProperties":false,"required":["nested"],"properties":{"nested":{"$ref":"#/components/schemas/Nested"}}},
             "Nested":{"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string"}}},
+            "EmptyBase":{"type":"object","additionalProperties":false},
+            "EmptyOther":{"type":"object","additionalProperties":false},
+            "EmptyCombined":{"allOf":[{"$ref":"#/components/schemas/EmptyBase"},{"$ref":"#/components/schemas/EmptyOther"}]},
             "Options":{"type":"object","additionalProperties":false,"properties":{"label":{"type":"string"}}},
             "SourceField": {
                 "type":"object", "properties":{"name":{"type":"string"}}, "required":["name"],
@@ -25,7 +28,7 @@ fn spec(add_optional: bool) -> Value {
         }}
     });
     if add_optional {
-        for name in ["CreateItem", "Nested", "Options"] {
+        for name in ["CreateItem", "Nested", "Options", "EmptyBase"] {
             spec["components"]["schemas"][name]["properties"]["added"] = json!({"type":"string"});
         }
     }
@@ -122,8 +125,10 @@ serde_json = "1"
     )
     .unwrap();
     std::fs::write(dir.path().join("src/lib.rs"), "pub mod generated;\n").unwrap();
-    let main = r#"use model_evolution::generated::{CreateItem, Nested, Options, SourceField};
+    let main = r#"use model_evolution::generated::{CreateItem, Nested, Options, SourceField, EmptyCombined};
 fn main() {
+    let combined = EmptyCombined::default();
+    assert_eq!(serde_json::to_value(combined).unwrap(), serde_json::json!({}));
     let nested = Nested::new("example".to_owned());
     let Nested { name, .. } = nested.clone();
     assert_eq!(name, "example");
@@ -139,7 +144,7 @@ fn main() {
     std::fs::write(dir.path().join("src/main.rs"), main).unwrap();
     for added in [false, true] {
         let types = generate(spec(added), true, &dir.path().join("src/generated"));
-        assert!(types.contains("#[non_exhaustive]"));
+        assert!(types.contains("#[non_exhaustive]\npub struct EmptyCombined"));
         let output = Command::new("cargo")
             .args(["run", "--quiet", "--offline"])
             .current_dir(dir.path())

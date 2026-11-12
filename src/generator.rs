@@ -2298,7 +2298,7 @@ impl CodeGenerator {
                 })
             }
             SchemaType::Composition { schemas } => {
-                self.generate_composition_struct(schema, schemas)
+                self.generate_composition_struct(schema, schemas, analysis)
             }
         }
     }
@@ -5197,6 +5197,7 @@ impl CodeGenerator {
         &self,
         schema: &crate::analysis::AnalyzedSchema,
         schemas: &[crate::analysis::SchemaRef],
+        analysis: &SchemaAnalysis,
     ) -> Result<TokenStream> {
         let struct_name = format_ident!("{}", self.to_rust_type_name(&schema.name));
 
@@ -5221,6 +5222,36 @@ impl CodeGenerator {
             TokenStream::new()
         };
 
+        // Empty object intersections may gain optional fields and become a
+        // regular Object on regeneration. Keep Default available across that
+        // transition, without inventing values for required member data.
+        let extensible = self.config.non_exhaustive_models;
+        let can_derive_default = extensible
+            && schemas.iter().all(|member| {
+                Self::model_has_default(&member.target, analysis, &mut Default::default())
+            });
+        let default_derive = can_derive_default.then(|| quote! { #[derive(Default)] });
+        let non_exhaustive = extensible.then(|| quote! { #[non_exhaustive] });
+        let constructor = if extensible && !can_derive_default {
+            let names: Vec<_> = (0..schemas.len())
+                .map(|i| format_ident!("part_{}", i))
+                .collect();
+            let types = schemas
+                .iter()
+                .map(|member| format_ident!("{}", self.to_rust_type_name(&member.target)));
+            quote! {
+                impl #struct_name {
+                    /// Construct this model with every composed member.
+                    #[allow(clippy::too_many_arguments)]
+                    pub fn new(#(#names: #types),*) -> Self {
+                        Self { #(#names),* }
+                    }
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
+
         // Generate derives with optional Specta support
         let derives = if self.config.enable_specta {
             quote! {
@@ -5236,10 +5267,41 @@ impl CodeGenerator {
         Ok(quote! {
             #doc_comment
             #derives
+            #default_derive
+            #non_exhaustive
             pub struct #struct_name {
                 #(#fields)*
             }
+            #constructor
         })
+    }
+
+    fn model_has_default(
+        name: &str,
+        analysis: &SchemaAnalysis,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if !visiting.insert(name.to_owned()) {
+            return false;
+        }
+        let has_default =
+            analysis
+                .schemas
+                .get(name)
+                .is_some_and(|schema| match &schema.schema_type {
+                    crate::analysis::SchemaType::Object {
+                        required, variant, ..
+                    } => required.is_empty() && variant.is_none(),
+                    crate::analysis::SchemaType::Reference { target } => {
+                        Self::model_has_default(target, analysis, visiting)
+                    }
+                    crate::analysis::SchemaType::Composition { schemas } => schemas
+                        .iter()
+                        .all(|member| Self::model_has_default(&member.target, analysis, visiting)),
+                    _ => false,
+                });
+        visiting.remove(name);
+        has_default
     }
 
     fn union_declared_properties(
