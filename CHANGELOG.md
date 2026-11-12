@@ -6,6 +6,8 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-11
+
 ### Added
 
 - Opt-in `generator.non_exhaustive_models` and `--non-exhaustive-models`
