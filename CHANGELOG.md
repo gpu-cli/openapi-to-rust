@@ -8,6 +8,12 @@ when correcting output that was wrong or incomplete on the wire.
 
 ### Added
 
+- Opt-in `generator.non_exhaustive_models` and `--non-exhaustive-models`
+  make generated object structs extensible. Models with required fields get
+  constructors, including nested, required-only and flattened-union models;
+  ordinary all-optional models and empty object compositions retain `Default`.
+  Existing output is unchanged
+  when disabled.
 - Generated Axum servers emit the response headers a Response Object
   declares. A response with `headers` gets a `{Enum}{Variant}Headers` struct
   as its variant's last field (`String` when required, `Option<String>`

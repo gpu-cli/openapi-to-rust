@@ -229,6 +229,9 @@ pub struct GeneratorSection {
     /// Additive operation-builder generation policy.
     #[serde(default)]
     pub builders: BuildersSection,
+    /// Make generated object models non-exhaustive and provide constructors.
+    #[serde(default)]
+    pub non_exhaustive_models: bool,
     /// Additional derives for models and HTTP parameter enums.
     #[serde(default)]
     pub derives: crate::derives::DerivesConfig,
@@ -511,6 +514,8 @@ struct GeneratorSectionWire {
     #[serde(default)]
     builders: BuildersSection,
     #[serde(default)]
+    non_exhaustive_models: bool,
+    #[serde(default)]
     derives: crate::derives::DerivesConfig,
     #[serde(default)]
     types: Option<crate::type_mapping::TypeMappingConfig>,
@@ -545,6 +550,7 @@ impl TryFrom<ConfigFileWire> for ConfigFile {
                 effective_spec: wire.generator.effective_spec,
                 bindings_metadata: wire.generator.bindings_metadata,
                 builders: wire.generator.builders,
+                non_exhaustive_models: wire.generator.non_exhaustive_models,
                 derives: wire.generator.derives,
             },
             features: wire.features,
@@ -600,6 +606,7 @@ struct GeneratorSectionRef<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     bindings_metadata: Option<&'a str>,
     builders: &'a BuildersSection,
+    non_exhaustive_models: bool,
     derives: &'a crate::derives::DerivesConfig,
     types: &'a crate::type_mapping::TypeMappingConfig,
 }
@@ -619,6 +626,7 @@ impl Serialize for ConfigFile {
                 effective_spec: self.generator.effective_spec.as_deref(),
                 bindings_metadata: self.generator.bindings_metadata.as_deref(),
                 builders: &self.generator.builders,
+                non_exhaustive_models: self.generator.non_exhaustive_models,
                 derives: &self.generator.derives,
                 types: &self.types,
             },
@@ -1049,6 +1057,7 @@ impl ConfigFile {
             registry_only: self.features.registry_only,
             types,
             builders: self.generator.builders,
+            non_exhaustive_models: self.generator.non_exhaustive_models,
             derives: self.generator.derives,
             server: self.server,
             client: self.client,

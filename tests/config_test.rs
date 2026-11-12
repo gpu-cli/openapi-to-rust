@@ -492,6 +492,7 @@ fn generator_section_retains_standalone_serde_compatibility() {
         effective_spec: None,
         bindings_metadata: None,
         builders: BuildersSection::default(),
+        non_exhaustive_models: false,
         derives: Default::default(),
     };
 
