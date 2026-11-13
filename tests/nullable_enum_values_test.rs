@@ -22,6 +22,7 @@ fn spec(version: &str) -> Value {
         "components": {"schemas": {
             "State": status,
             "OnlyNull": null_only,
+            "ImpossibleStatus": {"type": "string", "enum": [null]},
             "Item": {
                 "type": "object",
                 "required": ["status", "referenced", "items", "literal", "null_only", "null_ref", "null_items"],
@@ -59,6 +60,11 @@ mod regression {
     use super::*;
     #[test]
     fn null_and_string_null_are_distinct() {
+        // An explicit non-nullable string type intersected with enum: [null]
+        // admits no values. It must compile without inventing a string value.
+        for wire in [serde_json::json!(null), serde_json::json!("null"), serde_json::json!("active")] {
+            assert!(serde_json::from_value::<ImpossibleStatus>(wire).is_err());
+        }
         for status in [serde_json::json!(null), serde_json::json!("active"), serde_json::json!("archived")] {
             let wire = serde_json::json!({
                 "status": status, "referenced": status,

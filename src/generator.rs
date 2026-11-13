@@ -2577,6 +2577,14 @@ impl CodeGenerator {
         let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _, _)| {
             quote! { Self::#variant_ident => #value, }
         });
+        // An enum may have no non-null values even though its explicit string
+        // type excludes null. Keep that impossible type uninhabited, and match
+        // its value rather than its reference (references are inhabited).
+        let as_str_value = if values.is_empty() {
+            quote! { *self }
+        } else {
+            quote! { self }
+        };
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -2612,7 +2620,7 @@ impl CodeGenerator {
 
             impl #enum_name {
                 pub fn as_str(&self) -> &'static str {
-                    match self {
+                    match #as_str_value {
                         #(#as_str_arms)*
                     }
                 }
