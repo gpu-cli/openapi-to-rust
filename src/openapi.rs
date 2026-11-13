@@ -845,6 +845,13 @@ impl Schema {
             || self.details().is_nullable()
             || self.type_array_contains_null()
             || match self {
+                // With no explicit type constraint, an enum can itself admit
+                // null. An explicit `type: string` still excludes it unless
+                // nullable is set; enum membership alone cannot widen type.
+                Schema::Untyped { details } => details.enum_values.as_ref().is_some_and(|values| {
+                    // Null-only enums already use the unit carrier `()`.
+                    values.iter().any(Value::is_null) && values.iter().any(|v| !v.is_null())
+                }),
                 // A nullable branch also admits null even when the union has
                 // no separate null-only branch (common in OpenAPI 3.0).
                 Schema::AnyOf { any_of, .. } => any_of
@@ -1011,19 +1018,25 @@ impl Schema {
     /// `{type: object, nullable: true}` remain real alternatives even beside
     /// a `$ref`.
     pub(crate) fn is_explicit_null_only(&self) -> bool {
+        let null_enum = self
+            .details()
+            .enum_values
+            .as_ref()
+            .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_null));
         match self {
-            Schema::Typed { schema_type, .. } => *schema_type == SchemaType::Null,
+            Schema::Typed {
+                schema_type,
+                details,
+            } => *schema_type == SchemaType::Null || (null_enum && details.is_nullable()),
             Schema::TypedMulti { schema_types, .. } => {
-                !schema_types.is_empty()
-                    && schema_types
-                        .iter()
-                        .all(|schema_type| *schema_type == SchemaType::Null)
+                (null_enum && self.is_nullable_any())
+                    || (!schema_types.is_empty()
+                        && schema_types
+                            .iter()
+                            .all(|schema_type| *schema_type == SchemaType::Null))
             }
             Schema::Untyped { details } => {
-                details.const_value.as_ref().is_some_and(Value::is_null)
-                    || details.enum_values.as_ref().is_some_and(
-                        |values| matches!(values.as_slice(), [value] if value.is_null()),
-                    )
+                details.const_value.as_ref().is_some_and(Value::is_null) || null_enum
             }
             _ => false,
         }
@@ -1143,11 +1156,13 @@ impl SchemaDetails {
             return Some(
                 values
                     .iter()
+                    // JSON null is represented by the containing Option, not
+                    // by a string variant. The literal string "null" stays.
+                    .filter(|v| !v.is_null())
                     .map(|v| match v {
                         Value::String(s) => s.clone(),
                         Value::Number(n) => n.to_string(),
                         Value::Bool(b) => b.to_string(),
-                        Value::Null => "null".to_string(),
                         _ => v.to_string(),
                     })
                     .collect(),

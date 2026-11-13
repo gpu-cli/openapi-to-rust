@@ -102,6 +102,7 @@ spec_path = "spec.json"
 output_dir = "generated"
 module_name = "api"
 [generator.derives]
+models = ["PartialEq"]
 string_enums = ["PartialOrd", "Ord"]
 [generator.derives.types]
 DayOfWeek = ["Hash"]
@@ -116,6 +117,7 @@ enable_async_client = false
     assert_eq!(reparsed.generator.derives, loaded.generator.derives);
     let config = loaded.into_generator_config();
     assert_eq!(config.derives.types["DayOfWeek"], ["Hash"]);
+    assert_eq!(config.derives.models, ["PartialEq"]);
     let mut analysis = SchemaAnalyzer::new(spec()).unwrap().analyze().unwrap();
     let generated = CodeGenerator::new(config).generate(&mut analysis).unwrap();
     assert!(attributes(&generated, "DayOfWeek").contains("PartialOrd , Ord , Hash"));
@@ -134,6 +136,7 @@ spec_path = "spec.json"
 output_dir = "generated"
 module_name = "api"
 [generator.derives]
+models = ["PartialEq"]
 string_enums = ["PartialOrd", "Ord"]
 [features]
 enable_async_client = false
@@ -219,6 +222,80 @@ fn group_applies_to_string_enums_and_leaves_unions_structs_and_helpers_alone() {
     ] {
         assert!(!attributes(&source, name).contains("Ord"), "{name}");
     }
+}
+
+#[test]
+fn model_group_covers_models_and_combines_without_duplicate_derives() {
+    let derives = DerivesConfig {
+        models: vec!["PartialEq".into()],
+        string_enums: vec!["PartialEq".into(), "Hash".into()],
+        types: BTreeMap::from([("Packet".into(), vec!["PartialEq".into()])]),
+    };
+    let source = types(derives.clone()).unwrap();
+    for name in [
+        "Packet",
+        "Coordinates",
+        "ObjectUnion",
+        "CountOrText",
+        "MixedValue",
+        "ExclusiveValue",
+        "DayOfWeek",
+        "OpenLabel",
+        "PacketStatus",
+    ] {
+        assert_eq!(
+            attributes(&source, name).matches("PartialEq").count(),
+            1,
+            "{name}"
+        );
+    }
+    assert!(attributes(&source, "DayOfWeek").contains("Hash"));
+    assert!(!attributes(&source, "Packet").contains("Hash"));
+
+    let analysis = SchemaAnalyzer::new(spec()).unwrap().analyze().unwrap();
+    let name = &analysis.operations["listDays"].parameters[0].rust_type;
+    let client = CodeGenerator::new(config(DerivesConfig {
+        models: vec!["Ord".into()],
+        ..Default::default()
+    }))
+    .generate_http_client(&analysis)
+    .unwrap();
+    assert!(!attributes(&client, name).contains("Ord"));
+}
+
+#[test]
+fn model_group_validates_paths_and_protects_manual_implementations() {
+    let error = types(DerivesConfig {
+        models: vec!["PartialEq, Eq".into()],
+        ..Default::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("generator.derives.models"), "{error}");
+    assert!(
+        toml::from_str::<ConfigFile>(
+            r#"
+[generator]
+spec_path = "spec.json"
+output_dir = "generated"
+module_name = "api"
+[generator.derives]
+models = ["PartialEq, Eq"]
+[features]
+"#
+        )
+        .is_err()
+    );
+    let error = types(DerivesConfig {
+        models: vec!["Serialize".into()],
+        ..Default::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("already implements that trait manually"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -395,6 +472,7 @@ fn generated_derives_compile_and_preserve_map_order_and_wire_round_trips() {
             .map(String::from)
             .into(),
     );
+    derives.models = vec!["PartialEq".into()];
     derives.string_enums = ["PartialOrd", "Ord", "Hash", "custom_derives::Marker"]
         .map(String::from)
         .into();
@@ -478,6 +556,10 @@ fn main() {
         let wire = serde_json::to_string(label).unwrap();
         assert_eq!(&serde_json::from_str::<OpenLabel>(&wire).unwrap(), label);
     }
+    fn comparable<T: PartialEq>() {}
+    comparable::<Packet>();
+    comparable::<ObjectUnion>();
+    comparable::<ExclusiveValue>();
     ordered_key::<Coordinates>();
     ordered_key::<CountOrText>();
     ordered_key::<PacketStatus>();
