@@ -6,6 +6,21 @@ when correcting output that was wrong or incomplete on the wire.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `generator.derives.models` adds derives to all generated model structs
+  and enums, including inline models and payload unions (#120).
+
+### Fixed
+
+- Nullable string enums no longer turn JSON null entries into a `NullValue`
+  string variant. Literal `"null"` strings remain supported, and enum names and
+  descriptions stay aligned when null entries are removed. Empty string enums
+  remain uninhabited and generate compilable string-conversion methods (#119).
+- Request builder documentation names its model instead of emitting a template
+  placeholder. Builder setters and undiscriminated `oneOf` deserializers no
+  longer trigger default `double_must_use` and `collapsible_if` Clippy lints (#121).
+
 ## [0.24.0] - 2026-11-11
 
 ### Added

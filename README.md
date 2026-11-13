@@ -626,6 +626,7 @@ Add traits to generated types without editing the generated files:
 
 ```toml
 [generator.derives]
+models = ["PartialEq"]
 string_enums = ["PartialOrd", "Ord"]
 
 [generator.derives.types]
@@ -633,12 +634,18 @@ DayOfWeek = ["Hash"]
 Coordinates = ["PartialEq", "Eq", "PartialOrd", "Ord", "Hash"]
 ```
 
+`models` adds derives to every generated model struct and enum, including inline
+models, string enums, and payload unions. It skips type aliases, runtime helpers,
+builders, and HTTP parameter enums. This lets a derive such as `PartialEq` cover
+an entire model graph without listing each type.
+
 `string_enums` covers closed and extensible string enums, including inline
 property/array-item enums and HTTP parameter enums. Per-type entries use the exact
 emitted Rust name: a schema called `day-of-week` is selected as `DayOfWeek`.
 They also support model structs and payload enums. Group and per-type additions
 combine with existing derives; duplicate standard traits are emitted once.
-Both settings default to empty, preserving existing generated output.
+All three settings default to empty, preserving existing generated output.
+They combine in `models`, `string_enums`, then `types` order.
 
 Derived enum ordering follows variant declaration order, preserving the order of
 values in the spec. Extensible enums place `Custom(String)` after known variants

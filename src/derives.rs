@@ -14,6 +14,9 @@ use syn::{Attribute, Item, Meta, Path, Token, parse::Parser, punctuated::Punctua
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DerivesConfig {
+    /// Applies to every generated model struct and enum, including inline
+    /// models and payload unions. Excludes aliases, helpers and HTTP parameters.
+    pub models: Vec<String>,
     /// Applies to closed/extensible string enums, including hoisted inline
     /// enums and HTTP parameter enums. Payload unions are not string enums.
     pub string_enums: Vec<String>,
@@ -26,6 +29,7 @@ pub struct DerivesConfig {
 #[derive(Clone, Copy)]
 pub(crate) enum DeriveTarget {
     StringEnum,
+    ParameterEnum,
     Model,
     Alias,
 }
@@ -88,17 +92,20 @@ fn collect_derives(meta: &Meta, existing: &mut BTreeSet<String>) -> syn::Result<
 
 impl DerivesConfig {
     pub(crate) fn is_empty(&self) -> bool {
-        self.string_enums.is_empty() && self.types.is_empty()
+        self.models.is_empty() && self.string_enums.is_empty() && self.types.is_empty()
     }
 
     pub(crate) fn validate_paths(&self) -> Result<()> {
-        for (scope, values) in std::iter::once(("string_enums".to_string(), &self.string_enums))
-            .chain(
-                self.types
-                    .iter()
-                    .map(|(name, values)| (format!("types.{name}"), values)),
-            )
-        {
+        for (scope, values) in [
+            ("models".to_string(), &self.models),
+            ("string_enums".to_string(), &self.string_enums),
+        ]
+        .into_iter()
+        .chain(
+            self.types
+                .iter()
+                .map(|(name, values)| (format!("types.{name}"), values)),
+        ) {
             for value in values {
                 parse_path(value)
                     .map_err(|error| validation(format!("generator.derives.{scope}: {error}")))?;
@@ -141,10 +148,16 @@ impl DerivesConfig {
                 continue;
             };
             let requested = self.types.get(&name).into_iter().flatten();
-            let grouped = self
-                .string_enums
+            let grouped = self.string_enums.iter().filter(|_| {
+                matches!(
+                    target,
+                    DeriveTarget::StringEnum | DeriveTarget::ParameterEnum
+                )
+            });
+            let models = self
+                .models
                 .iter()
-                .filter(|_| matches!(target, DeriveTarget::StringEnum));
+                .filter(|_| matches!(target, DeriveTarget::Model | DeriveTarget::StringEnum));
             let mut existing = BTreeSet::new();
             for attr in attrs.iter() {
                 collect_derives(&attr.meta, &mut existing).map_err(|error| {
@@ -154,7 +167,7 @@ impl DerivesConfig {
                 })?;
             }
             let mut additions = Vec::new();
-            for value in grouped.chain(requested) {
+            for value in models.chain(grouped).chain(requested) {
                 let path = parse_path(value)?;
                 let key = identity(&path);
                 if manual
@@ -210,7 +223,7 @@ impl CodeGenerator {
             .iter()
             .flat_map(|operation| &operation.parameters)
             .filter(|parameter| parameter.enum_values.is_some())
-            .map(|parameter| (parameter.rust_type.clone(), DeriveTarget::StringEnum))
+            .map(|parameter| (parameter.rust_type.clone(), DeriveTarget::ParameterEnum))
             .collect()
     }
 

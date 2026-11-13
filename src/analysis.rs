@@ -21,9 +21,29 @@ fn extract_enum_extensions(
 
     let read_string_array = |key: &str| -> Option<Vec<String>> {
         let arr = obj.get(key)?.as_array()?;
+        // Extensions are indexed by the original enum, including JSON null.
+        // Remove the same positions as string_enum_values, after validating
+        // the original length so malformed metadata cannot shift variants.
+        let null_enum = obj.get("enum").and_then(Value::as_array).filter(|values| {
+            values.iter().any(Value::is_null)
+                && values.iter().filter(|v| !v.is_null()).count() == enum_value_count
+        });
+        if let Some(values) = null_enum {
+            if arr.len() != values.len() {
+                eprintln!(
+                    "⚠️  {schema_name}: dropping {key} (expected {} entries, got {})",
+                    values.len(),
+                    arr.len()
+                );
+                return None;
+            }
+        }
         let mut out = Vec::with_capacity(arr.len());
-        for v in arr {
-            out.push(v.as_str()?.to_string());
+        for (index, v) in arr.iter().enumerate() {
+            let text = v.as_str()?;
+            if !null_enum.is_some_and(|values| values[index].is_null()) {
+                out.push(text.to_string());
+            }
         }
         Some(out)
     };
@@ -3151,6 +3171,10 @@ impl SchemaAnalyzer {
         let mut dependencies = HashSet::new();
 
         let schema_type = match schema {
+            _ if schema.is_explicit_null_only() => SchemaType::Primitive {
+                rust_type: self.type_mapper.null_unit().rust_type,
+                serde_with: None,
+            },
             // `true` admits every value; `false` admits none. Neither leaves
             // anything to generate a type from.
             Schema::Bool(accepts_anything) => self.untyped_value(
@@ -3950,6 +3974,12 @@ impl SchemaAnalyzer {
         property_name: Option<&str>,
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
+        if schema.is_explicit_null_only() {
+            return Ok(SchemaType::Primitive {
+                rust_type: self.type_mapper.null_unit().rust_type,
+                serde_with: None,
+            });
+        }
         // `true` admits every value; `false` admits none.
         if let Schema::Bool(accepts_anything) = schema {
             let reason = if *accepts_anything {
@@ -7003,6 +7033,10 @@ impl SchemaAnalyzer {
         dependencies: &mut HashSet<String>,
     ) -> Result<SchemaType> {
         let item_type = match items_schema {
+            _ if items_schema.is_explicit_null_only() => SchemaType::Primitive {
+                rust_type: self.type_mapper.null_unit().rust_type,
+                serde_with: None,
+            },
             Schema::Bool(accepts_anything) => self.untyped_value(
                 self.untyped_context(""),
                 if *accepts_anything {
@@ -9129,17 +9163,16 @@ impl SchemaAnalyzer {
                                 // schema-level enums do. A mismatched length is
                                 // ambiguous about which value each name refers
                                 // to, so drop it rather than guess.
-                                enum_varnames = details
-                                    .extra
-                                    .get("x-enum-varnames")
-                                    .and_then(Value::as_array)
-                                    .map(|raw| {
-                                        raw.iter()
-                                            .filter_map(Value::as_str)
-                                            .map(str::to_owned)
-                                            .collect::<Vec<_>>()
-                                    })
-                                    .filter(|names| names.len() == values.len());
+                                enum_varnames = extract_enum_extensions(
+                                    &serde_json::json!({
+                                        "enum": details.enum_values,
+                                        "x-enum-varnames": details.extra.get("x-enum-varnames"),
+                                    }),
+                                    values.len(),
+                                    &rust_type,
+                                )
+                                .map(|ext| ext.varnames)
+                                .filter(|names| !names.is_empty());
                                 enum_values = Some(values);
                             }
                         }

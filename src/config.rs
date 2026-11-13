@@ -68,6 +68,7 @@
 //!
 //! ```toml
 //! [generator.derives]
+//! models = ["PartialEq"]
 //! string_enums = ["PartialOrd", "Ord"]
 //!
 //! [generator.derives.types]

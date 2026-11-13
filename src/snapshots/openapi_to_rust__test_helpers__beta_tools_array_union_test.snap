@@ -130,6 +130,7 @@ impl<'de> Deserialize<'de> for BetaCreateMessageParamsToolsItemUnion {
         let mut matched = None;
         let mut equivalent = None;
         let mut equivalent_matches = 0usize;
+        #[allow(clippy::collapsible_if)]
         if input
             .as_object()
             .is_some_and(|object| {
@@ -173,6 +174,7 @@ impl<'de> Deserialize<'de> for BetaCreateMessageParamsToolsItemUnion {
                 }
             }
         }
+        #[allow(clippy::collapsible_if)]
         if input
             .as_object()
             .is_some_and(|object| {

@@ -79,6 +79,19 @@ fn parameter_enum_honors_x_enum_varnames() {
     );
 }
 
+#[test]
+fn nullable_parameter_enum_keeps_names_aligned_after_removing_null() {
+    let result = generate_client(spec_with_param_enum(json!({
+        "nullable": true,
+        "enum": ["gpu-1x-a100", null, "gpu-8x-h100"],
+        "x-enum-varnames": ["SingleA100", "Missing", "OctoH100"]
+    })));
+    assert!(result.contains("SingleA100"));
+    assert!(result.contains("OctoH100"));
+    assert!(!result.contains("Missing"));
+    assert!(!result.contains("NullValue"));
+}
+
 /// Without the extension the heuristic still applies — pre-existing behavior
 /// that must not change.
 #[test]

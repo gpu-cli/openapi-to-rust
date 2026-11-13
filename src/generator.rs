@@ -2577,6 +2577,14 @@ impl CodeGenerator {
         let as_str_arms = variant_pairs.iter().map(|(variant_ident, value, _, _)| {
             quote! { Self::#variant_ident => #value, }
         });
+        // An enum may have no non-null values even though its explicit string
+        // type excludes null. Keep that impossible type uninhabited, and match
+        // its value rather than its reference (references are inhabited).
+        let as_str_value = if values.is_empty() {
+            quote! { *self }
+        } else {
+            quote! { self }
+        };
 
         let doc_comment = if let Some(desc) = &schema.description {
             quote! { #[doc = #desc] }
@@ -2612,7 +2620,7 @@ impl CodeGenerator {
 
             impl #enum_name {
                 pub fn as_str(&self) -> &'static str {
-                    match self {
+                    match #as_str_value {
                         #(#as_str_arms)*
                     }
                 }
@@ -3285,21 +3293,18 @@ impl CodeGenerator {
 
                     quote! {
                         #[doc = concat!("Set the optional nullable `", #wire_name, "` request field to a value.")]
-                        #[must_use]
                         pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
                             self.value.#field_ident = Some(Some(#field_ident));
                             self
                         }
 
                         #[doc = concat!("Set the optional nullable `", #wire_name, "` request field to JSON null.")]
-                        #[must_use]
                         pub fn #null_ident(mut self) -> Self {
                             self.value.#field_ident = Some(None);
                             self
                         }
 
                         #[doc = concat!("Omit the optional nullable `", #wire_name, "` request field.")]
-                        #[must_use]
                         pub fn #absent_ident(mut self) -> Self {
                             self.value.#field_ident = None;
                             self
@@ -3308,7 +3313,6 @@ impl CodeGenerator {
                 } else {
                     quote! {
                         #[doc = concat!("Set the optional `", #wire_name, "` request field.")]
-                        #[must_use]
                         pub fn #setter_ident(mut self, #field_ident: #field_type) -> Self {
                             self.value.#field_ident = Some(#field_ident);
                             self
@@ -3323,7 +3327,6 @@ impl CodeGenerator {
             | crate::analysis::ObjectAdditionalProperties::Closed => TokenStream::new(),
             crate::analysis::ObjectAdditionalProperties::Untyped => quote! {
                 /// Replace the request's additional properties.
-                #[must_use]
                 pub fn additional_properties(
                     mut self,
                     additional_properties: ::std::collections::BTreeMap<
@@ -3339,7 +3342,6 @@ impl CodeGenerator {
                 let value_type = self.generate_array_item_type(value_type, analysis);
                 quote! {
                     /// Replace the request's additional properties.
-                    #[must_use]
                     pub fn additional_properties(
                         mut self,
                         additional_properties: ::std::collections::BTreeMap<
@@ -3354,6 +3356,7 @@ impl CodeGenerator {
             }
         };
 
+        let builder_doc = format!("Dependency-free builder for [`{struct_name}`].");
         quote! {
             impl #struct_name {
                 /// Construct this request with every required wire field.
@@ -3371,7 +3374,7 @@ impl CodeGenerator {
                 }
             }
 
-            /// Dependency-free builder for [`#struct_name`].
+            #[doc = #builder_doc]
             #[derive(Debug, Clone)]
             #[must_use]
             pub struct #builder_name {
@@ -3995,6 +3998,9 @@ impl CodeGenerator {
                             }
                         };
                         quote! {
+                            // Keep the constraint guard separate for consumers on
+                            // editions that do not support let-chains.
+                            #[allow(clippy::collapsible_if)]
                             if #constraints_match {
                                 if let Ok(candidate) =
                                     serde_json::from_value::<#variant_type>(input.clone())
